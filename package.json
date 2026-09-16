@@ -1,0 +1,27 @@
+{
+  "name": "base-arb-bot",
+  "version": "0.1.0",
+  "description": "Cross-DEX atomic arbitrage bot for Base with paper-trading mode and an on-chain MEV market feed (arbitrage classifier, competitor leaderboard, daily report).",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "discover": "node dist/main.js discover",
+    "scan": "node dist/main.js scan",
+    "report": "node dist/main.js report",
+    "check": "node dist/main.js check",
+    "test": "node --test test/math.test.js test/e2e.test.js test/executor.test.js"
+  },
+  "dependencies": {
+    "ethers": "^6.11.1",
+    "ws": "^8.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.4.2"
+  }
+}
