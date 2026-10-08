@@ -260,7 +260,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .status { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; color: var(--ink-2); }
 .status svg { margin-top: 3px; flex: none; }
 .envline { display: flex; gap: 8px; align-items: center; justify-content: space-between; background: var(--well); border-radius: 8px; padding: 6px 6px 6px 10px; font-family: var(--mono); font-size: 12.5px; }
-.envline span { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; }
+.envline span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; user-select: all; }
 .vgrid > * { min-width: 0; }
 .checklist { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; font-size: 14px; }
 .checklist li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; }
@@ -328,7 +328,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 
     <section class="hero" aria-labelledby="hero-h">
       <div>
-        <h2 id="hero-h">Simulated profit today <span class="tag">Paper trading, not real money</span></h2>
+        <h2 id="hero-h">Simulated profit today <span class="tag" id="hero-tag">Paper trading, not real money</span></h2>
         <p class="big" id="hero-profit">–</p>
         <p class="hero-sub" id="hero-sub">If every find had landed: –</p>
         <p class="hero-note">Counts only opportunities that were still there one block later, after gas. Today starts at 00:00 UTC.</p>
@@ -581,10 +581,12 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     stopConfirm: false, stopError: null, tables: {}, reviewOpen: false,
     mirror: null, stopRequest: null, waiting: false, connLost: false, skew: 0,
   };
-  const W = { providers: new Map(), detail: null, provider: null, account: null, chainId: null, error: null, actions: {}, topUp: "0.003", deployed: null };
+  const W = { providers: new Map(), detail: null, provider: null, account: null, chainId: null, error: null, actions: {}, topUp: "0.002", deployed: null, deployedArb: null };
   try {
     const d = JSON.parse(localStorage.getItem("bab.deployed") || "null");
     if (d && isAddr(d.address)) W.deployed = d.address;
+    const a = JSON.parse(localStorage.getItem("bab.deployedArb") || "null");
+    if (a && isAddr(a.address)) W.deployedArb = a.address;
   } catch {
     /* storage unavailable */
   }
@@ -726,6 +728,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     else if (e.type === "liq") onLiq(e.data);
     else if (e.type === "liq-outcome") onLiqOutcome(e.data);
     else if (e.type === "stop") onStop(e.data);
+    else if (e.type === "live-status") loadState(false).catch(() => {});
   }
 
   // ---------------------------------------------------------------- live events
@@ -849,7 +852,10 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     const st = S.state;
     const mp = clear($("mode-pill"));
     if (!st) mp.append("…");
-    else if (st.mode === "live") {
+    else if (st.mode === "live" && st.safety?.live?.blocked) {
+      mp.className = "pill";
+      append(mp, [icon("warn"), "Live: waiting for setup"]);
+    } else if (st.mode === "live") {
       mp.className = "pill live";
       append(mp, [icon("bad"), "Live: real transactions"]);
     } else {
@@ -876,7 +882,9 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     if (LIVE && st && !st.running) box.append(banner("", CLOUD ? ["The bot on your PC has stopped. These are its last numbers."] : ["The bot loop isn't running in this window, so there are no live blocks. Showing saved results. Start the bot with ", h("code", null, "node dist/main.js run"), "."]));
     if (CLOUD && S.stopRequest && !st?.stop?.present) box.append(banner("warn", [h("b", null, `Stop requested at ${clock(S.stopRequest.requestedAt)}. `), pushAge() > 30000 ? "Your PC will stop sending as soon as it's back online." : "Your PC stops sending on its next update, normally within a few seconds."]));
     if (st?.stop?.present) box.append(banner("bad", [h("b", null, "Sending is stopped. "), st.stop.reason ? `${st.stop.reason}. ` : "", "To resume, find out why, then delete the STOP file in the data folder yourself."]));
-    if (st?.mode === "live" && !st.stop?.present && !S.stopRequest) box.append(banner("warn", [h("b", null, "Live mode: "), "the bot sends real transactions with real money."], stopControl()));
+    const waitingLive = st?.mode === "live" && st.safety?.live?.blocked;
+    if (waitingLive && !st.stop?.present) box.append(banner("warn", [h("b", null, "Live mode is waiting, nothing is being sent. "), st.safety.live.blocked, " The bot re-checks every minute; see Live setup below."]));
+    if (st?.mode === "live" && !waitingLive && !st.stop?.present && !S.stopRequest) box.append(banner("warn", [h("b", null, "Live mode: "), "the bot sends real transactions with real money."], stopControl()));
   }
   function stopControl() {
     if (!S.stopConfirm) return h("button", { class: "btn danger small", type: "button", onclick: () => { S.stopConfirm = true; renderBanners(); renderSafety(); } }, "Stop sending");
@@ -912,6 +920,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     append(el, [h("span", { class: "cur" }, "$"), Math.abs(x).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })]);
   }
   function renderHero() {
+    if (!LIVE) $("hero-tag").textContent = "Example numbers, not your bot";
     const t = todayRow();
     const zero = S.summary && !t;
     setMoney($("hero-profit"), t ? t.realisticNetUsd : zero ? 0 : null);
@@ -1402,10 +1411,14 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     const live = st.mode === "live";
     const stopped = !!st.stop?.present;
     const tripped = stopped && /in a row|circuit/i.test(st.stop?.reason || "");
+    const lv = sf.live;
     box.append(kv([
       ["Mode", live ? chip("bad", "Live: sends real transactions") : chip("ours", "Paper: finds and simulates, never sends")],
-      ["Signing key", sf.signer ? h("span", null, "Loaded for ", addrLink(st.addresses?.bot)) : "None loaded"],
-      ["Sending", !live ? "Off in paper mode" : stopped ? chip("bad", "Stopped (STOP file)") : chip("warn", "On")],
+      ["Bot wallet", st.settings?.hasBotKey ? h("span", null, addrLink(st.addresses?.bot), " (its key is in .env, never shown)") : "Not created yet"],
+      ["Sending", !live ? "Off in paper mode" : stopped ? chip("bad", "Stopped (STOP file)") : lv?.blocked ? chip("warn", "Waiting for the live setup") : chip("warn", "On")],
+      live && lv ? ["Live check", lv.blocked ? h("span", null, lv.blocked) : chip("good", `Passed${lv.check?.checkedAt ? ` at ${clock(lv.check.checkedAt)}` : ""}`)] : null,
+      live && lv?.check ? ["Bot wallet gas", `${lv.check.botBalanceEth.toFixed(5)} ETH`] : null,
+      live && lv ? ["Trades sent", `${int(lv.sent ?? 0)} sent, ${int(lv.succeeded ?? 0)} succeeded`] : null,
       ["Circuit breaker", !live ? "Not needed in paper mode" : tripped ? chip("bad", "Tripped") : `Armed: stops after ${sf.maxConsecutiveFailures ?? 5} failed transactions in a row (now ${sf.live?.consecutiveFailures ?? 0})`],
       live && sf.live ? ["Gas budget today", `${usd(sf.live.gasSpentTodayUsd)} of ${usd(sf.live.maxDailyGasUsd)}`] : null,
       ["Multi-hop and CL routes", "Paper only: blocked from sending in code"],
@@ -1726,11 +1739,13 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     }
     throw new Error("Still not confirmed after a few minutes. Check the transaction on Basescan.");
   }
-  function refreshWalletData() {
+  function refreshWalletData(fresh) {
     if (!LIVE) return;
     const params = new URLSearchParams();
+    if (fresh) params.set("fresh", "1");
     if (W.account) params.set("addresses", W.account);
     if (W.deployed && !S.state?.addresses?.routeExecutor) params.set("route", W.deployed);
+    if (W.deployedArb && !S.state?.addresses?.executor) params.set("arb", W.deployedArb);
     api(`/api/wallet?${params}`).then((x) => {
       if (!x.error) {
         S.wallet = x;
@@ -1792,7 +1807,9 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     try {
       const out = await def.run((hash) => setAction(id, { phase: "pending", hash }));
       setAction(id, { phase: "done", msg: out.msg, hash: out.hash });
-      setTimeout(refreshWalletData, 1500);
+      // Re-read balances and roles straight away, and once more in case the node lagged.
+      setTimeout(() => refreshWalletData(true), 1500);
+      setTimeout(() => refreshWalletData(true), 6000);
     } catch (e) {
       setAction(id, { phase: "error", msg: walletError(e) });
     }
@@ -1836,7 +1853,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     const b = h("div", { class: "vblock" }, h("h3", null, "Bot wallet"));
     const bot = S.state?.addresses?.bot;
     if (!bot) {
-      b.append(h("p", { class: "sub" }, "Not set. Add the bot's public address to .env as ", h("code", null, "BOT_ADDRESS=0x…"), " (never its private key) to see its gas and top it up here."));
+      b.append(h("p", { class: "sub" }, "Not created yet. In PowerShell, in the bot's folder, run ", h("code", null, "node dist/main.js new-wallet"), ". It gives the bot its own wallet and saves the key in .env without ever showing it. Then restart the bot."));
       return b;
     }
     const bal = S.wallet?.accounts?.[bot.toLowerCase()];
@@ -1845,11 +1862,26 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
       ["Address", h("span", null, addrLink(bot), " ", copyBtn(bot))],
       ["Gas", h("span", null, eth === null ? "–" : `${fmtUnits(bal.eth, 18)} ETH`, " ", eth !== null && eth < 2000000000000000n ? chip("warn", "Low") : null)],
     ]));
-    if (S.state?.mode !== "live") b.append(h("p", { class: "sub" }, "Paper mode doesn't spend gas, so there's no need to top it up yet."));
+    b.append(h("p", { class: "sub" }, "Holds only gas money: each attempt costs about a cent, so a few dollars covers hundreds. Profits go to the trading contract, which you own."));
     if (!LIVE) return b;
+    const price = S.state?.ethUsd;
+    const inUsd = () => {
+      const w = parseEth(W.topUp);
+      return w && price ? `≈ ${usd((Number(w) / 1e18) * price)}` : "";
+    };
+    const usdLabel = h("span", { class: "muted" }, "ETH ", inUsd());
     const input = h("input", { id: "topup-amount", type: "text", inputmode: "decimal", autocomplete: "off", value: W.topUp, "aria-label": "Amount of ETH to send to the bot wallet" });
-    input.addEventListener("input", () => (W.topUp = input.value));
-    b.append(h("div", { class: "field" }, input, h("span", { class: "muted" }, "ETH")));
+    input.addEventListener("input", () => {
+      W.topUp = input.value;
+      usdLabel.textContent = `ETH ${inUsd()}`;
+    });
+    b.append(h("div", { class: "field" }, input, usdLabel));
+    if (price) {
+      b.append(h("div", { class: "row presets" }, [5, 10, 20].map((d) => h("button", { class: "btn ghost small", type: "button", onclick: () => {
+        W.topUp = (d / price).toFixed(5);
+        renderWallet();
+      } }, `$${d}`))));
+    }
     b.append(action("topup", {
       label: "Send to the bot wallet",
       validate: () => {
@@ -1892,14 +1924,13 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     return out;
   }
   function routeBlock() {
-    const b = h("div", { class: "vblock" }, h("h3", null, "RouteExecutor"), h("p", { class: "sub" }, "Runs multi-hop routes with a flash loan in one transaction. You own it; the bot's key can trade through it but can never withdraw. Multi-hop routes are paper-only for now, so this is optional."));
+    const b = h("div", { class: "vblock" }, h("h3", null, "RouteExecutor (optional)"), h("p", { class: "sub" }, "For multi-hop routes, which are paper-only for now, so you don't need it to go live. You own it; the bot's key could trade through it but never withdraw."));
     const envAddr = S.state?.addresses?.routeExecutor;
     const addr = envAddr || W.deployed;
     if (!addr) {
       const cb = S.contracts?.routeExecutor;
       b.append(action("deploy", {
         label: "Deploy RouteExecutor",
-        kind: "primary",
         disabled: !cb || !cb.creationBytecode,
         confirm: () => `Deploy the RouteExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
         run: async (sent) => {
@@ -1932,13 +1963,54 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     }
     return b;
   }
+  function saveDeployedArb() {
+    try {
+      localStorage.setItem("bab.deployedArb", JSON.stringify({ address: W.deployedArb, at: new Date().toISOString() }));
+    } catch {
+      /* the page also shows the address to copy */
+    }
+  }
   function arbBlock() {
-    const addr = S.state.addresses.executor;
+    const b = h("div", { class: "vblock" }, h("h3", null, "Trading contract (ArbExecutor)"), h("p", { class: "sub" }, "Live mode trades through this. You own it: profits stay in it until you withdraw them to your wallet. The bot wallet can only trade through it, never withdraw."));
+    const envAddr = S.state?.addresses?.executor;
+    const addr = envAddr || W.deployedArb;
+    if (!addr) {
+      const cb = S.contracts?.arbExecutor;
+      b.append(action("arb-deploy", {
+        label: "Deploy the trading contract",
+        kind: "primary",
+        disabled: !cb || !cb.creationBytecode,
+        confirm: () => `Deploy the ArbExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
+        run: async (sent) => {
+          const hash = await sendTx({ data: cb.creationBytecode });
+          sent(hash);
+          const r = await waitReceipt(hash, 300000);
+          if (r.status !== "0x1" || !isAddr(r.contractAddress)) throw new Error("The deployment failed on-chain.");
+          W.deployedArb = r.contractAddress;
+          saveDeployedArb();
+          return { msg: `Deployed at ${r.contractAddress}.`, hash };
+        },
+      }));
+      if (LIVE && !W.account) b.append(h("p", { class: "sub" }, "Connect your wallet first."));
+      return b;
+    }
     const info = S.wallet?.contracts?.arbExecutor;
     const isOwner = !!(W.account && info?.owner && info.owner.toLowerCase() === W.account.toLowerCase());
-    const b = h("div", { class: "vblock" }, h("h3", null, "ArbExecutor"), h("p", { class: "sub" }, "The two-pool contract live mode trades through. The bot's key must own it, so withdrawals normally go to the bot wallet."));
-    b.append(contractRows(addr, info, false, isOwner));
-    if (isOwner) b.append(...withdrawActions("arb", addr, info));
+    b.append(contractRows(addr, info, true, isOwner));
+    if (W.deployedArb && !envAddr) {
+      const line = `EXECUTOR_ADDRESS=${W.deployedArb}`;
+      b.append(h("p", { class: "sub" }, "Put this line in .env (the dashboard can't edit it). Once the bot wallet is authorised and has gas, also set MODE=live and restart the bot."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
+    }
+    if (envAddr && W.deployedArb && envAddr.toLowerCase() !== W.deployedArb.toLowerCase()) b.append(statusLine("warn", `EXECUTOR_ADDRESS in .env is ${shortAddr(envAddr)}, not the contract you deployed from this browser (${shortAddr(W.deployedArb)}).`));
+    if (info?.deployed && W.account && !isOwner) b.append(h("p", { class: "sub" }, "Only the owner can authorise the bot or withdraw. Connect the wallet that deployed it."));
+    if (isOwner) {
+      const bot = S.state?.addresses?.bot;
+      const opIsBot = bot && info.operator && info.operator.toLowerCase() === bot.toLowerCase();
+      if (bot && !opIsBot) b.append(action("arb-operator", { label: "Authorise bot wallet", kind: "primary", confirm: () => `Let the bot wallet ${shortAddr(bot)} trade through this contract? It still can't withdraw; only you can, and you can take this back at any time.`, run: txRun(addr, SEL.setOperator + encAddr(bot), "Authorised") }));
+      if (bot && opIsBot) b.append(action("arb-revoke", { label: "Revoke the bot wallet", confirm: () => "Stop the bot wallet trading through this contract? The bot stops sending at its next check, within 5 minutes. For an immediate halt, use Stop sending.", run: txRun(addr, SEL.setOperator + encAddr("0x0000000000000000000000000000000000000000"), "Revoked") }));
+      if (!bot) b.append(h("p", { class: "sub" }, "Create the bot wallet first (node dist/main.js new-wallet), then restart the bot."));
+      b.append(...withdrawActions("arb", addr, info));
+    }
     return b;
   }
   function completedDays(n) {
@@ -1948,22 +2020,28 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     return out;
   }
   function readinessBlock() {
-    const b = h("div", { class: "ready" }, h("div", null, h("h3", null, "Before going live"), h("p", { class: "sub" }, "Stay in paper mode until every line is green. You change MODE in .env yourself; the dashboard can't.")));
-    const days = completedDays(7);
-    const positive = days.filter((d) => d && d.realisticNetUsd > 0).length;
+    const b = h("div", { class: "ready" }, h("div", null, h("h3", null, "Live setup"), h("p", { class: "sub" }, "In order, top to bottom. The two .env steps are yours: the dashboard can't edit .env or switch modes.")));
     const st = S.state;
-    const exec = st?.addresses?.executor;
-    const execInfo = S.wallet?.contracts?.arbExecutor;
     const bot = st?.addresses?.bot;
+    const env = st?.addresses?.executor;
+    const addr = env || W.deployedArb;
+    const info = S.wallet?.contracts?.arbExecutor;
     const botEth = bot ? S.wallet?.accounts?.[bot.toLowerCase()]?.eth : null;
+    const hasGas = botEth !== null && botEth !== undefined && BigInt(botEth) >= 1000000000000000n;
+    const authorised = !!(bot && info?.operator && info.operator.toLowerCase() === bot.toLowerCase());
+    const lv = st?.safety?.live;
     const items = [
-      [positive >= 5, "Simulated profit on at least 5 of the last 7 days", `${positive} of 7 so far`],
-      [!!(exec && execInfo?.deployed), "ArbExecutor deployed and set as EXECUTOR_ADDRESS", exec ? (execInfo ? (execInfo.deployed ? "Deployed" : "No contract at EXECUTOR_ADDRESS") : "Checking…") : "Not set"],
-      [botEth !== null && botEth !== undefined && BigInt(botEth) >= 2000000000000000n, "Bot wallet has gas, 0.002 ETH or more", bot ? (botEth !== null && botEth !== undefined ? `${fmtUnits(botEth, 18)} ETH` : "Checking…") : "BOT_ADDRESS not set"],
-      [!st?.stop?.present, "Sending isn't stopped", st?.stop?.present ? "A STOP file is present" : "No STOP file"],
-      [st?.mode === "live", "MODE=live in .env", st?.mode === "live" ? "Live" : "Paper, until you change it"],
+      [!!(bot && st?.settings?.hasBotKey), "Bot wallet created", bot && st?.settings?.hasBotKey ? shortAddr(bot) : "Run node dist/main.js new-wallet, then restart the bot"],
+      [!!(addr && info?.deployed), "Trading contract deployed from your wallet", addr ? (info ? (info.deployed ? shortAddr(addr) : "No contract at this address") : "Checking…") : "Press Deploy under Trading contract"],
+      [authorised, "Bot wallet authorised on it", !addr ? "After deploying" : authorised ? "Yes" : "Press Authorise bot wallet"],
+      [hasGas, "Bot wallet has gas money (0.001 ETH or more)", bot ? (botEth !== null && botEth !== undefined ? `${fmtUnits(botEth, 18)} ETH` : "Checking…") : "After creating it"],
+      [!!(env && (!W.deployedArb || env.toLowerCase() === W.deployedArb.toLowerCase())), "EXECUTOR_ADDRESS in .env", env ? shortAddr(env) : "Copy the line shown under Trading contract"],
+      [st?.mode === "live", "MODE=live in .env, then restart the bot", st?.mode === "live" ? "Live" : "Paper, until you change it"],
+      [!!(st?.mode === "live" && lv && !lv.blocked && !st?.stop?.present), "The bot's own check passed", st?.mode !== "live" ? "Runs once live" : st?.stop?.present ? "A STOP file is present" : lv?.blocked ? lv.blocked : "Sending enabled"],
     ];
-    b.append(h("ul", { class: "checklist" }, items.map(([ok, label, why]) => h("li", null, icon(ok ? "good" : "skip"), h("span", null, label, h("span", { class: "why" }, why))))));
+    b.append(h("ol", { class: "checklist" }, items.map(([ok, label, why], i) => h("li", null, icon(ok ? "good" : "skip"), h("span", null, `${i + 1}. ${label}`, h("span", { class: "why" }, why))))));
+    const positive = completedDays(7).filter((d) => d && d.realisticNetUsd > 0).length;
+    b.append(h("p", { class: "sub" }, `Paper results: ${positive} of the last 7 days had a simulated profit. Until most days do, a live run tests the setup more than it makes money. Daily gas limit: ${usd(st?.settings?.maxDailyGasUsd ?? 20)}.`));
     return b;
   }
   function preserveFocus(fn) {
@@ -1988,7 +2066,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     const box = $("vault-body");
     preserveFocus(() => {
       clear(box);
-      const contracts = h("div", { class: "vcol" }, routeBlock(), S.state?.addresses?.executor ? arbBlock() : null);
+      const contracts = h("div", { class: "vcol" }, arbBlock(), routeBlock());
       box.append(h("div", { class: "vgrid" }, accountBlock(), botBlock(), contracts), readinessBlock());
     });
     $("wallet-btn").textContent = W.account ? shortAddr(W.account) : "Connect wallet";
@@ -2219,7 +2297,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     S.feed = feed;
     const startedAt = new Date(now - 26.5 * 3600000).toISOString();
     const st = {
-      version: "0.3.0", running: true, mode: "paper", startedAt, now: new Date(now).toISOString(), chainId: 8453, ethUsd: 2450,
+      version: "0.5.0", running: true, mode: "paper", startedAt, now: new Date(now).toISOString(), chainId: 8453, ethUsd: 2450,
       pools: { total: 396, cl: 305, pairs: 118 }, blocks,
       rpc: { since: startedAt, requests: 512340, byMethod: { eth_call: 301220, eth_getLogs: 47710, eth_blockNumber: 118200, eth_getBlockByNumber: 45210 }, alchemyCu: 1.31e7, alchemyCuPerDay: 5.9e6, activeEndpoint: "https://mainnet.base.org", onPrimary: true, failovers: 0, transientErrors: 41, rateLimited: 12 },
       refresh: { checks: 636, driftedPools: 2, lastCheckBlock: n - 40, lastDrift: [{ pool: addr(), dex: "slipstream", block: n - 4840 }, { pool: addr(), dex: "uniswap-v3", block: n - 9120 }] },

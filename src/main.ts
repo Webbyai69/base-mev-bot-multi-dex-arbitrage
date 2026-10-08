@@ -25,7 +25,8 @@ import { Store } from "./store.js";
 import { PaperEngine, summarize } from "./paper.js";
 import { Classifier, fetchFullBlock, marketSummary } from "./classifier.js";
 import { renderReport, writeReport } from "./report.js";
-import { LiveExecutor } from "./executor.js";
+import { LiveExecutor, pickLiveOpportunity } from "./executor.js";
+import { addBotWalletToEnv } from "./wallet.js";
 import { runCheck } from "./check.js";
 import { log, setLogLevel } from "./log.js";
 import { formatUnits } from "./math.js";
@@ -318,6 +319,12 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       void alerts?.circuitBreaker(reason);
       ui?.publish("stop", { present: true, reason });
     };
+    live.onReadyChange = (ready, reason) => {
+      void alerts?.liveReady(ready, { bot: live.wallet.address, maxDailyGasUsd: live.opts.maxDailyGasUsd, reason });
+      ui?.publish("live-status", { ready, reason });
+    };
+    // Nothing is sent until the contract, the bot wallet's role and its gas money check out.
+    live.startChecks();
   }
   const counts = poolCounts(registry);
   void alerts?.started({ version: version(), pools: counts.total, clPools: counts.cl, dashboard: s.cloudUrl || ui?.url || undefined });
@@ -391,7 +398,10 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     ]);
     const opps = await scanner.scan(n, gasQuote, ethUsd, s.minProfitUsd, { stage: "block" });
     paper.onBlock(n, opps, detected, ethUsd);
-    if (live && opps[0]) live.trySend(opps[0], ethUsd);
+    if (live) {
+      const pick = pickLiveOpportunity(opps);
+      if (pick) live.trySend(pick, ethUsd);
+    }
     if (extras.fb) {
       // Hot pools for the next ~2s: anything that showed a spread or was arbed by another bot.
       const interesting = new Set<string>([...scanner.lastCandidatePools, ...detected.filter((d) => d.type === "arbitrage").flatMap((d) => d.pools)]);
@@ -530,6 +540,21 @@ async function printSummary(s: Settings, store: Store, registry: PoolRegistry): 
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? "run";
+  if (cmd === "new-wallet") {
+    // Before loadSettings: live-mode validation must not stop you creating the wallet live mode needs.
+    const r = addBotWalletToEnv(".env");
+    if (!r.created) {
+      console.log(`${r.reason}${r.address ? ` (bot wallet ${r.address})` : ""}. Nothing changed.`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Bot wallet created: ${r.address}`);
+    console.log("Its private key is saved in .env as PRIVATE_KEY (not shown). Anyone who gets that file can spend this");
+    console.log("wallet's ETH, so keep .env private. The wallet only ever needs to hold gas money.");
+    if (r.botAddressUpdated) console.log("BOT_ADDRESS in .env pointed at a different wallet; it now matches the new one.");
+    console.log("Next: restart the bot, open http://localhost:8787, connect your own wallet, and use Live setup.");
+    return;
+  }
   const s = loadSettings();
   setLogLevel(s.logLevel);
   const store = new Store(s.dataDir);
@@ -619,7 +644,7 @@ async function main(): Promise<void> {
         process.exitCode = await telegramSetup(s.telegramBotToken, s.telegramChatId);
         break;
       default:
-        console.log("usage: node dist/main.js [check|discover|scan|run|report|summary|digest|ui|telegram]");
+        console.log("usage: node dist/main.js [check|discover|scan|run|report|summary|digest|ui|telegram|new-wallet]");
     }
   } finally {
     if (cmd !== "run" && cmd !== "ui") await chain.destroy();

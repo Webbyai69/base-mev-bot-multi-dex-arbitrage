@@ -401,11 +401,14 @@ export class BotMirror {
     const routeParam = url.searchParams.get("route");
     const contracts = [
       ["routeExecutor", st?.addresses?.routeExecutor || (isAddress(routeParam) ? routeParam : null)],
-      ["arbExecutor", st?.addresses?.executor],
+      ["arbExecutor", st?.addresses?.executor || (isAddress(url.searchParams.get("arb")) ? url.searchParams.get("arb") : null)],
     ].filter(([, a]) => isAddress(a));
     const key = JSON.stringify([accounts, contracts]);
     const hit = this.walletCache.get(key);
-    if (hit && Date.now() - hit.at < 30_000) return hit.value;
+    // A fresh read right after one of your transactions, at most one every 3 s.
+    const fresh = url.searchParams.get("fresh") === "1" && Date.now() - (this.lastFreshWallet ?? 0) > 3000;
+    if (fresh) this.lastFreshWallet = Date.now();
+    if (hit && !fresh && Date.now() - hit.at < 30_000) return hit.value;
     const calls = [];
     const push = (method, params) => calls.push({ jsonrpc: "2.0", id: calls.length + 1, method, params });
     const call = (to, data) => push("eth_call", [{ to, data }, "latest"]);

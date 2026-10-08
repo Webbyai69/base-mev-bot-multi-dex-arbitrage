@@ -177,7 +177,7 @@ You are helping build base-arb-bot, a TypeScript arbitrage bot for Base (chain i
 
 HOW THE BOT WORKS
 - src/liquidations.ts: LiquidationMonitor watches Aave V3 borrowers on Base and checks health factors. For HF < 1 it picks the largest debt and collateral reserves and estimates profit with Aave's rules: close factor 100% if HF <= 0.95 or either side < $2,000, else 50%; repay = min(debt x close factor, collateral / bonus); minus Aave's protocol share of the bonus, a flat swap-cost assumption and gas. It records liq-opportunity records and later their outcomes (taken / recovered / open). Everything is in USD; nothing is simulated on-chain yet.
-- contracts/RouteExecutor.sol is the pattern to copy: Morpho Blue flash loan (free) or Balancer V2 flash loan, swaps through hop kinds 0 (Uniswap V2 ppm fee), 1 (Aerodrome, uses pool.getAmountOut), 2 (Uniswap V3 / Slipstream via uniswapV3SwapCallback) and 3 (V2 bps fee). simulate() always reverts with Simulated(profit), so the bot can run it with eth_call and a state override (scripts/build-route-bytecode.cjs makes the runtime bytecode). test/forge/RouteExecutor.t.sol has EVM tests with mocks; reuse its mocks.
+- contracts/RouteExecutor.sol is the pattern to copy: Morpho Blue flash loan (free) or Balancer V2 flash loan, swaps through hop kinds 0 (Uniswap V2 ppm fee), 1 (Aerodrome, uses pool.getAmountOut), 2 (Uniswap V3 / Slipstream via uniswapV3SwapCallback) and 3 (V2 bps fee). simulate() always reverts with Simulated(profit), so the bot can run it with eth_call and a state override (scripts/build-bytecode.cjs makes the runtime bytecode). test/forge/RouteExecutor.t.sol has EVM tests with mocks; reuse its mocks.
 - Roles: RouteExecutor is getting an owner/operator split in parallel. The owner (a cold wallet) can withdraw, setOperator and transferOwnership. The operator (the bot's hot key) can only execute. Use the same pattern: errors NotOwner / NotOperator, with the owner also allowed to execute.
 
 FACTS (Aave V3 on Base, from bgd-labs/aave-address-book; verify anything else in aave-v3-origin source)
@@ -189,7 +189,7 @@ FACTS (Aave V3 on Base, from bgd-labs/aave-address-book; verify anything else in
 WHAT TO BUILD
 1. contracts/AaveLiquidator.sol (new, standalone, 0.8.26, cancun). Flow: flash-borrow debtToCover of debtAsset -> approve the Pool -> liquidationCall(...) -> swap all the collateral received into debtAsset through the given hops (same hop kinds and validation as RouteExecutor) -> repay the flash loan -> profit = growth in the debtAsset balance -> require profit >= minProfit. Handle collateral == debt (no swap needed). simulate(...) reverts Simulated(profit). Owner/operator roles as above. withdraw(token, amount) sends to the owner only. Strict callback checks (expectedCaller pattern).
 2. test/forge/AaveLiquidator.t.sol. Use a MockAavePool whose liquidationCall pulls the debt and sends collateral = debtToCover x price x bonus, plus the DEX/Morpho/Balancer mocks copied from RouteExecutor.t.sol into test/forge/mocks/. Cover: profitable via Morpho, via Balancer, same-asset, minProfit guard, simulate == execute, only owner/operator, stranger callbacks revert, owner-only withdraw.
-3. scripts/build-liquidator-bytecode.cjs (copy build-route-bytecode.cjs) -> src/simBytecodeLiquidator.ts.
+3. add LiquidatorExecutor to scripts/build-bytecode.cjs -> src/simBytecodeLiquidator.ts.
 4. src/liquidations.ts, evaluate/record path only (the log-fetch plumbing in this file is being changed in parallel). For each candidate:
    - convert repay USD into debt-token units with the oracle price;
    - build the collateral -> debt swap route from the PoolRegistry: best direct pool, or two hops via WETH. Take the registry as a new optional constructor argument, and describe the one-line wiring needed in main.ts;
@@ -208,7 +208,7 @@ RULES
 4. Don't edit src/main.ts, src/rpc.ts, src/pools.ts, src/executor.ts, src/classifier.ts, contracts/RouteExecutor.sol, ui/ or src/ui/.
 5. ethers v6 only for runtime dependencies.
 
-ATTACH (only if you can't open the repo): contracts/RouteExecutor.sol, test/forge/RouteExecutor.t.sol, scripts/build-route-bytecode.cjs, src/liquidations.ts, src/scanner.ts (state-override simulation pattern), src/routes.ts, src/abi.ts, src/config.ts, foundry.toml
+ATTACH (only if you can't open the repo): contracts/RouteExecutor.sol, test/forge/RouteExecutor.t.sol, scripts/build-bytecode.cjs, src/liquidations.ts, src/scanner.ts (state-override simulation pattern), src/routes.ts, src/abi.ts, src/config.ts, foundry.toml
 ```
 
 ---

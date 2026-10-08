@@ -27,6 +27,12 @@ pragma solidity ^0.8.20;
  * `simulate` runs a full execution and then reverts with Simulated(profit);
  * the bot calls it via eth_call to get an exact on-chain answer without
  * spending gas.
+ *
+ * Roles: the owner (your own wallet, e.g. Brave or MetaMask) deploys it,
+ * withdraws profits and sets the operator; the operator (the bot's hot key)
+ * can only execute trades, and every trade must leave the contract holding
+ * more of the token than before. A leaked bot key can therefore spend its own
+ * gas money but never withdraw anything from here.
  */
 
 interface IERC20 {
@@ -41,23 +47,35 @@ interface IV2Pool {
 
 contract ArbExecutor {
     address public owner;
+    /// @notice The bot's hot key: may execute trades, nothing else.
+    address public operator;
+    /// @dev Set only while one of our flash swaps is in progress; callbacks from anyone else revert.
     address private expectedCaller;
 
     error NotOwner();
+    error NotOperator();
     error InsufficientProfit(uint256 got, uint256 want);
     error Simulated(uint256 profit);
     error BadCallback();
     error TransferFailed();
 
     event Arbitrage(address indexed tokenIn, address buyPool, address sellPool, uint256 amountIn, uint256 profit, bool flash);
+    event OperatorSet(address indexed operator);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
         _;
     }
 
+    modifier onlyOperator() {
+        if (msg.sender != operator && msg.sender != owner) revert NotOperator();
+        _;
+    }
+
     constructor() {
         owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
     }
 
     receive() external payable {}
@@ -74,7 +92,7 @@ contract ArbExecutor {
         uint256 amountMid,
         uint256 amountOut,
         uint256 minProfit
-    ) external onlyOwner returns (uint256 profit) {
+    ) external onlyOperator returns (uint256 profit) {
         profit = _runWithCapital(buyPool, sellPool, tokenIn, amountIn, amountMid, amountOut);
         if (profit < minProfit) revert InsufficientProfit(profit, minProfit);
         emit Arbitrage(tokenIn, buyPool, sellPool, amountIn, profit, false);
@@ -88,7 +106,7 @@ contract ArbExecutor {
         uint256 amountMid,
         uint256 amountOut,
         uint256 minProfit
-    ) external onlyOwner returns (uint256 profit) {
+    ) external onlyOperator returns (uint256 profit) {
         profit = _runFlash(buyPool, sellPool, tokenIn, amountIn, amountMid, amountOut);
         if (profit < minProfit) revert InsufficientProfit(profit, minProfit);
         emit Arbitrage(tokenIn, buyPool, sellPool, amountIn, profit, true);
@@ -206,7 +224,15 @@ contract ArbExecutor {
         if (!ok) revert TransferFailed();
     }
 
+    /// @notice Authorise the bot's hot key (address(0) revokes it).
+    function setOperator(address newOperator) external onlyOwner {
+        operator = newOperator;
+        emit OperatorSet(newOperator);
+    }
+
     function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert NotOwner();
+        emit OwnershipTransferred(owner, newOwner);
         owner = newOwner;
     }
 }

@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CHAIN_ID, MULTICALL3, TOKENS } from "../config.js";
 import type { Settings } from "../config.js";
-import { ROUTE_EXECUTOR_COMPILER, ROUTE_EXECUTOR_CREATION } from "../deployBytecode.js";
+import { ARB_EXECUTOR_COMPILER, ARB_EXECUTOR_CREATION, ROUTE_EXECUTOR_COMPILER, ROUTE_EXECUTOR_CREATION } from "../deployBytecode.js";
 import { bigintReplacer, log } from "../log.js";
 import type { Store } from "../store.js";
 import type { Call, CallResult, RpcUsage } from "../rpc.js";
@@ -119,6 +119,7 @@ export class UiServer {
   private summaryCache: { at: number; value: Promise<unknown> } | undefined;
   private summaryDirty = false;
   private walletCache = new Map<string, { at: number; value: Promise<unknown> }>();
+  private lastFreshWallet = 0;
   private pingTimer: NodeJS.Timeout | undefined;
   private unsubscribe: (() => void) | undefined;
   private allowedHosts = new Set<string>();
@@ -372,7 +373,7 @@ export class UiServer {
       case "GET /api/contracts":
         return this.json(res, 200, this.contracts());
       case "GET /api/wallet":
-        return this.json(res, 200, await this.wallet(url.searchParams.get("addresses") ?? "", url.searchParams.get("route") ?? undefined));
+        return this.json(res, 200, await this.wallet(url.searchParams.get("addresses") ?? "", url.searchParams.get("route") ?? undefined, url.searchParams.get("arb") ?? undefined, url.searchParams.get("fresh") === "1"));
       case "GET /api/review":
         return this.json(res, 200, this.review());
       case "POST /api/stop":
@@ -504,6 +505,9 @@ export class UiServer {
         priorityFeeGwei: s.priorityFeeGwei,
         rpcFallbacks: s.rpcFallbackUrls.length,
         mevFeed: s.mevFeed,
+        /** Whether PRIVATE_KEY is set (the bot has its own wallet); never the key itself. */
+        hasBotKey: !!s.privateKey,
+        maxDailyGasUsd: Number(process.env.MAX_DAILY_GAS_USD ?? 20),
       },
     };
   }
@@ -575,7 +579,12 @@ export class UiServer {
         bytes: (ROUTE_EXECUTOR_CREATION.length - 2) / 2,
         compiler: ROUTE_EXECUTOR_COMPILER,
       },
-      arbExecutor: { address: s.executorAddress ?? null },
+      arbExecutor: {
+        address: s.executorAddress ?? null,
+        creationBytecode: ARB_EXECUTOR_CREATION,
+        bytes: (ARB_EXECUTOR_CREATION.length - 2) / 2,
+        compiler: ARB_EXECUTOR_COMPILER,
+      },
       tokens: {
         WETH: { address: WETH_ADDR, decimals: 18 },
         USDC: { address: USDC_ADDR, decimals: 6 },
@@ -585,21 +594,24 @@ export class UiServer {
 
   /**
    * ETH / WETH / USDC balances of the given addresses (plus the bot), and the
-   * executors' owner, operator and balances. One eth_call. `routeOverride` is
-   * a RouteExecutor the page just deployed that isn't in .env yet.
+   * executors' owner, operator and balances. One eth_call. `routeOverride` and
+   * `arbOverride` are contracts the page just deployed that aren't in .env yet.
    */
-  async wallet(list: string, routeOverride?: string): Promise<unknown> {
+  async wallet(list: string, routeOverride?: string, arbOverride?: string, fresh = false): Promise<unknown> {
     if (!this.src.multicall) return { error: "balances are only available while the bot runs (node dist/main.js run) or with node dist/main.js ui" };
     const s = this.src.settings;
     const accounts = [...new Set([...list.split(","), this.src.botAddress ?? ""].map((a) => a.trim().toLowerCase()).filter(isAddress))].slice(0, 6);
     const contracts = [
       ["routeExecutor", s.routeExecutorAddress ?? (isAddress(routeOverride) ? routeOverride : undefined)],
-      ["arbExecutor", s.executorAddress],
+      ["arbExecutor", s.executorAddress ?? (isAddress(arbOverride) ? arbOverride : undefined)],
     ].filter((c): c is [string, string] => isAddress(c[1]));
     const key = [...accounts, ...contracts.map((c) => c[1])].join(",");
     const hit = this.walletCache.get(key);
-    // Cached, so more open tabs never mean more RPC calls.
-    if (hit && Date.now() - hit.at < 30_000) return hit.value;
+    // Cached, so more open tabs never mean more RPC calls. Right after one of your transactions
+    // the page asks for a fresh read (at most one every 3 s), so a button you just used updates.
+    const allowFresh = fresh && Date.now() - this.lastFreshWallet > 3000;
+    if (allowFresh) this.lastFreshWallet = Date.now();
+    if (hit && !allowFresh && Date.now() - hit.at < 30_000) return hit.value;
     const value = (async () => {
       const calls: Call[] = [];
       const bal = (a: string) => {

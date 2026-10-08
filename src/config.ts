@@ -9,6 +9,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { Wallet } from "ethers";
 
 export const CHAIN_ID = 8453;
 
@@ -375,8 +376,21 @@ export function loadSettings(): Settings {
   if (settings.refreshMode !== "events" && settings.refreshMode !== "full") throw new Error("REFRESH_MODE must be events or full");
   if (settings.discovery !== "activity" && settings.discovery !== "full") throw new Error("DISCOVERY must be activity or full");
   if (settings.mode === "live") {
-    if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS");
-    if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY");
+    if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS (deploy the ArbExecutor from the dashboard, then copy its address into .env)");
+    if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY (run: node dist/main.js new-wallet)");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(settings.executorAddress)) throw new Error("EXECUTOR_ADDRESS must be an address (0x + 40 hex characters)");
+  }
+  if (settings.privateKey && settings.botAddress) {
+    // A BOT_ADDRESS for another wallet would make the dashboard fund and authorise the wrong one.
+    let derived = "";
+    try {
+      derived = new Wallet(settings.privateKey).address;
+    } catch {
+      throw new Error("PRIVATE_KEY is not a valid private key");
+    }
+    if (derived.toLowerCase() !== settings.botAddress.toLowerCase()) {
+      throw new Error(`BOT_ADDRESS is not the address of PRIVATE_KEY (that is ${derived}). Remove the BOT_ADDRESS line or fix it.`);
+    }
   }
   return settings;
 }

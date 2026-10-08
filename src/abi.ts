@@ -150,9 +150,16 @@ export const executorIface = new Interface([
   "function executeFlash(address buyPool, address sellPool, address tokenIn, uint256 amountIn, uint256 amountMid, uint256 amountOut, uint256 minProfit)",
   "function simulate(address buyPool, address sellPool, address tokenIn, uint256 amountIn, uint256 amountMid, uint256 amountOut, bool flash) returns (uint256 profit)",
   "function withdraw(address token, uint256 amount)",
+  "function withdrawETH()",
   "function owner() view returns (address)",
+  "function operator() view returns (address)",
+  "function setOperator(address newOperator)",
   "error Simulated(uint256 profit)",
   "error InsufficientProfit(uint256 got, uint256 want)",
+  "error BadCallback()",
+  "error TransferFailed()",
+  "error NotOwner()",
+  "error NotOperator()",
 ]);
 
 export const TOPIC_SWAP_V2 = univ2PairIface.getEvent("Swap")!.topicHash;

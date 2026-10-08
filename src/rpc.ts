@@ -395,14 +395,20 @@ export class Chain {
     };
 
     let usingWs = false;
+    // When the websocket last delivered a block. Tracked separately from `last` (which the
+    // poll advances too): on 2026-10-08 an Alchemy socket went quiet without an error and the
+    // old check, fed by the poll's own blocks, never noticed; a third of all blocks were missed.
+    let wsLastAt = 0;
     if (this.wsUrl) {
       try {
         this.ws = new WebSocketProvider(this.wsUrl, Network.from(CHAIN_ID), { staticNetwork: Network.from(CHAIN_ID) });
         await this.ws.on("block", (n: number) => {
           this.count("ws_newHeads");
+          wsLastAt = Date.now();
           void handle(n);
         });
         usingWs = true;
+        wsLastAt = Date.now();
         log.info("subscribed to new blocks over websocket (with a 2s backup poll in case the socket drops)");
       } catch (err) {
         log.warn("websocket subscription failed, falling back to polling:", (err as Error).message);
@@ -413,45 +419,55 @@ export class Chain {
     // long-lived sockets, and with nothing else scheduled Node would simply exit (this is
     // what ended the 2026-09-17 24h run after 97 minutes with an empty error log).
     // handle() ignores block numbers it has already seen, so the two sources never double up.
-    let wsSilentSince = Date.now();
-    let lastSeen = 0;
     let stopped = false;
-    let lastNewAt = 0;
     let lastNewN = 0;
     let blockTimeMs = 2000; // learned from what we observe (Base: 2s)
-    const nextDelay = (): number => {
-      if (usingWs) return 2000;
-      if (!lastNewAt) return fastPollMs;
-      const dueIn = lastNewAt + blockTimeMs + 150 - Date.now();
-      return Math.max(fastPollMs, Math.min(dueIn, blockTimeMs));
-    };
+    // Phase-locked polling: aim each poll just after the next block becomes visible, judged
+    // from when *we sent* the poll that first saw a block (never from when the answer came
+    // back, which lets the round-trip time pile up block after block until one is skipped).
+    let lastVisibleAt = 0; // our estimate of when the last new block became visible
+    let missedSinceNew = false; // a poll found nothing new since the last new block
+    let nextPollAt = 0;
     const tick = async () => {
       if (stopped) return;
+      const sentAt = Date.now();
       try {
         const n = await this.blockNumber();
         if (n > lastNewN) {
-          const now = Date.now();
-          if (lastNewAt && lastNewN) {
-            const per = (now - lastNewAt) / (n - lastNewN);
-            blockTimeMs = Math.min(5000, Math.max(100, blockTimeMs * 0.8 + per * 0.2));
+          // Seen on a retry: it appeared within the last fastPollMs. Seen on the first try: it
+          // may have been there a while, so assume a little earlier and the next poll lands earlier.
+          const visibleAt = missedSinceNew ? sentAt : sentAt - 100;
+          if (lastNewN && lastVisibleAt) {
+            const per = (visibleAt - lastVisibleAt) / (n - lastNewN);
+            blockTimeMs = Math.min(5000, Math.max(100, blockTimeMs * 0.9 + per * 0.1));
           }
-          lastNewAt = now;
+          lastVisibleAt = visibleAt;
           lastNewN = n;
+          missedSinceNew = false;
+          nextPollAt = visibleAt + blockTimeMs + 50;
+        } else {
+          missedSinceNew = true;
+          nextPollAt = Date.now() + fastPollMs;
         }
-        if (usingWs) {
-          if (last > lastSeen) {
-            lastSeen = last;
-            wsSilentSince = Date.now();
-          } else if (n > last && Date.now() - wsSilentSince > 10_000) {
-            log.warn("no blocks from the websocket for 10s; continuing on polling");
-            wsSilentSince = Date.now();
-          }
+        if (usingWs && Date.now() - wsLastAt > 10_000) {
+          // The socket has gone quiet while blocks keep coming: drop it and poll properly. A 2s
+          // backup poll behind a dead socket misses about one block in three.
+          usingWs = false;
+          const dead = this.ws;
+          this.ws = undefined;
+          void Promise.resolve(dead?.destroy()).catch(() => undefined);
+          log.warn("no blocks from the websocket for 10s; switched to polling (adaptive: just after each 2s block is due)");
         }
-        await handle(n);
+        // Not awaited: handle() queues the newest block itself, and waiting here would stretch
+        // the poll interval by the block's processing time.
+        void handle(n);
       } catch (err) {
         log.warn("blockNumber poll failed:", (err as Error).message);
+        nextPollAt = Date.now() + 1000;
       }
-      if (!stopped) setTimeout(() => void tick(), nextDelay());
+      // With a websocket this is only a slow backup check.
+      const delay = usingWs ? 2000 : Math.max(0, Math.min(nextPollAt - Date.now(), 5000));
+      if (!stopped) setTimeout(() => void tick(), delay);
     };
     void tick();
     if (!usingWs) log.info("polling for new blocks (adaptive: just after each 2s block is due)");

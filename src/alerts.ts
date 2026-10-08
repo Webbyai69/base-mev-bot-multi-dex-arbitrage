@@ -191,6 +191,17 @@ export class Alerts {
     return this.send(`🛑 <b>Circuit breaker tripped</b>: ${esc(reason)}`);
   }
 
+  /** Live mode became able to send (the setup checks out), or stopped being able to. */
+  liveReady(ready: boolean, d: { bot: string; maxDailyGasUsd: number; reason?: string | null }): Promise<boolean> {
+    return this.send(
+      ready
+        ? `🟢 <b>Live trading enabled</b>\nBot wallet <code>${esc(d.bot)}</code> is authorised and has gas money. Daily gas limit $${esc(d.maxDailyGasUsd)}.`
+        : `🟡 <b>Live mode is waiting</b>\n${esc(d.reason ?? "")}`,
+      "live-ready",
+      60_000,
+    );
+  }
+
   daily(d: { day: string; found: number; persisted: number; taken: number; closed: number; realisticNetUsd: number; optimisticNetUsd: number; topRival?: string | undefined; liqFound?: number | undefined }): Promise<boolean> {
     const decided = d.persisted + d.taken + d.closed;
     return this.send(

@@ -1,6 +1,6 @@
 {
   "name": "base-arb-dashboard",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Online copy of the base-arb-bot dashboard on Cloudflare Workers (deployed by Workers Builds).",
