@@ -2041,7 +2041,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     ];
     b.append(h("ol", { class: "checklist" }, items.map(([ok, label, why], i) => h("li", null, icon(ok ? "good" : "skip"), h("span", null, `${i + 1}. ${label}`, h("span", { class: "why" }, why))))));
     const positive = completedDays(7).filter((d) => d && d.realisticNetUsd > 0).length;
-    b.append(h("p", { class: "sub" }, `Paper results: ${positive} of the last 7 days had a simulated profit. Until most days do, a live run tests the setup more than it makes money. Daily gas limit: ${usd(st?.settings?.maxDailyGasUsd ?? 20)}.`));
+    b.append(h("p", { class: "sub" }, `Paper results: ${positive} of the last 7 days had a simulated profit.${positive >= 5 ? "" : " Until most days do, a live run tests the setup more than it makes money."} Daily gas limit: ${usd(st?.settings?.maxDailyGasUsd ?? 20)}.`));
     return b;
   }
   function preserveFocus(fn) {
