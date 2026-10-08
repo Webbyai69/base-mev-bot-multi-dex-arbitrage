@@ -227,24 +227,39 @@ export class Chain {
       }
     };
 
+    let usingWs = false;
     if (this.wsUrl) {
       try {
         this.ws = new WebSocketProvider(this.wsUrl, Network.from(CHAIN_ID), { staticNetwork: Network.from(CHAIN_ID) });
         await this.ws.on("block", (n: number) => void handle(n));
-        log.info("subscribed to new blocks over websocket");
-        return () => {
-          void this.ws?.destroy();
-        };
+        usingWs = true;
+        log.info("subscribed to new blocks over websocket (with a 2s backup poll in case the socket drops)");
       } catch (err) {
         log.warn("websocket subscription failed, falling back to polling:", (err as Error).message);
       }
     }
 
+    // Always poll as well. With a websocket this is a slow backup: providers close idle or
+    // long-lived sockets, and with nothing else scheduled Node would simply exit (this is
+    // what ended the 2026-09-17 24h run after 97 minutes with an empty error log).
+    // handle() ignores block numbers it has already seen, so the two sources never double up.
+    if (usingWs) pollMs = Math.max(pollMs, 2000);
+    let wsSilentSince = Date.now();
+    let lastSeen = 0;
     let stopped = false;
     const tick = async () => {
       if (stopped) return;
       try {
         const n = await this.blockNumber();
+        if (usingWs) {
+          if (last > lastSeen) {
+            lastSeen = last;
+            wsSilentSince = Date.now();
+          } else if (n > last && Date.now() - wsSilentSince > 10_000) {
+            log.warn("no blocks from the websocket for 10s; continuing on polling");
+            wsSilentSince = Date.now();
+          }
+        }
         await handle(n);
       } catch (err) {
         log.warn("blockNumber poll failed:", (err as Error).message);
@@ -252,9 +267,10 @@ export class Chain {
       if (!stopped) setTimeout(() => void tick(), pollMs);
     };
     void tick();
-    log.info(`polling for new blocks every ${pollMs}ms`);
+    if (!usingWs) log.info(`polling for new blocks every ${pollMs}ms`);
     return () => {
       stopped = true;
+      void this.ws?.destroy();
     };
   }
 
