@@ -259,6 +259,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .action { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; justify-items: start; }
 .status { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; color: var(--ink-2); }
 .status svg { margin-top: 3px; flex: none; }
+details.optional > summary { cursor: pointer; color: var(--muted); font-size: 13.5px; padding: 4px 0; }
+details.optional[open] > summary { margin-bottom: 8px; }
 .envline { display: flex; gap: 8px; align-items: center; justify-content: space-between; background: var(--well); border-radius: 8px; padding: 6px 6px 6px 10px; font-family: var(--mono); font-size: 12.5px; }
 .envline span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; user-select: all; }
 .vgrid > * { min-width: 0; }
@@ -2084,7 +2086,10 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     const box = $("vault-body");
     preserveFocus(() => {
       clear(box);
-      const contracts = h("div", { class: "vcol" }, arbBlock(), routeBlock());
+      // The RouteExecutor isn't needed to go live, so it stays folded away unless one exists already.
+      const hasRoute = !!(S.state?.addresses?.routeExecutor || W.deployed);
+      const route = hasRoute ? routeBlock() : h("details", { class: "optional" }, h("summary", null, "RouteExecutor: optional, not needed to go live"), routeBlock());
+      const contracts = h("div", { class: "vcol" }, arbBlock(), route);
       box.append(h("div", { class: "vgrid" }, accountBlock(), botBlock(), contracts), readinessBlock());
     });
     $("wallet-btn").textContent = W.account ? shortAddr(W.account) : "Connect wallet";
