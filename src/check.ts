@@ -3,8 +3,19 @@
  * answers like the contract we think it is. Run this first on a new machine.
  */
 import { AbiCoder } from "ethers";
-import { CHAIN_ID, DEXES, GAS_PRICE_ORACLE, MULTICALL3, TOKENS } from "./config.js";
-import { aeroFactoryIface, erc20Iface, gasOracleIface, multicall3Iface, univ2FactoryIface } from "./abi.js";
+import { AAVE_V3, BALANCER_FEES_COLLECTOR, CHAIN_ID, CL_DEXES, DEXES, GAS_PRICE_ORACLE, MORPHO_BLUE, MULTICALL3, TOKENS, USDC, WETH } from "./config.js";
+import {
+  aavePoolIface,
+  aeroFactoryIface,
+  erc20Iface,
+  gasOracleIface,
+  multicall3Iface,
+  slipstreamFactoryIface,
+  slipstreamQuoterIface,
+  univ2FactoryIface,
+  univ3FactoryIface,
+  univ3QuoterIface,
+} from "./abi.js";
 import type { Chain, Call } from "./rpc.js";
 import { log } from "./log.js";
 
@@ -70,5 +81,70 @@ export async function runCheck(chain: Chain): Promise<boolean> {
       log.info(`ok   ${label} -> ${n}`);
     }
   });
+  return (await runUpgradeChecks(chain)) && ok;
+}
+
+/**
+ * Addresses added by the V3 / multi-hop / liquidation upgrade. For each CL
+ * DEX: the factory must know a WETH/USDC pool and the quoter must price
+ * 0.01 WETH through it. Plus Morpho (free flash loans need idle WETH),
+ * Balancer's flash-loan fee, and Aave V3's reserve list.
+ */
+async function runUpgradeChecks(chain: Chain): Promise<boolean> {
+  let ok = true;
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  for (const d of CL_DEXES) {
+    const calls: Call[] = d.poolKeys.map((k) => ({
+      target: d.factory,
+      callData: d.kind === "univ3" ? univ3FactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]) : slipstreamFactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]),
+    }));
+    const res = await chain.multicall(calls);
+    const found = res
+      .map((r, i) => ({ key: d.poolKeys[i]!, pool: r.success && r.returnData.length >= 66 ? (abi.decode(["address"], r.returnData)[0] as string) : ZERO }))
+      .filter((x) => x.pool !== ZERO);
+    if (found.length === 0) {
+      if (res.every((r) => !r.success)) {
+        log.error(`FAIL ${d.name} factory ${d.factory}: getPool() does not answer — check the address`);
+        ok = false;
+      } else log.warn(`NOTE ${d.name} factory ${d.factory} answers but has no WETH/USDC pool; its quoter was not tested`);
+      continue;
+    }
+    const { key, pool } = found[0]!;
+    const amountIn = 10n ** 16n;
+    const callData =
+      d.kind === "univ3"
+        ? univ3QuoterIface.encodeFunctionData("quoteExactInputSingle", [{ tokenIn: WETH, tokenOut: USDC, amountIn, fee: key, sqrtPriceLimitX96: 0n }])
+        : slipstreamQuoterIface.encodeFunctionData("quoteExactInputSingle", [{ tokenIn: WETH, tokenOut: USDC, amountIn, tickSpacing: key, sqrtPriceLimitX96: 0n }]);
+    const [q] = await chain.multicall([{ target: d.quoter, callData }]);
+    if (!q || !q.success || q.returnData.length < 66) {
+      log.error(`FAIL ${d.name} quoter ${d.quoter}: could not quote WETH->USDC through ${pool}`);
+      ok = false;
+      continue;
+    }
+    const out = abi.decode(["uint256"], q.returnData.slice(0, 66))[0] as bigint;
+    log.info(`ok   ${d.name}: ${found.length} WETH/USDC pools, quoter says 0.01 WETH -> ${(Number(out) / 1e6).toFixed(2)} USDC`);
+  }
+  const res = await chain.multicall([
+    { target: WETH, callData: erc20Iface.encodeFunctionData("balanceOf", [MORPHO_BLUE]) },
+    { target: BALANCER_FEES_COLLECTOR, callData: "0xd877845c" }, // getFlashLoanFeePercentage()
+    { target: AAVE_V3.pool, callData: aavePoolIface.encodeFunctionData("getReservesList") },
+  ]);
+  const [morpho, bal, aave] = res;
+  if (morpho?.success && morpho.returnData.length >= 66) log.info(`ok   Morpho Blue ${MORPHO_BLUE}: ${(Number(abi.decode(["uint256"], morpho.returnData)[0]) / 1e18).toFixed(1)} WETH available for free flash loans`);
+  else {
+    log.error(`FAIL Morpho Blue ${MORPHO_BLUE}: WETH balance unreadable`);
+    ok = false;
+  }
+  if (bal?.success && bal.returnData.length >= 66) {
+    const fee = abi.decode(["uint256"], bal.returnData)[0] as bigint;
+    log[fee === 0n ? "info" : "warn"](`${fee === 0n ? "ok  " : "NOTE"} Balancer V2 flash-loan fee: ${(Number(fee) / 1e16).toFixed(4)}%${fee === 0n ? "" : " — prefer FLASH_SOURCE=morpho"}`);
+  } else log.warn(`NOTE Balancer fee collector ${BALANCER_FEES_COLLECTOR}: could not read the flash-loan fee (only matters with FLASH_SOURCE=balancer)`);
+  if (aave?.success && aave.returnData.length > 66) {
+    const list = aavePoolIface.decodeFunctionResult("getReservesList", aave.returnData)[0] as string[];
+    log.info(`ok   Aave V3 pool ${AAVE_V3.pool}: ${list.length} reserves`);
+  } else {
+    log.error(`FAIL Aave V3 pool ${AAVE_V3.pool}: getReservesList failed (set LIQUIDATIONS=false to skip)`);
+    ok = false;
+  }
   return ok;
 }

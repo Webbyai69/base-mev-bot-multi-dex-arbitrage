@@ -99,6 +99,17 @@ export class PaperEngine {
     //    stay muted until the spread has closed once).
     const routesNow = new Set(newOpps.map(routeKey));
     for (const r of [...this.consumed]) if (!routesNow.has(r)) this.consumed.delete(r);
+    this.register(newOpps);
+  }
+
+  /**
+   * Record new opportunities without evaluating pending ones. Used directly by
+   * the Flashblocks loop: an opportunity found mid-block on pre-confirmed
+   * state carries the last confirmed block number, so its first outcome check
+   * happens on the very next confirmed block — exactly the block our
+   * transaction would have landed in.
+   */
+  register(newOpps: Opportunity[]): void {
     const pendingRoutes = new Set([...this.pending.values()].map((p) => routeKey(p.opp)));
     for (const o of newOpps) {
       const r = routeKey(o);

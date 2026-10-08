@@ -5,8 +5,9 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DaySummary } from "./paper.js";
+import type { DaySummary, OutcomeStats } from "./paper.js";
 import type { MarketSummary } from "./classifier.js";
+import type { LiqDaySummary } from "./liquidations.js";
 
 const esc = (s: unknown): string =>
   String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -60,8 +61,41 @@ function hourlyChart(hourly: Array<{ hour: string; txs: number; profitUsd: numbe
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="MEV transactions per hour (UTC)" class="chart">${ticks}<line x1="${padL}" x2="${W - 8}" y1="${padT + plotH}" y2="${padT + plotH}" class="axis"/>${bars}${labels}</svg>`;
 }
 
-export function renderReport(day: string, paper: DaySummary | undefined, market: MarketSummary | undefined, meta: { mode: string; pools: number; pairs: number; ethUsd: number }): string {
-  const p = paper ?? { day, found: 0, optimisticNetUsd: 0, realisticNetUsd: 0, persisted: 0, taken: 0, closed: 0, pending: 0, gasUsd: 0, byPair: [], byRoute: [], takers: [], simMismatches: 0 };
+function statsTable(rows: OutcomeStats[], keyLabel: string, empty: string): string {
+  return table(
+    [keyLabel, "Found", "Landed", "Taken", "Closed", "Win rate", "Realistic net"],
+    rows.map((r) => [esc(r.key), String(r.found), String(r.persisted), String(r.taken), String(r.closed), r.winRate === null ? "–" : `${(r.winRate * 100).toFixed(0)}%`, usd(r.realisticNetUsd)]),
+    empty,
+  );
+}
+
+function liquidationSection(l: LiqDaySummary | undefined, watched: number | undefined): string {
+  if (!l && watched === undefined) return "";
+  const s = l ?? { found: 0, taken: 0, recovered: 0, open: 0, estProfitUsd: 0, realisticProfitUsd: 0, liquidators: [], biggest: [] };
+  return `
+  <h2>Aave V3 liquidations (paper)</h2>
+  <div class="tiles">
+    ${statTile("Liquidatable positions", String(s.found), watched !== undefined ? `out of ${watched} borrowers watched` : undefined)}
+    ${statTile("Would have been ours", String(s.open), "nobody liquidated them in time", s.open > 0 ? "good" : undefined)}
+    ${statTile("Taken by others", String(s.taken), `${s.recovered} recovered on their own`, s.taken > 0 ? "bad" : undefined)}
+    ${statTile("Realistic profit", usd(s.realisticProfitUsd), `estimate across all: ${usd(s.estProfitUsd)}`, s.realisticProfitUsd > 0 ? "good" : undefined)}
+  </div>
+  <div class="two" style="margin-top:14px">
+    <div class="card"><h2 style="margin-top:0">Biggest positions</h2>
+      ${table(["User", "Repay → seize", "Repay", "Est. profit", "Outcome"], s.biggest.map((b) => [`<span class="mono">${esc(short(b.user))}</span>`, esc(`${b.debtSymbol} → ${b.collateralSymbol}`), usd(b.repayUsd), usd(b.estProfitUsd), esc(b.status)]), "No liquidatable positions yet")}</div>
+    <div class="card"><h2 style="margin-top:0">Liquidators who beat us</h2>
+      ${table(["Liquidator", "Times"], s.liquidators.map((r) => [`<span class="mono">${esc(short(r.bot))}</span>`, String(r.count)]), "Nobody yet")}</div>
+  </div>`;
+}
+
+export function renderReport(
+  day: string,
+  paper: DaySummary | undefined,
+  market: MarketSummary | undefined,
+  meta: { mode: string; pools: number; pairs: number; ethUsd: number; clPools?: number; borrowersWatched?: number },
+  liq?: LiqDaySummary,
+): string {
+  const p = paper ?? { day, found: 0, optimisticNetUsd: 0, realisticNetUsd: 0, persisted: 0, taken: 0, closed: 0, pending: 0, gasUsd: 0, byPair: [], byRoute: [], takers: [], simMismatches: 0, byKind: [], byStage: [], scores: [] };
   const m = market ?? { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [] };
   const decided = p.persisted + p.taken + p.closed;
   const hitRate = decided ? `${((p.persisted / decided) * 100).toFixed(0)}% of decided opportunities would have landed` : "no opportunities decided yet";
@@ -102,7 +136,7 @@ export function renderReport(day: string, paper: DaySummary | undefined, market:
 <body>
 <main>
   <h1>Base arbitrage bot — ${esc(day)}</h1>
-  <p class="sub">Mode: <strong>${esc(meta.mode)}</strong> · watching ${meta.pools} pools across ${meta.pairs} token pairs · ETH ${usd(meta.ethUsd)}</p>
+  <p class="sub">Mode: <strong>${esc(meta.mode)}</strong> · watching ${meta.pools} pools${meta.clPools ? ` (${meta.clPools} concentrated-liquidity)` : ""} across ${meta.pairs} token pairs · ETH ${usd(meta.ethUsd)}</p>
 
   <h2>Your bot (paper trading)</h2>
   <div class="tiles">
@@ -121,6 +155,15 @@ export function renderReport(day: string, paper: DaySummary | undefined, market:
       <h2>Who beat us</h2>
       ${table(["Bot", "Times"], p.takers.map((r) => [`<span class="mono">${esc(r.bot)}</span>`, String(r.count)]), "Nobody yet")}</div>
   </div>
+  <div class="two" style="margin-top:14px">
+    <div class="card"><h2 style="margin-top:0">By strategy</h2>
+      ${statsTable(p.byKind, "Strategy", "Nothing yet")}
+      <h2>Block vs Flashblock reaction</h2>
+      ${statsTable(p.byStage, "Found on", "Nothing yet")}</div>
+    <div class="card"><h2 style="margin-top:0">Route win rates (verified only)</h2>
+      ${statsTable(p.scores, "Route", "No verified route has been decided yet")}</div>
+  </div>
+  ${liquidationSection(liq, meta.borrowersWatched)}
 
   <h2>The Base MEV market today</h2>
   <div class="tiles">

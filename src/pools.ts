@@ -516,20 +516,21 @@ export class PoolRegistry {
   // ------------------------------------------------------------------------
 
   /** Refresh reserves for the given pools at one block (consistent snapshot). */
-  async refreshReserves(pools: Pool[], block: number | "pending"): Promise<void> {
+  /** `via` lets the Flashblocks loop read pre-confirmed state through its own RPC endpoint. */
+  async refreshReserves(pools: Pool[], block: number | "pending", via?: Chain): Promise<void> {
     if (pools.length === 0) return;
     const v2 = pools.filter((p) => !p.cl);
     const cl = pools.filter((p) => p.cl);
-    await Promise.all([this.refreshV2(v2, block), this.refreshCl(cl, block)]);
+    await Promise.all([this.refreshV2(v2, block, via ?? this.chain), this.refreshCl(cl, block, via ?? this.chain)]);
   }
 
-  private async refreshV2(pools: Pool[], block: number | "pending"): Promise<void> {
+  private async refreshV2(pools: Pool[], block: number | "pending", chain: Chain): Promise<void> {
     if (pools.length === 0) return;
     const calls: Call[] = pools.map((p) => ({
       target: p.address,
       callData: (p.kind === "aerodrome" ? aeroPoolIface : univ2PairIface).encodeFunctionData("getReserves"),
     }));
-    const res = await this.chain.multicall(calls, block);
+    const res = await chain.multicall(calls, block);
     pools.forEach((p, i) => {
       const r = res[i]!;
       if (!r.success || r.returnData.length < 2 + 64 * 3) return;
@@ -546,15 +547,15 @@ export class PoolRegistry {
    * price moved more than one word since, the words we need are missing and
    * the pool is simply infeasible for routing until the next refresh.
    */
-  private async refreshCl(pools: Pool[], block: number | "pending"): Promise<void> {
+  private async refreshCl(pools: Pool[], block: number | "pending", chain: Chain): Promise<void> {
     if (pools.length === 0) return;
     // Pools never refreshed need their tick first to know which words to read.
     const fresh = pools.filter((p) => p.cl!.sqrtPriceX96 === 0n);
-    if (fresh.length) await this.readCl(fresh, block, false);
-    await this.readCl(pools, block, true);
+    if (fresh.length) await this.readCl(fresh, block, false, chain);
+    await this.readCl(pools, block, true, chain);
   }
 
-  private async readCl(pools: Pool[], block: number | "pending", withWords: boolean): Promise<void> {
+  private async readCl(pools: Pool[], block: number | "pending", withWords: boolean, chain: Chain): Promise<void> {
     const calls: Call[] = [];
     const layout: Array<{ start: number; words: number[] }> = [];
     for (const p of pools) {
@@ -572,7 +573,7 @@ export class PoolRegistry {
       }
       layout.push({ start, words });
     }
-    const res = await this.chain.multicall(calls, block);
+    const res = await chain.multicall(calls, block);
     pools.forEach((p, i) => {
       const s = p.cl!;
       const { start, words } = layout[i]!;
@@ -608,6 +609,18 @@ export class PoolRegistry {
 
   async refreshAll(block: number): Promise<void> {
     await this.refreshReserves([...this.pools.values()], block);
+  }
+
+  /** Pools sharing a token pair with any of the given pools (the other side of a spread). */
+  siblings(addresses: Iterable<string>): Set<string> {
+    const want = new Set<string>();
+    for (const a of addresses) {
+      const p = this.pools.get(a);
+      if (p) want.add(pairKey(p.token0, p.token1));
+    }
+    const out = new Set<string>();
+    for (const p of this.pools.values()) if (want.has(pairKey(p.token0, p.token1))) out.add(p.address);
+    return out;
   }
 
   // ------------------------------------------------------------------------
