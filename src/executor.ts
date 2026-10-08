@@ -10,7 +10,7 @@
  *   - a daily gas budget (MAX_DAILY_GAS_USD) stops the bot if reverts pile up
  */
 import { Wallet, type TransactionResponse } from "ethers";
-import { executorIface, routeExecutorIface } from "./abi.js";
+import { executorIface } from "./abi.js";
 import type { Chain } from "./rpc.js";
 import type { Opportunity } from "./scanner.js";
 import type { Store } from "./store.js";
@@ -39,18 +39,7 @@ export class LiveExecutor {
     readonly store: Store,
     privateKey: string,
     readonly executorAddress: string,
-    readonly opts: {
-      gasLimit: number;
-      priorityFeeGwei: number;
-      maxDailyGasUsd: number;
-      useFlash: boolean;
-      /** Deployed RouteExecutor for multi-hop / CL routes; without it those routes are never sent. */
-      routeExecutorAddress?: string;
-      /** 0 own capital, 1 Morpho, 2 Balancer. */
-      routeSource?: number;
-      /** Gas limit for a route = this many units per hop + 100k. */
-      routeGasPerHop?: number;
-    },
+    readonly opts: { gasLimit: number; priorityFeeGwei: number; maxDailyGasUsd: number; useFlash: boolean },
   ) {
     this.wallet = new Wallet(privateKey, chain.provider);
   }
@@ -79,14 +68,10 @@ export class LiveExecutor {
       log.warn(`daily gas budget exhausted ($${this.gasSpentTodayUsd.toFixed(2)}); not sending`);
       return false;
     }
-    if (o.route && !this.opts.routeExecutorAddress) {
-      log.debug(`not sending ${o.id}: multi-hop routes need ROUTE_EXECUTOR_ADDRESS`);
-      return false;
-    }
     if (o.route) {
-      // Multi-hop / CL routes run through RouteExecutor, which stays paper-only until its
-      // simulations have a track record; never send them through the two-pool ArbExecutor.
-      log.debug(`not sending ${o.id}: multi-hop routes are paper-only for now`);
+      // Multi-hop / CL routes need RouteExecutor and stay paper-only for now;
+      // never send them through the two-pool ArbExecutor.
+      log.debug(`not sending ${o.id}: multi-hop routes are paper-only`);
       return false;
     }
     if (o.sim !== "executor-ok") {
@@ -102,26 +87,17 @@ export class LiveExecutor {
   private async send(o: Opportunity, ethUsd: number): Promise<void> {
     // Give up 5% of the modelled profit to reserve slack for reserve drift within the block.
     const minProfit = (o.profit * 95n) / 100n;
-    let to = this.executorAddress;
-    let data: string;
-    let gasLimit = this.opts.gasLimit;
-    if (o.route) {
-      to = this.opts.routeExecutorAddress!;
-      data = routeExecutorIface.encodeFunctionData("execute", [o.route.tokens, o.route.executorHops, o.amountIn, minProfit, this.opts.routeSource ?? 1]);
-      gasLimit = 100_000 + (this.opts.routeGasPerHop ?? 160_000) * o.route.pools.length;
-    } else {
-      const fn = this.opts.useFlash ? "executeFlash" : "executeWithCapital";
-      data = executorIface.encodeFunctionData(fn, [o.buyPool, o.sellPool, o.tokenIn, o.amountIn, o.amountMid, o.amountOut, minProfit]);
-    }
+    const fn = this.opts.useFlash ? "executeFlash" : "executeWithCapital";
+    const data = executorIface.encodeFunctionData(fn, [o.buyPool, o.sellPool, o.tokenIn, o.amountIn, o.amountMid, o.amountOut, minProfit]);
     const fee = await this.chain.provider.getFeeData();
     const priority = BigInt(Math.round(this.opts.priorityFeeGwei * 1e9));
     const base = fee.maxFeePerGas ?? (fee.gasPrice ?? 0n);
     let tx: TransactionResponse;
     try {
       tx = await this.wallet.sendTransaction({
-        to,
+        to: this.executorAddress,
         data,
-        gasLimit,
+        gasLimit: this.opts.gasLimit,
         maxPriorityFeePerGas: priority,
         maxFeePerGas: base + priority,
         type: 2,
