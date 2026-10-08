@@ -306,7 +306,7 @@ async function main(): Promise<void> {
   try {
     switch (cmd) {
       case "check": {
-        const ok = await runCheck(chain);
+        const ok = await runCheck(chain, { clPools: s.clPools, flashLoans: s.multiHop, liquidations: s.liquidations });
         console.log(ok ? "\nAll checks passed." : "\nSome checks FAILED — fix the addresses in src/config.ts before running.");
         process.exitCode = ok ? 0 : 1;
         break;

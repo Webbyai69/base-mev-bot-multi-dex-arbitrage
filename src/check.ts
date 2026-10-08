@@ -21,7 +21,14 @@ import { log } from "./log.js";
 
 const abi = AbiCoder.defaultAbiCoder();
 
-export async function runCheck(chain: Chain): Promise<boolean> {
+/** Which of the upgrade's contracts to verify (all by default; tests against the V2-only mock chain turn them off). */
+export interface CheckOptions {
+  clPools?: boolean;
+  flashLoans?: boolean;
+  liquidations?: boolean;
+}
+
+export async function runCheck(chain: Chain, opts: CheckOptions = {}): Promise<boolean> {
   let ok = true;
   const net = await chain.provider.getNetwork();
   if (Number(net.chainId) !== CHAIN_ID) {
@@ -81,7 +88,7 @@ export async function runCheck(chain: Chain): Promise<boolean> {
       log.info(`ok   ${label} -> ${n}`);
     }
   });
-  return (await runUpgradeChecks(chain)) && ok;
+  return (await runUpgradeChecks(chain, { clPools: opts.clPools ?? true, flashLoans: opts.flashLoans ?? true, liquidations: opts.liquidations ?? true })) && ok;
 }
 
 /**
@@ -90,10 +97,10 @@ export async function runCheck(chain: Chain): Promise<boolean> {
  * 0.01 WETH through it. Plus Morpho (free flash loans need idle WETH),
  * Balancer's flash-loan fee, and Aave V3's reserve list.
  */
-async function runUpgradeChecks(chain: Chain): Promise<boolean> {
+async function runUpgradeChecks(chain: Chain, opts: Required<CheckOptions>): Promise<boolean> {
   let ok = true;
   const ZERO = "0x0000000000000000000000000000000000000000";
-  for (const d of CL_DEXES) {
+  for (const d of opts.clPools ? CL_DEXES : []) {
     const calls: Call[] = d.poolKeys.map((k) => ({
       target: d.factory,
       callData: d.kind === "univ3" ? univ3FactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]) : slipstreamFactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]),
@@ -124,22 +131,29 @@ async function runUpgradeChecks(chain: Chain): Promise<boolean> {
     const out = abi.decode(["uint256"], q.returnData.slice(0, 66))[0] as bigint;
     log.info(`ok   ${d.name}: ${found.length} WETH/USDC pools, quoter says 0.01 WETH -> ${(Number(out) / 1e6).toFixed(2)} USDC`);
   }
+  if (!opts.flashLoans && !opts.liquidations) return ok;
   const res = await chain.multicall([
     { target: WETH, callData: erc20Iface.encodeFunctionData("balanceOf", [MORPHO_BLUE]) },
     { target: BALANCER_FEES_COLLECTOR, callData: "0xd877845c" }, // getFlashLoanFeePercentage()
     { target: AAVE_V3.pool, callData: aavePoolIface.encodeFunctionData("getReservesList") },
   ]);
   const [morpho, bal, aave] = res;
-  if (morpho?.success && morpho.returnData.length >= 66) log.info(`ok   Morpho Blue ${MORPHO_BLUE}: ${(Number(abi.decode(["uint256"], morpho.returnData)[0]) / 1e18).toFixed(1)} WETH available for free flash loans`);
+  if (!opts.flashLoans) {
+    /* skipped */
+  } else if (morpho?.success && morpho.returnData.length >= 66) log.info(`ok   Morpho Blue ${MORPHO_BLUE}: ${(Number(abi.decode(["uint256"], morpho.returnData)[0]) / 1e18).toFixed(1)} WETH available for free flash loans`);
   else {
     log.error(`FAIL Morpho Blue ${MORPHO_BLUE}: WETH balance unreadable`);
     ok = false;
   }
-  if (bal?.success && bal.returnData.length >= 66) {
+  if (!opts.flashLoans) {
+    /* skipped */
+  } else if (bal?.success && bal.returnData.length >= 66) {
     const fee = abi.decode(["uint256"], bal.returnData)[0] as bigint;
     log[fee === 0n ? "info" : "warn"](`${fee === 0n ? "ok  " : "NOTE"} Balancer V2 flash-loan fee: ${(Number(fee) / 1e16).toFixed(4)}%${fee === 0n ? "" : " — prefer FLASH_SOURCE=morpho"}`);
   } else log.warn(`NOTE Balancer fee collector ${BALANCER_FEES_COLLECTOR}: could not read the flash-loan fee (only matters with FLASH_SOURCE=balancer)`);
-  if (aave?.success && aave.returnData.length > 66) {
+  if (!opts.liquidations) {
+    /* skipped */
+  } else if (aave?.success && aave.returnData.length > 66) {
     const list = aavePoolIface.decodeFunctionResult("getReservesList", aave.returnData)[0] as string[];
     log.info(`ok   Aave V3 pool ${AAVE_V3.pool}: ${list.length} reserves`);
   } else {

@@ -36,8 +36,12 @@ after(async () => {
   await scenario.c.close();
 });
 
+// The mock chain models the V2-style DEXes only; the upgrade's contracts (Uniswap V3 /
+// Slipstream quoters, Morpho, Balancer, Aave) are verified by `check` against real Base.
+const V2_ONLY = { clPools: false, flashLoans: false, liquidations: false };
+
 test("check passes against the mock chain", async () => {
-  assert.equal(await runCheck(chain), true);
+  assert.equal(await runCheck(chain, V2_ONLY), true);
 });
 
 test("full discovery enumerates the factories", async () => {
@@ -277,13 +281,16 @@ test("paper engine tracks outcomes: taken, persisted, closed", async () => {
   assert.ok(html.includes("<svg"));
 });
 
-test("discovery adapts to a provider's eth_getLogs range cap (Alchemy free tier: 10 blocks)", async () => {
+test("discovery adapts to a provider's eth_getLogs range cap (Alchemy free tier: 10 blocks)", async (t) => {
   const sc = baseScenario();
   await sc.c.listen();
+  // Close the mock server even if an assertion fails, or the open socket keeps the test run alive forever.
+  t.after(() => sc.c.close().catch(() => undefined));
   sc.c.logsRangeLimit = 10;
   for (let i = 0; i < 25; i++) sc.c.nextBlock();
   sc.c.activityBlock();
   const c = new Chain(sc.c.url);
+  t.after(() => c.destroy().catch(() => undefined));
   const r = new PoolRegistry(c);
   await r.discover({ minLiquidityWeth: 2, maxPools: 400, mode: "activity", lookbackBlocks: 30, logRange: 100 });
   assert.ok(r.pools.size >= 6, `found ${r.pools.size} pools despite the range cap`);
@@ -302,42 +309,68 @@ test("discovery adapts to a provider's eth_getLogs range cap (Alchemy free tier:
   const det = await classifier.classifyBlock(n, 2000);
   assert.equal(det.length, 1);
   assert.ok(det[0].costUsd > 0, "gas cost attached from the receipt");
-  await c.destroy();
-  await sc.c.close();
 });
 
-test("survives a rate-limited endpoint (JSON-RPC error and HTTP 429)", async () => {
+test("survives a rate-limited endpoint (JSON-RPC error and HTTP 429)", async (t) => {
   for (const mode of ["jsonrpc", "http"]) {
     const sc = baseScenario();
     await sc.c.listen();
+    t.after(() => sc.c.close().catch(() => undefined));
     sc.c.rateLimitEvery = 3;
     sc.c.rateLimitMode = mode;
     // Public-endpoint pacing but no artificial delay, so the test stays fast.
     const c = new Chain(sc.c.url, undefined, { concurrency: 1, minIntervalMs: 0, batchMaxCount: 4, chunkSize: 120 });
+    t.after(() => c.destroy().catch(() => undefined));
     const r = new PoolRegistry(c);
-    assert.equal(await runCheck(c), true, `check under ${mode} rate limiting`);
+    assert.equal(await runCheck(c, V2_ONLY), true, `check under ${mode} rate limiting`);
     sc.c.activityBlock();
     await r.discover({ minLiquidityWeth: 2, maxPools: 400, mode: "activity", lookbackBlocks: 5, logRange: 2 });
     assert.ok(r.pools.size >= 6, `discovery under ${mode} rate limiting found ${r.pools.size} pools`);
     assert.ok(sc.c.rateLimited > 0, "the mock actually rate-limited us");
-    await c.destroy();
-    await sc.c.close();
   }
 });
 
-test("main.js run loop works end to end against the mock (paper mode)", async () => {
+test("main.js run loop works end to end against the mock (paper mode)", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "arbbot-run-"));
   // Fresh scenario with an open spread; one block of activity so discovery sees the pools.
   const sc = baseScenario();
   await sc.c.listen();
+  t.after(() => sc.c.close().catch(() => undefined));
   sc.c.activityBlock();
-  const env = { ...process.env, RPC_URL: sc.c.url, DATA_DIR: dir, REPORT_DIR: join(dir, "reports"), MODE: "paper", MIN_PROFIT_USD: "0.01", LOG_LEVEL: "info", DISCOVERY_LOOKBACK_BLOCKS: "20", DISCOVERY_LOG_RANGE: "10" };
+  // Every setting the bot would otherwise read from the developer's own .env is pinned here
+  // (an empty value counts as set), so a real WS_URL, executor or key can never leak into the test.
+  const env = {
+    ...process.env,
+    RPC_URL: sc.c.url,
+    WS_URL: "",
+    DATA_DIR: dir,
+    REPORT_DIR: join(dir, "reports"),
+    MODE: "paper",
+    MIN_PROFIT_USD: "0.01",
+    LOG_LEVEL: "info",
+    DISCOVERY: "activity",
+    DISCOVERY_LOOKBACK_BLOCKS: "20",
+    DISCOVERY_LOG_RANGE: "10",
+    EXECUTOR_ADDRESS: "",
+    ROUTE_EXECUTOR_ADDRESS: "",
+    PRIVATE_KEY: "",
+    LIQUIDATIONS: "false",
+    FLASHBLOCKS: "false",
+    TOKEN_BLACKLIST: "",
+    UI: "false",
+    TELEGRAM_BOT_TOKEN: "",
+  };
   const child = spawn(process.execPath, ["dist/main.js", "run"], { env, cwd: fileURLToPath(new URL("..", import.meta.url)) });
+  const exited = new Promise((r) => child.once("exit", r));
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
   let out = "";
   child.stdout.on("data", (d) => (out += d));
   child.stderr.on("data", (d) => (out += d));
   // Advance blocks while the bot polls; stop once an outcome has been finalized (or after 40s on a slow machine).
   const ticker = setInterval(() => sc.c.nextBlock(), 300);
+  t.after(() => clearInterval(ticker));
   const deadline = Date.now() + 40_000;
   const oppsFile = join(dir, "opportunities.jsonl");
   while (Date.now() < deadline) {
@@ -346,9 +379,9 @@ test("main.js run loop works end to end against the mock (paper mode)", async ()
   }
   await new Promise((r) => setTimeout(r, 1500)); // let a report cycle run
   clearInterval(ticker);
-  child.kill("SIGINT");
-  await new Promise((r) => child.on("exit", r));
-  await sc.c.close();
+  // The exit listener was attached at spawn, so this also resolves if the bot already stopped on its own.
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGINT");
+  await exited;
   assert.ok(existsSync(join(dir, "pools.json")), "pools.json written\n" + out);
   assert.ok(existsSync(join(dir, "opportunities.jsonl")), "opportunities logged\n" + out);
   const lines = readFileSync(join(dir, "opportunities.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
