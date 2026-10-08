@@ -26,7 +26,7 @@ import { Store } from "./store.js";
 import { PaperEngine, summarize } from "./paper.js";
 import { Classifier, fetchFullBlock, marketSummary } from "./classifier.js";
 import { renderReport, writeReport } from "./report.js";
-import { LiveExecutor, pickLiveSend } from "./executor.js";
+import { LiveExecutor, pickLiveSend, summarizeLive } from "./executor.js";
 import { Learner, Tuning } from "./learn.js";
 import { addBotWalletToEnv } from "./wallet.js";
 import { runCheck } from "./check.js";
@@ -234,7 +234,12 @@ async function writeDailyReport(store: Store, registry: PoolRegistry, s: Setting
 }
 
 async function writeDailyDigest(store: Store, registry: PoolRegistry, s: Settings, day = new Date().toISOString().slice(0, 10), extras: Extras = {}): Promise<string> {
-  const [paperDays, market, liq] = await Promise.all([summarize(store), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]), liquidationSummary(store, [day])]);
+  const [paperDays, market, liq, liveDays] = await Promise.all([
+    summarize(store),
+    marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]),
+    liquidationSummary(store, [day]),
+    summarizeLive(store, registry.ethPrice()),
+  ]);
   const text = renderDigest({
     day,
     settings: s,
@@ -253,6 +258,25 @@ async function writeDailyDigest(store: Store, registry: PoolRegistry, s: Setting
     ...(extras.scanner ? { funnel: { ...extras.scanner.funnel }, recorded: extras.paper ? { ...extras.paper.stats } : undefined } : {}),
     ...(extras.learner ? { learning: extras.learner.summary(Date.now(), extras.tuning?.blocked) } : {}),
     ...(extras.tuning ? { tuning: extras.tuning.view() } : {}),
+    ...(liveDays.length || extras.live
+      ? {
+          live: {
+            days: liveDays,
+            ...(extras.live
+              ? {
+                  safety: {
+                    blocked: extras.live.safety.blocked,
+                    stopFile: store.exists("STOP"),
+                    gasSpentTodayUsd: extras.live.safety.gasSpentTodayUsd,
+                    maxDailyGasUsd: extras.live.safety.maxDailyGasUsd,
+                    consecutiveFailures: extras.live.safety.consecutiveFailures,
+                    limit: extras.live.safety.limit,
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
   });
   return writeDigest(s.reportDir, day, text);
 }

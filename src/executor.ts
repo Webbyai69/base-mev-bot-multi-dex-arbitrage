@@ -145,6 +145,63 @@ export interface LiveRecord {
   expectedProfitUsd: number;
 }
 
+/** One day of live sends (UTC), for the digest and the daily review. */
+export interface LiveDay {
+  day: string;
+  sent: number;
+  landed: number;
+  reverted: number;
+  dropped: number;
+  pending: number;
+  /** Gas paid, including Base's L1 data fee. */
+  gasUsd: number;
+  /** What the landed trades were expected to make after gas, as modelled when sent. */
+  expectedNetUsd: number;
+  avgBidGwei: number | null;
+}
+
+/** Live sends per day from data/live.jsonl, newest day first. `ethUsd` prices records that predate gasUsd. */
+export async function summarizeLive(store: Store, ethUsd: number): Promise<LiveDay[]> {
+  const last = new Map<string, Record<string, unknown>>();
+  try {
+    for await (const r of store.read<Record<string, unknown>>("live.jsonl")) {
+      if (r.kind === "live" && typeof r.txHash === "string") last.set(r.txHash, r);
+    }
+  } catch {
+    return [];
+  }
+  const days = new Map<string, LiveDay & { bidSum: number; bidN: number }>();
+  for (const r of last.values()) {
+    const day = String(r.sentAt ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+    let d = days.get(day);
+    if (!d) days.set(day, (d = { day, sent: 0, landed: 0, reverted: 0, dropped: 0, pending: 0, gasUsd: 0, expectedNetUsd: 0, avgBidGwei: null, bidSum: 0, bidN: 0 }));
+    d.sent++;
+    if (r.status === "success") {
+      d.landed++;
+      d.expectedNetUsd += Number(r.expectedProfitUsd ?? 0) || 0;
+    } else if (r.status === "reverted") d.reverted++;
+    else if (r.status === "dropped") d.dropped++;
+    else d.pending++;
+    let gas = typeof r.gasUsd === "number" ? r.gasUsd : 0;
+    if (typeof r.gasUsd !== "number" && r.gasUsedWei !== undefined && r.gasUsedWei !== null) {
+      try {
+        gas = (Number(BigInt(String(r.gasUsedWei))) / 1e18) * ethUsd;
+      } catch {
+        gas = 0;
+      }
+    }
+    if (Number.isFinite(gas)) d.gasUsd += gas;
+    if (typeof r.priorityFeeGwei === "number") {
+      d.bidSum += r.priorityFeeGwei;
+      d.bidN++;
+    }
+  }
+  return [...days.values()]
+    .map(({ bidSum, bidN, ...d }) => ({ ...d, avgBidGwei: bidN ? bidSum / bidN : null }))
+    .sort((a, b) => b.day.localeCompare(a.day));
+}
+
 export interface LiveSafety {
   consecutiveFailures: number;
   limit: number;
@@ -356,7 +413,7 @@ export class LiveExecutor {
     const gasUsd = (Number(gasWei) / 1e18) * ethUsd;
     this.gasSpentTodayUsd += gasUsd;
     const status = receipt.status === 1 ? "success" : "reverted";
-    this.store.append("live.jsonl", { ...rec, status, gasUsedWei: gasWei, minedBlock: receipt.blockNumber });
+    this.store.append("live.jsonl", { ...rec, status, gasUsedWei: gasWei, gasUsd: Math.round(gasUsd * 1e6) / 1e6, minedBlock: receipt.blockNumber });
     if (status === "success") {
       this.consecutiveFailures = 0;
       this.succeeded++;

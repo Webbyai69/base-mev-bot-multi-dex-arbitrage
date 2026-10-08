@@ -12,6 +12,7 @@
  * It never edits .env or switches modes: you apply anything it suggests.
  */
 import type { LearningSummary, TuningView } from "./learn.js";
+import type { LiveDay } from "./executor.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DaySummary, OutcomeStats } from "./paper.js";
@@ -53,6 +54,11 @@ export interface DigestInput {
   /** The learning engine's summary and the settings you changed on the dashboard. */
   learning?: LearningSummary;
   tuning?: TuningView;
+  /** Live sends per day (newest first) and, while the bot runs, its safety rails. */
+  live?: {
+    days: LiveDay[];
+    safety?: { blocked: string | null; stopFile: boolean; gasSpentTodayUsd: number; maxDailyGasUsd: number; consecutiveFailures: number; limit: number };
+  };
 }
 
 /** Rejection codes for the funnel stages, so the AI review and helper agents can refer to them. */
@@ -98,6 +104,26 @@ export function renderDigest(d: DigestInput): string {
       ],
     ),
   );
+
+  if (s.mode === "live" || d.live?.days.length) {
+    const L = d.live;
+    const usd3 = (n: number): string => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(3);
+    out.push("## Live trading");
+    if (L?.safety) {
+      const f = L.safety;
+      const state = f.stopFile ? "**stopped** (STOP file present)" : f.blocked ? `**not sending**: ${f.blocked.slice(0, 200)}` : "enabled";
+      out.push(`Sending ${state}. Gas today ${usd3(f.gasSpentTodayUsd)} of the ${usd(f.maxDailyGasUsd)} daily limit; failed sends in a row ${f.consecutiveFailures} of ${f.limit}.\n`);
+    }
+    const rows = (L?.days ?? []).slice(0, 7);
+    out.push(
+      rows.length
+        ? md(
+            ["day", "sent", "landed", "reverted", "dropped", "gas paid", "expected net of landed (as modelled)", "avg bid gwei"],
+            rows.map((x) => [x.day, String(x.sent), String(x.landed), String(x.reverted), `${x.dropped}${x.pending ? ` (+${x.pending} pending)` : ""}`, usd3(x.gasUsd), usd3(x.expectedNetUsd), x.avgBidGwei === null ? "–" : x.avgBidGwei.toFixed(4)]),
+          )
+        : "_No live transactions sent yet._\n",
+    );
+  }
 
   out.push("## Paper trading — today");
   if (!p) out.push("_No opportunities recorded today._\n");

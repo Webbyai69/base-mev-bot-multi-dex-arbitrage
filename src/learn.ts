@@ -275,7 +275,7 @@ export class Learner {
       for await (const r of this.store.read<Record<string, unknown>>("live.jsonl")) {
         if (r.status === "pending") continue;
         const o = opps.get(String(r.id));
-        if (o) this.onLive(o, String(r.status) as "success" | "reverted" | "dropped", 0, Number(r.priorityFeeGwei ?? 0), Date.parse(String(r.sentAt)) || Date.now());
+        if (o) this.onLive(o, String(r.status) as "success" | "reverted" | "dropped", Number(r.gasUsd ?? 0) || 0, Number(r.priorityFeeGwei ?? 0), Date.parse(String(r.sentAt)) || Date.now());
       }
     } catch (err) {
       log.warn("learning from past data failed part-way:", (err as Error).message.slice(0, 120));

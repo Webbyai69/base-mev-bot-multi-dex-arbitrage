@@ -10,7 +10,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Learner, Tuning, parseReviewSuggestions } from "../dist/learn.js";
-import { pickLiveSend } from "../dist/executor.js";
+import { pickLiveSend, summarizeLive } from "../dist/executor.js";
+import { renderDigest } from "../dist/digest.js";
 import { Store } from "../dist/store.js";
 
 const HOUR = 3_600_000;
@@ -233,4 +234,30 @@ test("the AI review can suggest changes in a json block; only known settings wit
   assert.equal(s[0].value, 0.4);
   assert.equal(s[0].source, "ai-review");
   assert.deepEqual(parseReviewSuggestions("no json here", T), []);
+});
+
+test("the digest reports live sends per day, with gas and the safety rails, for the daily review", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "live-"));
+  const t = new Date().toISOString();
+  const base = { kind: "live", block: 1, sentAt: t };
+  const recs = [
+    { ...base, id: "a", txHash: "0xa", status: "pending", priorityFeeGwei: 0.005, expectedProfitUsd: 0.4 },
+    { ...base, id: "a", txHash: "0xa", status: "success", priorityFeeGwei: 0.005, expectedProfitUsd: 0.4, gasUsedWei: "4000000000000", gasUsd: 0.0098 },
+    { ...base, id: "b", txHash: "0xb", status: "pending", priorityFeeGwei: 0.164, expectedProfitUsd: 1.1 },
+    { ...base, id: "b", txHash: "0xb", status: "reverted", priorityFeeGwei: 0.164, expectedProfitUsd: 1.1, gasUsedWei: "20000000000000" },
+    { ...base, id: "c", txHash: "0xc", status: "pending", priorityFeeGwei: 0.005, expectedProfitUsd: 0.3 },
+  ];
+  writeFileSync(join(dir, "live.jsonl"), recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const [day] = await summarizeLive(new Store(dir), 2500);
+  assert.deepEqual([day.sent, day.landed, day.reverted, day.dropped, day.pending], [3, 1, 1, 0, 1], "one row per transaction, its latest status");
+  assert.ok(Math.abs(day.gasUsd - 0.0598) < 1e-9, "gas from gasUsd, or from gasUsedWei for older records");
+  assert.equal(day.expectedNetUsd, 0.4, "only landed trades count toward the expected net");
+  assert.deepEqual(await summarizeLive(new Store(mkdtempSync(join(tmpdir(), "none-"))), 2500), [], "no file, no rows");
+  const s = { mode: "live", minProfitUsd: 0.25, minPoolLiquidityWeth: 1, maxPools: 400, clPools: true, multiHop: true, maxHops: 3, maxCycles: 40, priorityFeeGwei: 0.005, gasRouteBase: 1, gasHopV2: 1, gasHopCl: 1, flashblocks: false, flashblockPollMs: 200, flashblockMaxPools: 40, liquidations: false, liqCheckEvery: 5, liqSwapCostBps: 30, tokenBlacklist: new Set(), refreshMode: "events", fullRefreshBlocks: 300, rpcFallbackUrls: [] };
+  const text = renderDigest({ day: day.day, settings: s, pools: { total: 1, cl: 0, pairs: 1 }, paperDays: [], live: { days: [day], safety: { blocked: null, stopFile: true, gasSpentTodayUsd: 0.06, maxDailyGasUsd: 1, consecutiveFailures: 1, limit: 5 } } });
+  assert.match(text, /## Live trading/);
+  assert.match(text, /Sending \*\*stopped\*\* \(STOP file present\)/);
+  assert.match(text, /\| 3 \| 1 \| 1 \| 0 \(\+1 pending\) \| \$0\.060 \| \$0\.400 \|/);
+  const none = renderDigest({ day: day.day, settings: s, pools: { total: 1, cl: 0, pairs: 1 }, paperDays: [], live: { days: [] } });
+  assert.match(none, /No live transactions sent yet/);
 });
