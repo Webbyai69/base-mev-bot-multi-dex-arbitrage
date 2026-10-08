@@ -1726,10 +1726,28 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     W.chainId = await W.provider.request({ method: "eth_chainId" });
     if (W.chainId !== BASE_CHAIN) throw new Error("Your wallet is still on another network. Switch it to Base and try again.");
   }
-  async function sendTx(tx) {
-    await ensureBase();
-    return W.provider.request({ method: "eth_sendTransaction", params: [{ from: W.account, ...tx }] });
+  // Some wallets (Brave Wallet among them) can't work out the gas limit for a contract
+  // deployment and leave Confirm disabled ("Missing gas limit"). So every transaction states its
+  // gas limit: the wallet's estimate plus 25% when it can make one, else a measured figure for
+  // that deployment. Only the gas actually used is paid for.
+  async function withGasLimit(tx, fallback) {
+    if (tx.to && !tx.data) return { ...tx, gas: "0x5208" }; // plain ETH to a wallet: always 21,000
+    let est = 0n;
+    try {
+      est = BigInt(await W.provider.request({ method: "eth_estimateGas", params: [{ from: W.account, ...tx }] }));
+    } catch (e) {
+      if (tx.to) throw e; // a call the wallet can't estimate would fail on-chain: show why instead of sending it
+    }
+    const gas = est >= 21000n ? est + est / 4n : fallback;
+    return { ...tx, gas: "0x" + gas.toString(16) };
   }
+  async function sendTx(tx, fallbackGas) {
+    await ensureBase();
+    const full = await withGasLimit({ value: "0x0", ...tx }, fallbackGas ?? 200000n);
+    return W.provider.request({ method: "eth_sendTransaction", params: [{ from: W.account, ...full }] });
+  }
+  // Gas a deployment uses (measured: ArbExecutor 1,014,110, RouteExecutor 1,764,006), with headroom.
+  const DEPLOY_GAS = { arb: 1300000n, route: 2200000n };
   async function waitReceipt(hash, timeoutMs) {
     const until = Date.now() + (timeoutMs || 180000);
     while (Date.now() < until) {
@@ -1934,7 +1952,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
         disabled: !cb || !cb.creationBytecode,
         confirm: () => `Deploy the RouteExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
         run: async (sent) => {
-          const hash = await sendTx({ data: cb.creationBytecode });
+          const hash = await sendTx({ data: cb.creationBytecode }, DEPLOY_GAS[cb === S.contracts?.arbExecutor ? "arb" : "route"]);
           sent(hash);
           const r = await waitReceipt(hash, 300000);
           if (r.status !== "0x1" || !isAddr(r.contractAddress)) throw new Error("The deployment failed on-chain.");
@@ -1982,7 +2000,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
         disabled: !cb || !cb.creationBytecode,
         confirm: () => `Deploy the ArbExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
         run: async (sent) => {
-          const hash = await sendTx({ data: cb.creationBytecode });
+          const hash = await sendTx({ data: cb.creationBytecode }, DEPLOY_GAS[cb === S.contracts?.arbExecutor ? "arb" : "route"]);
           sent(hash);
           const r = await waitReceipt(hash, 300000);
           if (r.status !== "0x1" || !isAddr(r.contractAddress)) throw new Error("The deployment failed on-chain.");
