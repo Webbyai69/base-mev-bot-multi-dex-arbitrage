@@ -231,6 +231,16 @@ export interface Settings {
   alertMinProfitUsd: number;
   alertMinLiqProfitUsd: number;
   alertMaxPerHour: number;
+  // --- online copy of the dashboard (cloud/) ---
+  /** The Worker's address, e.g. https://base-arb-dashboard.<you>.workers.dev. Unset = off. */
+  cloudUrl: string | undefined;
+  /** Must equal the Worker's INGEST_TOKEN secret. */
+  cloudToken: string | undefined;
+  cloudAccessClientId: string | undefined;
+  cloudAccessClientSecret: string | undefined;
+  cloudPushMs: number;
+  /** Ceiling for the watch list, which grows as the bot learns pools other bots trade on. */
+  maxWatchedPools: number;
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -339,7 +349,24 @@ export function loadSettings(): Settings {
     alertMinProfitUsd: num("ALERT_MIN_PROFIT_USD", 5),
     alertMinLiqProfitUsd: num("ALERT_MIN_LIQ_PROFIT_USD", 25),
     alertMaxPerHour: num("ALERT_MAX_PER_HOUR", 20),
+    cloudUrl: str("CLOUD_URL"),
+    cloudToken: str("CLOUD_TOKEN"),
+    cloudAccessClientId: str("CLOUD_ACCESS_CLIENT_ID"),
+    cloudAccessClientSecret: str("CLOUD_ACCESS_CLIENT_SECRET"),
+    cloudPushMs: Math.max(2000, num("CLOUD_PUSH_MS", 4000)),
+    maxWatchedPools: num("MAX_WATCHED_POOLS", 1500),
   };
+  if (settings.cloudUrl) {
+    let u: URL;
+    try {
+      u = new URL(settings.cloudUrl);
+    } catch {
+      throw new Error("CLOUD_URL must be the Worker's address, e.g. https://base-arb-dashboard.you.workers.dev");
+    }
+    const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+    if (u.protocol !== "https:" && !(local && u.protocol === "http:")) throw new Error("CLOUD_URL must start with https://");
+    if (!settings.cloudToken || settings.cloudToken.length < 24) throw new Error("CLOUD_URL is set, so CLOUD_TOKEN must be set too (the Worker's INGEST_TOKEN secret, at least 24 characters)");
+  }
   if (settings.botAddress && !/^0x[0-9a-fA-F]{40}$/.test(settings.botAddress)) {
     throw new Error("BOT_ADDRESS must be a public 0x address (42 characters). Never put a private key there.");
   }

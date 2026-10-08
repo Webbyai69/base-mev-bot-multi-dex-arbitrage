@@ -36,6 +36,7 @@ import { poolsOf } from "./scanner.js";
 import { BlockLogFetcher } from "./blocklogs.js";
 import { UiServer, type Summaries, type UiSources } from "./ui/server.js";
 import { Alerts, telegramSetup } from "./alerts.js";
+import { CloudPublisher } from "./cloud.js";
 
 const POOLS_FILE = "pools.json";
 
@@ -86,6 +87,7 @@ async function dashboardSummaries(store: Store, registry: PoolRegistry, s: Setti
 
 function dashboardSources(s: Settings, chain: Chain, registry: PoolRegistry, store: Store, running: boolean, extras?: Extras): UiSources {
   return {
+    cloud: () => extras?.cloud?.status(),
     version: version(),
     settings: s,
     store,
@@ -188,6 +190,7 @@ interface Extras {
   fbScanner?: Scanner;
   paper?: PaperEngine;
   live?: LiveExecutor;
+  cloud?: CloudPublisher;
 }
 
 async function writeDailyReport(store: Store, registry: PoolRegistry, s: Settings, day = new Date().toISOString().slice(0, 10), extras: Extras = {}): Promise<string> {
@@ -292,10 +295,23 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   if (live) extras.live = live;
   extras.chain = chain;
 
-  // Dashboard + alerts. Neither can stop the bot: a busy port or an unreachable
-  // Telegram only logs a warning.
-  const ui = s.ui ? new UiServer(dashboardSources(s, chain, registry, store, true, extras), { port: s.uiPort }) : undefined;
-  if (ui && (await ui.start())) log.info(`dashboard: ${ui.url} (open it in a browser on this computer)`);
+  // Dashboard, online copy and alerts. None of them can stop the bot: a busy
+  // port, an unreachable Worker or Telegram only log a warning.
+  const cloudOn = !!(s.cloudUrl && s.cloudToken);
+  const ui = s.ui || cloudOn ? new UiServer(dashboardSources(s, chain, registry, store, true, extras), { port: s.uiPort }) : undefined;
+  if (ui && s.ui && (await ui.start())) log.info(`dashboard: ${ui.url} (open it in a browser on this computer)`);
+  if (ui && cloudOn) {
+    ui.attach();
+    extras.cloud = new CloudPublisher(ui, {
+      url: s.cloudUrl!,
+      token: s.cloudToken!,
+      accessClientId: s.cloudAccessClientId,
+      accessClientSecret: s.cloudAccessClientSecret,
+      intervalMs: s.cloudPushMs,
+    });
+    extras.cloud.start();
+    log.info(`online dashboard: pushing to ${s.cloudUrl} every ${Math.round(s.cloudPushMs / 1000)} s${s.cloudAccessClientId ? " (with an Access service token)" : ""}`);
+  }
   alerts?.watch(store);
   if (live) {
     live.onTrip = (reason) => {
@@ -304,7 +320,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     };
   }
   const counts = poolCounts(registry);
-  void alerts?.started({ version: version(), pools: counts.total, clPools: counts.cl, dashboard: ui?.url || undefined });
+  void alerts?.started({ version: version(), pools: counts.total, clPools: counts.cl, dashboard: s.cloudUrl || ui?.url || undefined });
   // Start the stall clock now, so a feed that never delivers a first block also alerts.
   let lastBlockAt = Date.now();
   let lastBlockN = 0;
@@ -390,8 +406,8 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     }
 
     // Learn pools that real bots trade on, a few per block so discovery stays cheap.
-    if (classifier) {
-      const cands = classifier.candidatePoolsToWatch(detected).slice(0, 5);
+    if (classifier && registry.pools.size < s.maxWatchedPools) {
+      const cands = classifier.candidatePoolsToWatch(detected).slice(0, Math.min(5, s.maxWatchedPools - registry.pools.size));
       if (cands.length) {
         const added = await registry.addPoolsByAddress(cands.map((c) => c.address)).catch((e: Error) => (log.warn("watch-list add failed:", e.message.slice(0, 100)), []));
         for (const p of added) log.info(`watch list: added ${p.dex} pool ${p.address} (${registry.symbol(p.token0)}/${registry.symbol(p.token1)}) seen in an arbitrage`);
@@ -454,6 +470,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     await writeDailyReport(store, registry, s, undefined, extras).catch(() => undefined);
     await writeDailyDigest(store, registry, s, undefined, extras).catch(() => undefined);
     void alerts?.stopped(why);
+    await extras.cloud?.stop().catch(() => undefined);
     await alerts?.flush();
     await ui?.close().catch(() => undefined);
     await chain.destroy();

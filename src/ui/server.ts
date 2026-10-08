@@ -99,6 +99,8 @@ export interface UiSources {
   token?: (address: string) => { symbol: string; decimals: number } | undefined;
   /** A pool the bot watches (undefined when it doesn't). */
   pool?: (address: string) => { dex: string; feePpm: number; feeModel: string; cl: boolean } | undefined;
+  /** The online copy (src/cloud.ts), when CLOUD_URL is set. */
+  cloud?: () => { url: string; lastOkAt: number; pushes: number; failures: number; lastError: string | null } | undefined;
 }
 
 interface Client {
@@ -120,6 +122,7 @@ export class UiServer {
   private pingTimer: NodeJS.Timeout | undefined;
   private unsubscribe: (() => void) | undefined;
   private allowedHosts = new Set<string>();
+  private listeners: Array<(type: string, data: unknown) => void> = [];
   private code = gitInfo(fileURLToPath(new URL("../../", import.meta.url)));
   url = "";
 
@@ -128,8 +131,36 @@ export class UiServer {
     readonly opts: { port: number; host?: string; htmlPath?: string } = { port: 8787 },
   ) {}
 
+  /**
+   * Follow the bot's records (opportunities, outcomes, MEV, liquidations) without
+   * serving HTTP. start() does this too; the online mirror (src/cloud.ts) needs
+   * it even when the local dashboard is turned off.
+   */
+  attach(): void {
+    if (this.unsubscribe) return;
+    this.unsubscribe = this.src.store.onAppend((file, rec) => this.onRecord(file, rec));
+  }
+
+  /** Every live event (block, opp, outcome, mev, liq, liq-outcome, live, stop), for the online mirror. */
+  onEvent(fn: (type: string, data: unknown) => void): () => void {
+    this.listeners.push(fn);
+    return () => {
+      this.listeners = this.listeners.filter((x) => x !== fn);
+    };
+  }
+
+  /** Write the STOP file (live sending halts) and tell every viewer. */
+  writeStop(reason: string): { present: boolean; reason: string | null } {
+    writeFileSync(this.src.store.path("STOP"), `${new Date().toISOString()} ${reason}\n`);
+    log.warn(`STOP file written (${reason}); live sending halts. Delete ${this.src.store.path("STOP")} yourself to resume.`);
+    const st = this.stopState();
+    this.publish("stop", st);
+    return st;
+  }
+
   /** Starts listening. Resolves false (and the bot carries on) if the port is taken. */
   async start(): Promise<boolean> {
+    this.attach();
     const host = this.opts.host ?? "127.0.0.1";
     const server = createServer((req, res) => {
       this.handle(req, res).catch((err: Error) => {
@@ -156,12 +187,12 @@ export class UiServer {
     this.url = `http://localhost:${port}`;
     this.pingTimer = setInterval(() => this.broadcastRaw(": ping\n\n"), 15_000);
     this.pingTimer.unref();
-    this.unsubscribe = this.src.store.onAppend((file, rec) => this.onRecord(file, rec));
     return true;
   }
 
   async close(): Promise<void> {
     this.unsubscribe?.();
+    this.unsubscribe = undefined;
     if (this.pingTimer) clearInterval(this.pingTimer);
     for (const c of this.clients) c.res.end();
     this.clients.clear();
@@ -180,6 +211,13 @@ export class UiServer {
   }
 
   publish(type: string, data: unknown): void {
+    for (const fn of this.listeners) {
+      try {
+        fn(type, data);
+      } catch {
+        /* a listener can never break the bot */
+      }
+    }
     if (this.clients.size === 0) return;
     this.broadcastRaw(`event: ${type}\ndata: ${JSON.stringify(data, bigintReplacer)}\n\n`);
   }
@@ -338,10 +376,7 @@ export class UiServer {
       case "GET /api/review":
         return this.json(res, 200, this.review());
       case "POST /api/stop":
-        writeFileSync(this.src.store.path("STOP"), `${new Date().toISOString()} stopped from the dashboard\n`);
-        log.warn(`dashboard: STOP file written (${this.src.store.path("STOP")}); live sending halts`);
-        this.publish("stop", this.stopState());
-        return this.json(res, 200, this.stopState());
+        return this.json(res, 200, this.writeStop("stopped from the dashboard"));
       default:
         return this.json(res, 404, { error: "not found" });
     }
@@ -447,6 +482,7 @@ export class UiServer {
       },
       capabilities: capabilities(s),
       code: this.code,
+      cloud: this.src.cloud?.() ?? null,
       telegram: this.src.telegram,
       addresses: {
         bot: this.src.botAddress ?? null,
@@ -476,7 +512,7 @@ export class UiServer {
    * Summaries re-read the data files, so they're cached: recomputed when new
    * records arrived (at most every 10s) and otherwise every 60s.
    */
-  private async summary(): Promise<unknown> {
+  async summary(): Promise<unknown> {
     const now = Date.now();
     const age = this.summaryCache ? now - this.summaryCache.at : Infinity;
     if (age > 60_000 || (this.summaryDirty && age > 10_000)) {

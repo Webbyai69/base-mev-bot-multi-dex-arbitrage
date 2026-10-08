@@ -63,7 +63,11 @@ export function describeError(err: unknown): string {
 }
 
 export function isTransient(err: unknown): boolean {
-  const e = err as EthersErrorLike;
+  const e = err as EthersErrorLike & { info?: { responseStatus?: string } };
+  // A 4xx answer (bad request, wrong API key, block range too large...) won't
+  // change on a retry; 408 and 429 are the exceptions.
+  const status = String(e.info?.responseStatus ?? "");
+  if (/^4\d\d/.test(status) && !/^(408|425|429)/.test(status)) return false;
   const inner = e.info?.error ?? e.error;
   const text = `${e.shortMessage ?? ""} ${e.message ?? ""} ${inner?.message ?? ""} ${inner?.code ?? ""}`.toLowerCase();
   if (e.code === "SERVER_ERROR" || e.code === "TIMEOUT" || e.code === "NETWORK_ERROR") return true;
@@ -123,6 +127,9 @@ const ALCHEMY_CU: Record<string, number> = {
   eth_maxPriorityFeePerGas: 10,
   eth_sendRawTransaction: 40,
   eth_getTransactionCount: 20,
+  // Websocket subscriptions are billed by size, 0.04 CU per byte; a Base
+  // newHeads message is roughly 1.5 KB. One per block adds up to ~2.6M CU a day.
+  ws_newHeads: 60,
 };
 
 export interface RpcUsage {
@@ -391,7 +398,10 @@ export class Chain {
     if (this.wsUrl) {
       try {
         this.ws = new WebSocketProvider(this.wsUrl, Network.from(CHAIN_ID), { staticNetwork: Network.from(CHAIN_ID) });
-        await this.ws.on("block", (n: number) => void handle(n));
+        await this.ws.on("block", (n: number) => {
+          this.count("ws_newHeads");
+          void handle(n);
+        });
         usingWs = true;
         log.info("subscribed to new blocks over websocket (with a 2s backup poll in case the socket drops)");
       } catch (err) {

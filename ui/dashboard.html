@@ -425,8 +425,12 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 (() => {
   "use strict";
   const BOOT = window.__BOT__ || null;
-  const LIVE = !!(BOOT && typeof BOOT.token === "string" && BOOT.token.length > 10);
-  const TOKEN = LIVE ? BOOT.token : "";
+  // Three ways this page runs: served by the bot on your PC (a per-run token),
+  // as the online copy on Cloudflare (signed in through Cloudflare Access),
+  // or as a preview with example data.
+  const CLOUD = !!(BOOT && BOOT.mode === "cloud");
+  const TOKEN = BOOT && typeof BOOT.token === "string" && BOOT.token.length > 10 ? BOOT.token : "";
+  const LIVE = CLOUD || !!TOKEN;
   const EXPLORER = "https://basescan.org";
   const BASE_CHAIN = "0x2105";
   const TAPE_MAX = 90;
@@ -575,6 +579,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     state: null, summary: null, recent: null, contracts: null, wallet: null, review: null,
     blocks: [], feed: [], open: new Set(), lastBlockSeen: 0, sse: "connecting", stale: false,
     stopConfirm: false, stopError: null, tables: {}, reviewOpen: false,
+    mirror: null, stopRequest: null, waiting: false, connLost: false, skew: 0,
   };
   const W = { providers: new Map(), detail: null, provider: null, account: null, chainId: null, error: null, actions: {}, topUp: "0.003", deployed: null };
   try {
@@ -603,13 +608,43 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 
   // ---------------------------------------------------------------- API
   async function api(path, method) {
-    const res = await fetch(path, { method: method || "GET", headers: { "x-bot-token": TOKEN }, cache: "no-store" });
-    if (res.status === 401) {
+    const headers = {};
+    if (TOKEN) headers["x-bot-token"] = TOKEN;
+    if (method === "POST") headers["x-dashboard"] = "1";
+    const res = await fetch(path, { method: method || "GET", headers, cache: "no-store", credentials: "same-origin" });
+    if (res.status === 401 && TOKEN) {
       markStale();
       throw new Error("session ended");
     }
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+    if (!(res.headers.get("content-type") || "").includes("application/json")) throw new Error("not signed in");
     return res.json();
+  }
+  /** /api/state, which the online copy answers with { waiting } until your PC's first push. */
+  function loadState(full) {
+    return api("/api/state").then((st) => {
+      S.mirror = st.mirror || null;
+      S.stopRequest = st.stopRequest || null;
+      if (st.waiting) {
+        S.waiting = true;
+        renderHeader();
+        renderBanners();
+        tapeMeta();
+        return;
+      }
+      const wasWaiting = S.waiting;
+      const first = wasWaiting || !S.state;
+      S.waiting = false;
+      applyState(st, full || first);
+      if (wasWaiting) {
+        // The online copy just got its first data from your PC: load the rest too.
+        loadRecent();
+        loadSummary();
+        loadContracts();
+        loadReview();
+        refreshWalletData();
+      }
+    });
   }
   function markStale() {
     if (S.stale) return;
@@ -639,9 +674,9 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     on("block", onBlock);
     on("opp", onOpp);
     on("outcome", onOutcome);
-    on("liq", (l) => { if (S.recent) { S.recent.liq = [{ ...l, outcome: null }, ...(S.recent.liq || [])].slice(0, 20); renderLiq(); } });
-    on("liq-outcome", (o) => { const l = S.recent?.liq?.find((x) => x.id === o.id); if (l) { l.outcome = o.status; l.takenBy = o.takenBy; renderLiq(); } });
-    on("stop", (st) => { if (S.state) { S.state.stop = st; renderBanners(); renderSafety(); renderWallet(); } });
+    on("liq", onLiq);
+    on("liq-outcome", onLiqOutcome);
+    on("stop", onStop);
     es.onerror = () => {
       S.sse = "down";
       renderHeader();
@@ -649,7 +684,70 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     };
   }
 
+  /** The online copy has no event stream: poll for what happened since the last poll. */
+  function startPolling() {
+    let since = 0;
+    let fails = 0;
+    const loop = async () => {
+      if (!document.hidden && !S.stale) {
+        try {
+          const r = await api(`/api/live?since=${since}`);
+          fails = 0;
+          S.connLost = false;
+          S.sse = "up";
+          S.skew = Date.parse(r.now) - Date.now() || 0;
+          S.mirror = r.mirror;
+          S.stopRequest = r.stopRequest;
+          if (r.stop && S.state) S.state.stop = r.stop;
+          if (r.reset) {
+            loadState(true).catch(() => {});
+            loadRecent();
+          } else if (since > 0) {
+            for (const e of r.events) applyEvent(e);
+          }
+          since = r.seq;
+          if (S.waiting && r.mirror && r.mirror.lastPushAt) loadState(true).catch(() => {});
+        } catch {
+          fails++;
+          S.sse = "down";
+          if (fails >= 3) S.connLost = true;
+        }
+        renderHeader();
+        renderBanners();
+      }
+      setTimeout(loop, 3000);
+    };
+    loop();
+  }
+  function applyEvent(e) {
+    if (e.type === "block") onBlock(e.data);
+    else if (e.type === "opp") onOpp(e.data);
+    else if (e.type === "outcome") onOutcome(e.data);
+    else if (e.type === "liq") onLiq(e.data);
+    else if (e.type === "liq-outcome") onLiqOutcome(e.data);
+    else if (e.type === "stop") onStop(e.data);
+  }
+
   // ---------------------------------------------------------------- live events
+  function onLiq(l) {
+    if (!S.recent) return;
+    S.recent.liq = [{ ...l, outcome: null }, ...(S.recent.liq || [])].slice(0, 20);
+    renderLiq();
+  }
+  function onLiqOutcome(o) {
+    const l = S.recent?.liq?.find((x) => x.id === o.id);
+    if (!l) return;
+    l.outcome = o.status;
+    l.takenBy = o.takenBy;
+    renderLiq();
+  }
+  function onStop(st) {
+    if (!S.state) return;
+    S.state.stop = st;
+    renderBanners();
+    renderSafety();
+    renderWallet();
+  }
   function onBlock(b) {
     const last = S.blocks[S.blocks.length - 1];
     if (last && b.n <= last.n) return;
@@ -695,6 +793,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 
   function applyState(st, full) {
     S.state = st;
+    if (st.mirror) S.mirror = st.mirror;
+    if (st.stopRequest !== undefined) S.stopRequest = st.stopRequest;
     if (full || !S.blocks.length) {
       S.blocks = (st.blocks || []).slice(-TAPE_MAX);
       const last = S.blocks[S.blocks.length - 1];
@@ -719,12 +819,17 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     for (let i = 1; i < blocks.length; i++) n += Math.max(0, blocks[i].n - blocks[i - 1].n - 1);
     return n;
   }
+  /** How long since your PC last pushed to the online copy (corrected for clock differences). */
+  const pushAge = () => (S.mirror && S.mirror.lastPushAt ? Date.now() + S.skew - Date.parse(S.mirror.lastPushAt) : Infinity);
   function health() {
     const st = S.state;
     if (!LIVE) return { icon: "good", label: "Example data" };
     if (S.stale) return { icon: "bad", label: "Reload needed" };
+    if (CLOUD && S.connLost) return { icon: "bad", label: "Connection lost" };
+    if (CLOUD && S.waiting) return { icon: "wait", label: "Waiting for your PC" };
     if (!st) return { icon: "wait", label: "Connecting…" };
-    if (!st.running) return { icon: "off", label: "Bot not running here" };
+    if (CLOUD && pushAge() > 30000) return { icon: "bad", label: `PC offline for ${dur(pushAge())}`, detail: "No update from your PC. The bot may have stopped, or the PC is asleep or offline." };
+    if (!st.running) return { icon: "off", label: CLOUD ? "Bot stopped on your PC" : "Bot not running here" };
     if (S.sse === "down") return { icon: "warn", label: "Reconnecting…" };
     if (!S.blocks.length) return { icon: "wait", label: "Waiting for the first block" };
     const age = Date.now() - S.lastBlockSeen;
@@ -765,9 +870,13 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     const st = S.state;
     if (!LIVE) box.append(banner("", [h("b", null, "Example data. "), "This preview isn't connected to a bot. While your bot runs, its own dashboard is at ", h("code", null, "http://localhost:8787"), " on your PC, with your real numbers and your wallet."]));
     if (S.stale) box.append(banner("bad", [h("b", null, "The bot restarted, "), "so this page's session ended."], h("button", { class: "btn small", type: "button", onclick: () => location.reload() }, "Reload")));
-    if (LIVE && st && !st.running) box.append(banner("", ["The bot loop isn't running in this window, so there are no live blocks. Showing saved results. Start the bot with ", h("code", null, "node dist/main.js run"), "."]));
+    if (CLOUD && S.connLost) box.append(banner("bad", [h("b", null, "Lost the connection to this dashboard. "), "If your Cloudflare sign-in expired, reloading signs you in again."], h("button", { class: "btn small", type: "button", onclick: () => location.reload() }, "Reload")));
+    if (CLOUD && S.waiting) box.append(banner("", [h("b", null, "Waiting for your PC's first update. "), "Add CLOUD_URL and CLOUD_TOKEN to the bot's .env and restart it. The steps are in cloud/README.md."]));
+    if (CLOUD && st && !S.waiting && pushAge() > 30000) box.append(banner("warn", [h("b", null, `No update from your PC for ${dur(pushAge())}. `), "The bot may have stopped, or the PC is asleep or offline. What you see is from ", S.mirror?.lastPushAt ? clock(S.mirror.lastPushAt) : "earlier", "."]));
+    if (LIVE && st && !st.running) box.append(banner("", CLOUD ? ["The bot on your PC has stopped. These are its last numbers."] : ["The bot loop isn't running in this window, so there are no live blocks. Showing saved results. Start the bot with ", h("code", null, "node dist/main.js run"), "."]));
+    if (CLOUD && S.stopRequest && !st?.stop?.present) box.append(banner("warn", [h("b", null, `Stop requested at ${clock(S.stopRequest.requestedAt)}. `), pushAge() > 30000 ? "Your PC will stop sending as soon as it's back online." : "Your PC stops sending on its next update, normally within a few seconds."]));
     if (st?.stop?.present) box.append(banner("bad", [h("b", null, "Sending is stopped. "), st.stop.reason ? `${st.stop.reason}. ` : "", "To resume, find out why, then delete the STOP file in the data folder yourself."]));
-    if (st?.mode === "live" && !st.stop?.present) box.append(banner("warn", [h("b", null, "Live mode: "), "the bot sends real transactions with real money."], stopControl()));
+    if (st?.mode === "live" && !st.stop?.present && !S.stopRequest) box.append(banner("warn", [h("b", null, "Live mode: "), "the bot sends real transactions with real money."], stopControl()));
   }
   function stopControl() {
     if (!S.stopConfirm) return h("button", { class: "btn danger small", type: "button", onclick: () => { S.stopConfirm = true; renderBanners(); renderSafety(); } }, "Stop sending");
@@ -779,12 +888,13 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
   }
   async function doStop() {
     try {
-      const st = await api("/api/stop", "POST");
+      const r = await api("/api/stop", "POST");
       S.stopConfirm = false;
       S.stopError = null;
-      if (S.state) S.state.stop = st;
+      if (r.queued) S.stopRequest = r.stopRequest; // online copy: your PC picks it up on its next push
+      else if (S.state) S.state.stop = r;
     } catch (e) {
-      S.stopError = `Couldn't stop from here (${e.message}). Create a file named STOP in the data folder instead.`;
+      S.stopError = `Couldn't stop from here (${e.message}). Create a file named STOP in the bot's data folder instead.`;
     }
     renderBanners();
     renderSafety();
@@ -882,7 +992,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
     const skipped = items.length - blocks.length;
     const emptyEl = $("tape-empty");
     emptyEl.hidden = items.length > 0;
-    if (!items.length) emptyEl.textContent = LIVE && S.state && !S.state.running ? "The bot loop isn't running in this window." : "Waiting for blocks…";
+    if (!items.length) emptyEl.textContent = CLOUD && S.waiting ? "Waiting for your PC…" : LIVE && S.state && !S.state.running ? (CLOUD ? "The bot on your PC has stopped." : "The bot loop isn't running in this window.") : "Waiting for blocks…";
     const text = items.length ? `${ours} with your finds, ${rival} with rival arbitrage${skipped ? `, ${skipped} skipped` : ""}` : "";
     $("tape-stats").textContent = text;
     $("tape").setAttribute("aria-label", items.length ? `Last ${blocks.length} Base blocks: ${text}.` : "No blocks yet");
@@ -1330,7 +1440,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
         ["Other transient errors", int(Math.max(0, (u.transientErrors ?? 0) - (u.rateLimited ?? 0)))],
         ["Switched endpoint", `${int(u.failovers)} ${plural(u.failovers, "time", "times")}`],
         ["If on Alchemy", `≈${(u.alchemyCuPerDay / 1e6).toFixed(1)}M CU a day`],
-      ]), h("ul", { class: "methods" }, methods.map(([k, n]) => h("li", null, h("span", { class: "mono" }, k), h("span", { class: "num" }, int(n)))))));
+      ]), h("ul", { class: "methods" }, methods.map(([k, n]) => h("li", null, h("span", { class: "mono" }, k), h("span", { class: "num" }, int(n))))),
+      (u.byMethod || {}).ws_newHeads ? h("p", { class: "sub" }, `The websocket block feed (WS_URL) alone is about ${((u.byMethod.ws_newHeads * 60 * 86400000) / Math.max(60000, Date.parse(st.now) - Date.parse(u.since)) / 1e6).toFixed(1)}M Alchemy CU a day. Without WS_URL the bot polls for new blocks instead, at roughly a fifth of that.`) : null));
     }
     const r = st.refresh;
     cols.append(h("div", null, h("h3", null, "Pool state"), kv([
@@ -1350,6 +1461,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
       ["Flashblocks", s.flashblocks ? `On${st.flashblocks ? `: ${int(st.flashblocks.scans)} scans, ${int(st.flashblocks.opps)} finds` : ""}` : "Off"],
       ["Backup RPCs", int(s.rpcFallbacks)],
       ["Telegram alerts", st.telegram ? chip("good", "On") : h("span", null, "Off. Set up with ", h("code", null, "node dist/main.js telegram"))],
+      ["Online dashboard", CLOUD ? `This is it: last update from your PC ${S.mirror?.lastPushAt ? ago(pushAge()) : "not yet"}` : st.cloud ? (st.cloud.lastError ? chip("warn", `Failing: ${st.cloud.lastError}`) : chip("good", `On, last update sent ${st.cloud.lastOkAt ? ago(Date.parse(st.now) - st.cloud.lastOkAt) : "not yet"}`)) : h("span", null, "Off. See ", h("code", null, "cloud/README.md"))],
     ])));
     box.append(cols);
   }
@@ -1360,7 +1472,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
       h("span", null, `Base arb bot ${st?.version ? `v${st.version}` : ""}`),
       st?.code?.commit ? h("span", null, `Code ${st.code.commit}${st.code.branch ? ` on ${st.code.branch}` : ""}`) : null,
       st?.startedAt && st.running ? h("span", null, `Running for ${dur(Date.parse(st.now) - Date.parse(st.startedAt))}`) : null,
-      h("span", null, LIVE ? "This dashboard runs on your computer only and never sees a private key." : "Example data for a preview."),
+      h("span", null, CLOUD ? "Online copy of the dashboard on your PC. Your keys never leave your PC." : LIVE ? "This dashboard runs on your computer only and never sees a private key." : "Example data for a preview."),
     ]);
   }
 
@@ -1964,16 +2076,17 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
       startDemo();
       return;
     }
-    api("/api/state").then((st) => applyState(st, true)).catch(() => renderHeader());
+    loadState(true).catch(() => renderHeader());
     loadRecent();
     loadSummary();
     loadContracts();
     loadReview();
-    connectEvents();
+    if (CLOUD) startPolling();
+    else connectEvents();
     initWallets();
     refreshWalletData();
     const every = (ms, fn) => setInterval(() => !document.hidden && !S.stale && fn(), ms);
-    every(15000, () => api("/api/state").then((st) => applyState(st, false)).catch(() => {}));
+    every(15000, () => loadState(false).catch(() => {}));
     every(20000, loadSummary);
     every(60000, refreshWalletData);
     every(600000, loadReview);

@@ -17,6 +17,28 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
               ──► every minute: reports/YYYY-MM-DD.html
 ```
 
+## What's new in 0.4: the dashboard online
+
+The dashboard can now also live on Cloudflare (`cloud/`), at a private
+`workers.dev` address you can open from your phone. The bot stays on your PC
+and pushes a copy of its dashboard data out every few seconds. Nothing on
+Cloudflare can reach your PC or see a key. Cloudflare Access puts a login in
+front of it, and the Worker checks that login itself. The online page has the
+same wallet panel, and a remote **Stop sending** for live mode with no remote
+resume. It runs on the Workers Free plan and deploys straight from this
+repository with Cloudflare's Git integration. Setup, step by step:
+[`cloud/README.md`](cloud/README.md).
+
+Also in 0.4:
+
+- **Honest websocket cost.** The RPC figures now count the websocket block
+  feed. Alchemy bills it by size, about 2.6M CU a day, more than the free
+  plan's daily share on its own. The dashboard says so when `WS_URL` is set.
+- **No retries on 4xx answers.** Answers such as "block range too large" or
+  "bad API key" are no longer retried six times.
+- **Capped watch list.** The pools learned from rival trades stop growing at
+  `MAX_WATCHED_POOLS` (1,500).
+
 ## What's new in 0.3: dashboard and Telegram alerts
 
 **Dashboard.** While the bot runs, open **http://localhost:8787** in a browser
@@ -256,6 +278,8 @@ Leave it running for a few days. `data\opportunities.jsonl` and
 | `src/ui/server.ts` | local dashboard server: page, API, live event stream, balance reads (no keys, localhost only) |
 | `ui/dashboard.html` | the dashboard page (also works on its own with example data) |
 | `src/alerts.ts` | Telegram alerts, rate-limited and scrubbed of secrets; `telegram` setup command |
+| `src/cloud.ts` | pushes the dashboard's data to the online copy; picks up its stop request |
+| `cloud/` | the online dashboard: Cloudflare Worker + Durable Object, deployed by Git integration (see `cloud/README.md`) |
 | `test/forge/` | EVM tests for RouteExecutor (`npm run test:contracts`, needs Foundry) |
 | `test/` | unit tests, a mock Base JSON-RPC chain for end-to-end tests, an in-EVM contract test |
 

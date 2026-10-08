@@ -1,0 +1,14 @@
+{
+  "name": "base-arb-dashboard",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Online copy of the base-arb-bot dashboard on Cloudflare Workers (deployed by Workers Builds).",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

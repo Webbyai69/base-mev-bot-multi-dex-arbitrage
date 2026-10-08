@@ -13,8 +13,8 @@ Claude to integrate. Tasks 2 and 5 work well that way.
 **Avoiding clashes.** Claude owns these files and may change them in parallel:
 `src/main.ts`, `src/rpc.ts`, `src/pools.ts` (the refresh path),
 `src/classifier.ts`, `src/liquidations.ts` (the log plumbing),
-`src/executor.ts`, `src/alerts.ts`, `contracts/RouteExecutor.sol`, `ui/`,
-`src/ui/`. Each prompt says what it may touch. Anything else goes in new
+`src/executor.ts`, `src/alerts.ts`, `src/cloud.ts`, `contracts/RouteExecutor.sol`,
+`ui/`, `src/ui/`, `cloud/`. Each prompt says what it may touch. Anything else goes in new
 files, plus a short note on how to wire it in. Claude merges the branches.
 Rebase onto the latest base branch before you start: it now has the dashboard
 (`src/ui/server.ts`, `ui/dashboard.html`), Telegram alerts, and a funnel of

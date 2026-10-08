@@ -10,3 +10,4 @@ vendor/
 *.zip
 build/
 reports/*.md
+.wrangler/
