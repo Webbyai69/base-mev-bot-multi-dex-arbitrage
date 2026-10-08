@@ -55,6 +55,16 @@ export class LiveExecutor {
     return this.inFlight !== null;
   }
 
+  /** For the dashboard's safety panel. */
+  get safety(): { consecutiveFailures: number; limit: number; gasSpentTodayUsd: number; maxDailyGasUsd: number } {
+    return {
+      consecutiveFailures: this.consecutiveFailures,
+      limit: this.opts.maxConsecutiveFailures ?? 5,
+      gasSpentTodayUsd: this.gasSpentTodayUsd,
+      maxDailyGasUsd: this.opts.maxDailyGasUsd,
+    };
+  }
+
   private stopped(): boolean {
     return this.store.exists("STOP");
   }

@@ -220,6 +220,17 @@ export interface Settings {
   maxLogGap: number;
   /** Extra HTTP endpoints, used in order when the active one keeps failing. */
   rpcFallbackUrls: string[];
+  // --- dashboard & alerts ---
+  /** Serve the dashboard on http://localhost:<uiPort> while the bot runs. */
+  ui: boolean;
+  uiPort: number;
+  /** Public address of the bot's hot wallet (balances, gas top-up, RouteExecutor operator). Never a key. */
+  botAddress: string | undefined;
+  telegramBotToken: string | undefined;
+  telegramChatId: string | undefined;
+  alertMinProfitUsd: number;
+  alertMinLiqProfitUsd: number;
+  alertMaxPerHour: number;
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -320,7 +331,19 @@ export function loadSettings(): Settings {
         .map((x) => x.trim().toLowerCase())
         .filter((x) => /^0x[0-9a-f]{40}$/.test(x)),
     ),
+    ui: bool("UI", true),
+    uiPort: num("UI_PORT", 8787),
+    botAddress: str("BOT_ADDRESS"),
+    telegramBotToken: str("TELEGRAM_BOT_TOKEN"),
+    telegramChatId: str("TELEGRAM_CHAT_ID"),
+    alertMinProfitUsd: num("ALERT_MIN_PROFIT_USD", 5),
+    alertMinLiqProfitUsd: num("ALERT_MIN_LIQ_PROFIT_USD", 25),
+    alertMaxPerHour: num("ALERT_MAX_PER_HOUR", 20),
   };
+  if (settings.botAddress && !/^0x[0-9a-fA-F]{40}$/.test(settings.botAddress)) {
+    throw new Error("BOT_ADDRESS must be a public 0x address (42 characters). Never put a private key there.");
+  }
+  if (!Number.isInteger(settings.uiPort) || settings.uiPort < 1 || settings.uiPort > 65535) throw new Error("UI_PORT must be a port number");
   if (!["morpho", "balancer", "capital"].includes(settings.flashSource)) throw new Error("FLASH_SOURCE must be morpho, balancer or capital");
   if (settings.refreshMode !== "events" && settings.refreshMode !== "full") throw new Error("REFRESH_MODE must be events or full");
   if (settings.discovery !== "activity" && settings.discovery !== "full") throw new Error("DISCOVERY must be activity or full");

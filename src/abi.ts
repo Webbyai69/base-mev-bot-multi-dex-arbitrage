@@ -109,7 +109,15 @@ export const routeExecutorIface = new Interface([
   "error BadCallback()",
   "error TransferFailed()",
   "error NotOwner()",
+  "error NotOperator()",
+  "function owner() view returns (address)",
+  "function operator() view returns (address)",
+  "function setOperator(address newOperator)",
+  "function withdraw(address token, uint256 amount)",
 ]);
+
+/** Multicall3 extras used by the dashboard's balance reads. */
+export const multicallEthIface = new Interface(["function getEthBalance(address addr) view returns (uint256 balance)"]);
 
 /** Aave V3 Pool / data provider / oracle (liquidation monitor). */
 export const aavePoolIface = new Interface([

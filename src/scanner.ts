@@ -202,14 +202,26 @@ export class Scanner {
     const gasUsd = weiToUsd(gas.totalWei, ethUsd);
     const gasPrice = gas.baseFeeWei + gas.priorityFeeWei;
     const opps: Opportunity[] = [];
+    const F = this.funnel;
+    F.scans++;
+    F.candidates += raw.length + routes.length;
+    const priceOut = (netUsd: number): boolean => {
+      if (netUsd >= minNetUsd) return false;
+      if (netUsd < 0) F.gasAteIt++;
+      else F.belowMin++;
+      return true;
+    };
     this.lastCandidatePools = new Set([...raw.flatMap((q) => [q.buyPool.address, q.sellPool.address]), ...routes.flatMap((r) => r.pools.map((p) => p.address))]);
     for (const r of routes) {
       const tokenIn = r.tokens[0]!;
       const profitUsd = this.registry.usdValue(tokenIn, r.profit, ethUsd);
-      if (profitUsd === null) continue;
+      if (profitUsd === null) {
+        F.unpriced++;
+        continue;
+      }
       const routeGasUsd = weiToUsd(BigInt(this.routeGasUnits(r.pools)) * gasPrice + gas.l1FeeWei, ethUsd);
       const netUsd = profitUsd - routeGasUsd;
-      if (netUsd < minNetUsd) continue;
+      if (priceOut(netUsd)) continue;
       const first = r.pools[0]!;
       const last = r.pools[r.pools.length - 1]!;
       const label = routeLabel(r, (a) => this.registry.symbol(a));
@@ -249,9 +261,12 @@ export class Scanner {
     }
     for (const q of raw) {
       const profitUsd = this.registry.usdValue(q.tokenIn, q.profit, ethUsd);
-      if (profitUsd === null) continue; // cannot price -> cannot judge; skip
+      if (profitUsd === null) {
+        F.unpriced++; // cannot price -> cannot judge; skip
+        continue;
+      }
       const netUsd = profitUsd - gasUsd;
-      if (netUsd < minNetUsd) continue;
+      if (priceOut(netUsd)) continue;
       const buy = q.buyPool as Pool;
       const sell = q.sellPool as Pool;
       const pair = [buy.token0, buy.token1].sort().join("-");
@@ -290,10 +305,15 @@ export class Scanner {
     const usedPools = new Set<string>();
     const unique = opps.filter((o) => {
       const f = this.failed.get(routeKeyOf(o));
-      if (f && f.until > block) return false;
-      if (!o.route && seen.has(o.pair)) return false;
+      if (f && f.until > block) {
+        F.muted++;
+        return false;
+      }
       const ps = poolsOf(o);
-      if (ps.some((p) => usedPools.has(p))) return false;
+      if ((!o.route && seen.has(o.pair)) || ps.some((p) => usedPools.has(p))) {
+        F.overlapping++;
+        return false;
+      }
       if (!o.route) seen.add(o.pair);
       for (const p of ps) usedPools.add(p);
       return true;
@@ -302,9 +322,42 @@ export class Scanner {
     const classic = unique.filter((o) => !o.route);
     const multi = unique.filter((o) => o.route);
     await Promise.all([classic.length ? this.verify(classic, tag) : undefined, multi.length ? this.verifyRoutes(multi, tag) : undefined]);
-    for (const o of unique) if (o.sim === "executor-revert") this.recordFailure(o, block);
+    for (const o of unique) {
+      if (o.sim === "executor-revert") this.recordFailure(o, block);
+      if (o.sim === "executor-ok" || o.sim === "quoter-ok") F.verified++;
+      else if (o.sim === "executor-revert") F.reverted++;
+      else if (o.sim === "quoter-mismatch") F.quoteMismatch++;
+      else F.unverified++;
+    }
     return unique;
   }
+
+  /**
+   * Where candidates drop out, counted since start (dashboard "Why opportunities
+   * don't trade", daily digest). A candidate is one positive-spread route in one
+   * block, so a spread that stays open for 30 blocks counts 30 times.
+   */
+  readonly funnel = {
+    scans: 0,
+    /** Positive spread after swap fees, before gas (NET_PROFIT not yet known). */
+    candidates: 0,
+    /** Profit token has no USD price. */
+    unpriced: 0,
+    /** Gas cost more than the spread (net < 0). */
+    gasAteIt: 0,
+    /** Net positive but below MIN_PROFIT_USD. */
+    belowMin: 0,
+    /** Same route reverted on-chain recently; muted for 20 minutes. */
+    muted: 0,
+    /** Shares a pool (or classic pair) with a better route in the same block. */
+    overlapping: 0,
+    /** On-chain check passed (executor simulation or quoters). */
+    verified: 0,
+    reverted: 0,
+    quoteMismatch: 0,
+    /** No on-chain check possible (local maths only). */
+    unverified: 0,
+  };
 
   /** Verify multi-hop / CL routes: RouteExecutor.simulate() when available, else each hop against its DEX's quoter. */
   private async verifyRoutes(opps: Opportunity[], tag: number | "pending"): Promise<void> {

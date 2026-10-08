@@ -30,6 +30,10 @@ pragma solidity ^0.8.24;
  * the bot calls it with eth_call (optionally with this bytecode injected by a
  * state override, so nothing needs deploying for paper trading).
  *
+ * Roles: the owner (your own wallet, e.g. MetaMask) deploys it, withdraws
+ * profits and sets the operator; the operator (the bot's hot key) can only
+ * execute routes. A leaked bot key can therefore never withdraw anything.
+ *
  * STATUS: written alongside the bot's paper-trading upgrade and not yet
  * compiled or tested in an EVM. Compile and run the simulation path for a
  * few days (paper mode with ROUTE_EXECUTOR_ADDRESS set) before any live use.
@@ -77,10 +81,13 @@ contract RouteExecutor {
     uint160 internal constant MAX_SQRT_RATIO_MINUS_ONE = 1461446703485210103287273052203988822378723970341;
 
     address public owner;
+    /// @notice The bot's hot key: may execute routes, nothing else.
+    address public operator;
     /// @dev Set only while a flash loan or CL swap of ours is in progress; callbacks from anyone else revert.
     address private expectedCaller;
 
     error NotOwner();
+    error NotOperator();
     error InsufficientProfit(uint256 got, uint256 want);
     error Simulated(uint256 profit);
     error BadCallback();
@@ -88,9 +95,16 @@ contract RouteExecutor {
     error TransferFailed();
 
     event RouteExecuted(address indexed token, uint256 amountIn, uint256 profit, uint8 hops, uint8 source);
+    event OperatorSet(address indexed operator);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier onlyOperator() {
+        if (msg.sender != operator && msg.sender != owner) revert NotOperator();
         _;
     }
 
@@ -106,7 +120,7 @@ contract RouteExecutor {
 
     function execute(address[] calldata tokens, Hop[] calldata hops, uint256 amountIn, uint256 minProfit, uint8 source)
         external
-        onlyOwner
+        onlyOperator
         returns (uint256 profit)
     {
         profit = _run(tokens, hops, amountIn, source);
@@ -260,7 +274,15 @@ contract RouteExecutor {
         if (!ok) revert TransferFailed();
     }
 
+    /// @notice Authorise the bot's hot key (address(0) revokes it).
+    function setOperator(address newOperator) external onlyOwner {
+        operator = newOperator;
+        emit OperatorSet(newOperator);
+    }
+
     function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert NotOwner();
+        emit OwnershipTransferred(owner, newOwner);
         owner = newOwner;
     }
 }

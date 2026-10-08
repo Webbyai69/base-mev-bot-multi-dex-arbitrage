@@ -8,7 +8,14 @@
  *   node dist/main.js report     regenerate today's HTML report
  *   node dist/main.js summary    print paper-trading and market summaries
  *   node dist/main.js digest     write reports/digest-latest.md (what the daily AI review reads)
+ *   node dist/main.js ui         the dashboard on its own (saved results + wallet), without the bot loop
+ *   node dist/main.js telegram   set up Telegram alerts: find your chat id, then send a test message
+ *
+ * While "run" is going, the dashboard is at http://localhost:8787 (UI_PORT).
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { Wallet } from "ethers";
 import { loadSettings, type Settings } from "./config.js";
 import { Chain, redactUrl } from "./rpc.js";
 import { PoolRegistry, type PoolSnapshot } from "./pools.js";
@@ -27,8 +34,108 @@ import { FlashblockWatcher } from "./flashblocks.js";
 import { renderDigest, writeDigest } from "./digest.js";
 import { poolsOf } from "./scanner.js";
 import { BlockLogFetcher } from "./blocklogs.js";
+import { UiServer, type Summaries, type UiSources } from "./ui/server.js";
+import { Alerts, telegramSetup } from "./alerts.js";
 
 const POOLS_FILE = "pools.json";
+
+/** Set in main(); the crash handlers use it to send a last alert. */
+let alerts: Alerts | undefined;
+
+function version(): string {
+  try {
+    return (JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { version: string }).version;
+  } catch {
+    return "?";
+  }
+}
+
+/** The bot's public address: BOT_ADDRESS, or derived from PRIVATE_KEY (the key itself never leaves this process). */
+function botAddressOf(s: Settings): string | undefined {
+  if (s.botAddress) return s.botAddress;
+  if (!s.privateKey) return undefined;
+  try {
+    return new Wallet(s.privateKey).address;
+  } catch {
+    return undefined;
+  }
+}
+
+function poolCounts(registry: PoolRegistry): { total: number; cl: number; pairs: number } {
+  return {
+    total: registry.pools.size,
+    cl: [...registry.pools.values()].filter((p) => p.cl).length,
+    pairs: [...registry.groups().values()].filter((g) => g.length >= 2).length,
+  };
+}
+
+function safeEthUsd(registry: PoolRegistry): number {
+  try {
+    const p = registry.pools.size ? registry.ethPrice() : 0;
+    return Number.isFinite(p) ? p : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function dashboardSummaries(store: Store, registry: PoolRegistry, s: Settings): Promise<Summaries> {
+  const day = new Date().toISOString().slice(0, 10);
+  const [paperDays, market, liq] = await Promise.all([summarize(store), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]), liquidationSummary(store, [day])]);
+  return { paperDays, market: market[0], liq: liq[0] };
+}
+
+function dashboardSources(s: Settings, chain: Chain, registry: PoolRegistry, store: Store, running: boolean, extras?: Extras): UiSources {
+  return {
+    version: version(),
+    settings: s,
+    store,
+    running,
+    botAddress: botAddressOf(s),
+    telegram: !!alerts?.enabled,
+    // Without the bot loop (the "ui" command) there is no RPC traffic worth showing.
+    usage: running ? () => chain.usage() : undefined,
+    pools: () => poolCounts(registry),
+    ethUsd: () => safeEthUsd(registry),
+    extras: () => ({
+      flashblocks: extras?.fb?.stats,
+      liquidations: extras?.liq ? { watched: extras.liq.watched, stats: extras.liq.stats } : undefined,
+      refresh: extras?.refreshStats,
+      funnel: extras?.scanner ? { ...extras.scanner.funnel } : undefined,
+      flashblockFunnel: extras?.fbScanner ? { ...extras.fbScanner.funnel } : undefined,
+      paper: extras?.paper ? { ...extras.paper.stats } : undefined,
+      live: extras?.live?.safety,
+    }),
+    token: (a) => {
+      const t = registry.token(a);
+      return t ? { symbol: t.symbol, decimals: t.decimals } : undefined;
+    },
+    pool: (a) => {
+      const p = registry.pools.get(a.toLowerCase());
+      return p ? { dex: p.dex, feePpm: p.feePpm, feeModel: p.feeModel, cl: !!p.cl } : undefined;
+    },
+    summaries: () => dashboardSummaries(store, registry, s),
+    multicall: (calls) => chain.multicall(calls),
+    symbol: (a) => registry.symbol(a),
+  };
+}
+
+/** Yesterday's numbers to Telegram when the UTC day rolls over. */
+async function sendDailyAlert(store: Store, registry: PoolRegistry, s: Settings, day: string): Promise<void> {
+  if (!alerts?.enabled) return;
+  const [paper, market, liq] = await Promise.all([summarize(store, [day]), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]), liquidationSummary(store, [day])]);
+  const p = paper[0];
+  await alerts.daily({
+    day,
+    found: p?.found ?? 0,
+    persisted: p?.persisted ?? 0,
+    taken: p?.taken ?? 0,
+    closed: p?.closed ?? 0,
+    realisticNetUsd: p?.realisticNetUsd ?? 0,
+    optimisticNetUsd: p?.optimisticNetUsd ?? 0,
+    topRival: market[0]?.bots[0]?.bot,
+    liqFound: liq[0]?.found,
+  });
+}
 
 async function loadOrDiscover(registry: PoolRegistry, store: Store, s: Settings, force = false): Promise<void> {
   const snap = force ? undefined : store.readJson<PoolSnapshot>(POOLS_FILE);
@@ -64,11 +171,23 @@ function routeOptions(s: Settings): RouteOptions {
   };
 }
 
+interface RefreshStats {
+  checks: number;
+  driftedPools: number;
+  lastCheckBlock: number;
+  /** Pools that differed from a full re-read at the last self-check that found any. */
+  lastDrift: Array<{ pool: string; dex: string; block: number }>;
+}
+
 interface Extras {
   liq?: LiquidationMonitor;
   fb?: FlashblockWatcher;
   chain?: Chain;
-  refreshStats?: { checks: number; driftedPools: number };
+  refreshStats?: RefreshStats;
+  scanner?: Scanner;
+  fbScanner?: Scanner;
+  paper?: PaperEngine;
+  live?: LiveExecutor;
 }
 
 async function writeDailyReport(store: Store, registry: PoolRegistry, s: Settings, day = new Date().toISOString().slice(0, 10), extras: Extras = {}): Promise<string> {
@@ -107,6 +226,7 @@ async function writeDailyDigest(store: Store, registry: PoolRegistry, s: Setting
     ...(extras.fb ? { flashblockStats: extras.fb.stats } : {}),
     ...(extras.chain ? { rpc: extras.chain.usage() } : {}),
     ...(extras.refreshStats ? { refreshStats: extras.refreshStats } : {}),
+    ...(extras.scanner ? { funnel: { ...extras.scanner.funnel }, recorded: extras.paper ? { ...extras.paper.stats } : undefined } : {}),
   });
   return writeDigest(s.reportDir, day, text);
 }
@@ -140,6 +260,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   if (s.flashblocks) {
     const fbChain = new Chain(s.flashblocksRpcUrl);
     const fbScanner = new Scanner(fbChain, registry, s.executorAddress, s.simOverride, routeOpts);
+    extras.fbScanner = fbScanner;
     extras.fb = new FlashblockWatcher(fbChain, registry, fbScanner, paper, {
       pollMs: s.flashblockPollMs,
       maxPools: s.flashblockMaxPools,
@@ -164,9 +285,40 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
 
   let lastDigest = 0;
   let lastFullRefresh = 0;
-  const refreshStats = { checks: 0, driftedPools: 0 };
+  const refreshStats: RefreshStats = { checks: 0, driftedPools: 0, lastCheckBlock: 0, lastDrift: [] };
   extras.refreshStats = refreshStats;
+  extras.scanner = scanner;
+  extras.paper = paper;
+  if (live) extras.live = live;
   extras.chain = chain;
+
+  // Dashboard + alerts. Neither can stop the bot: a busy port or an unreachable
+  // Telegram only logs a warning.
+  const ui = s.ui ? new UiServer(dashboardSources(s, chain, registry, store, true, extras), { port: s.uiPort }) : undefined;
+  if (ui && (await ui.start())) log.info(`dashboard: ${ui.url} (open it in a browser on this computer)`);
+  alerts?.watch(store);
+  if (live) {
+    live.onTrip = (reason) => {
+      void alerts?.circuitBreaker(reason);
+      ui?.publish("stop", { present: true, reason });
+    };
+  }
+  const counts = poolCounts(registry);
+  void alerts?.started({ version: version(), pools: counts.total, clPools: counts.cl, dashboard: ui?.url || undefined });
+  // Start the stall clock now, so a feed that never delivers a first block also alerts.
+  let lastBlockAt = Date.now();
+  let lastBlockN = 0;
+  let lastFailovers = 0;
+  let currentDay = new Date().toISOString().slice(0, 10);
+  const watchdog = setInterval(() => {
+    alerts?.watchdog(lastBlockN, lastBlockAt);
+    const u = chain.usage();
+    if (u.failovers > lastFailovers) {
+      lastFailovers = u.failovers;
+      void alerts?.failover(u.activeEndpoint);
+    }
+  }, 30_000);
+  watchdog.unref();
   const logsFetcher = new BlockLogFetcher(chain, { liquidations: !!extras.liq });
   log.info(
     s.refreshMode === "events"
@@ -203,6 +355,8 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
         const drift = registry.driftAgainst(snap);
         refreshStats.checks++;
         refreshStats.driftedPools += drift.length;
+        refreshStats.lastCheckBlock = n;
+        if (drift.length) refreshStats.lastDrift = drift.slice(0, 12).map((a) => ({ pool: a, dex: registry.pools.get(a)?.dex ?? "?", block: n }));
         if (drift.length) {
           log.warn(
             `event refresh drift: ${drift.length} of ${snap.size} pools differed from a full re-read at block ${n} (${drift
@@ -250,6 +404,26 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
 
     blocksSeen++;
     const ms = Date.now() - started;
+    lastBlockAt = Date.now();
+    lastBlockN = n;
+    alerts?.blockProcessed(n);
+    ui?.pushBlock({
+      n,
+      at: lastBlockAt,
+      ms,
+      opps: opps.length,
+      bestNetUsd: opps.length ? Math.max(...opps.map((o) => o.netUsd)) : null,
+      mev: detected.length,
+      arbs: detected.filter((d) => d.type === "arbitrage").length,
+      gasUsd: (Number(gasQuote.totalWei) / 1e18) * ethUsd,
+      ethUsd,
+    });
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== currentDay) {
+      const finished = currentDay;
+      currentDay = today;
+      sendDailyAlert(store, registry, s, finished).catch((e: Error) => log.warn("daily alert failed:", e.message.slice(0, 120)));
+    }
     if (blocksSeen % 30 === 0 || ms > 1800) {
       const fb = extras.fb ? `, flashblocks ${extras.fb.stats.scans} scans/${extras.fb.stats.opps} opps` : "";
       const lq = extras.liq ? `, ${extras.liq.watched} borrowers` : "";
@@ -268,18 +442,25 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   };
 
   const stop = await chain.subscribeBlocks(onBlock);
-  const shutdown = async () => {
+  let shuttingDown = false;
+  const shutdown = async (why: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log.info("shutting down…");
     stop();
+    clearInterval(watchdog);
     extras.fb?.stop();
     extras.liq?.saveBorrowers(await chain.blockNumber().catch(() => 0));
     await writeDailyReport(store, registry, s, undefined, extras).catch(() => undefined);
     await writeDailyDigest(store, registry, s, undefined, extras).catch(() => undefined);
+    void alerts?.stopped(why);
+    await alerts?.flush();
+    await ui?.close().catch(() => undefined);
     await chain.destroy();
     process.exit(0);
   };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown("stopped from the console (Ctrl+C)"));
+  process.on("SIGTERM", () => void shutdown("the process was asked to stop (SIGTERM)"));
 }
 
 async function scanOnce(s: Settings, chain: Chain, registry: PoolRegistry, store: Store): Promise<void> {
@@ -351,6 +532,20 @@ async function main(): Promise<void> {
   const registry = new PoolRegistry(chain);
   registry.clPools = s.clPools;
   registry.blacklist = s.tokenBlacklist;
+  if (cmd === "run" && s.telegramBotToken && s.telegramChatId) {
+    alerts = new Alerts({
+      token: s.telegramBotToken,
+      chatId: s.telegramChatId,
+      mode: s.mode,
+      minOppUsd: s.alertMinProfitUsd,
+      minLiqUsd: s.alertMinLiqProfitUsd,
+      maxPerHour: s.alertMaxPerHour,
+      secrets: [s.privateKey ?? "", s.rpcUrl, s.wsUrl ?? "", s.flashblocksRpcUrl, ...s.rpcFallbackUrls].filter((x) => x.length >= 8),
+    });
+    log.info(`telegram alerts on (opportunities from $${s.alertMinProfitUsd}, liquidations from $${s.alertMinLiqProfitUsd}, at most ${s.alertMaxPerHour}/hour)`);
+  } else if (cmd === "run" && (s.telegramBotToken || s.telegramChatId)) {
+    log.warn("telegram alerts off: set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (run: node dist/main.js telegram)");
+  }
   try {
     switch (cmd) {
       case "check": {
@@ -389,15 +584,41 @@ async function main(): Promise<void> {
       case "run":
         await run(s, chain, registry, store);
         return; // keeps running
+      case "ui": {
+        const snap = store.readJson<PoolSnapshot>(POOLS_FILE);
+        if (snap) registry.loadSnapshot(snap);
+        const ui = new UiServer(dashboardSources(s, chain, registry, store, false), { port: s.uiPort });
+        if (!(await ui.start())) {
+          console.log(`Nothing started: port ${s.uiPort} is in use. If the bot is running, its dashboard is already at http://localhost:${s.uiPort}`);
+          process.exitCode = 1;
+          await chain.destroy();
+          break;
+        }
+        console.log(`Dashboard: ${ui.url}   (saved results only: the bot loop isn't running in this window; Ctrl+C to stop)`);
+        process.on("SIGINT", () => void ui.close().then(() => chain.destroy()).finally(() => process.exit(0)));
+        return; // keeps serving
+      }
+      case "telegram":
+        process.exitCode = await telegramSetup(s.telegramBotToken, s.telegramChatId);
+        break;
       default:
-        console.log("usage: node dist/main.js [check|discover|scan|run|report|summary|digest]");
+        console.log("usage: node dist/main.js [check|discover|scan|run|report|summary|digest|ui|telegram]");
     }
   } finally {
-    if (cmd !== "run") await chain.destroy();
+    if (cmd !== "run" && cmd !== "ui") await chain.destroy();
   }
 }
 
-main().catch((err) => {
-  log.error((err as Error).stack ?? String(err));
+/** Log, send one last alert (scrubbed of secrets), then exit non-zero — the same outcome as before, plus the alert. */
+async function die(err: unknown): Promise<never> {
+  log.error((err as Error)?.stack ?? String(err));
+  if (alerts) {
+    void alerts.crashed(err);
+    await alerts.flush();
+  }
   process.exit(1);
-});
+}
+process.on("uncaughtException", (err) => void die(err));
+process.on("unhandledRejection", (err) => void die(err));
+
+main().catch((err) => void die(err));

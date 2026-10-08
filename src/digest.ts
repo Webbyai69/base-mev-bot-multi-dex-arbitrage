@@ -46,7 +46,24 @@ export interface DigestInput {
   flashblockStats?: { ticks: number; scans: number; skippedUnchanged: number; opps: number; errors: number; maxMs: number };
   rpc?: RpcUsage;
   refreshStats?: { checks: number; driftedPools: number };
+  /** Scanner funnel since start (where candidates drop out) and what the paper engine recorded. */
+  funnel?: Record<string, number>;
+  recorded?: { recorded: number; alreadyTracked: number } | undefined;
 }
+
+/** Rejection codes for the funnel stages, so the AI review and helper agents can refer to them. */
+export const FUNNEL_STAGES: Array<{ key: string; code: string; label: string }> = [
+  { key: "candidates", code: "CANDIDATE", label: "candidate route checks (positive spread after swap fees; one per route per block)" },
+  { key: "unpriced", code: "NO_USD_PRICE", label: "profit token has no USD price" },
+  { key: "gasAteIt", code: "NET_NEGATIVE_AFTER_GAS", label: "gas cost more than the spread" },
+  { key: "belowMin", code: "NET_PROFIT_TOO_LOW", label: "net positive but below MIN_PROFIT_USD" },
+  { key: "muted", code: "MUTED_AFTER_REVERT", label: "route reverted on-chain recently (muted 20 min)" },
+  { key: "overlapping", code: "OVERLAPS_BETTER_ROUTE", label: "shares a pool with a better route in the same block" },
+  { key: "reverted", code: "SIMULATION_REVERT", label: "on-chain simulation reverted" },
+  { key: "quoteMismatch", code: "QUOTE_MISMATCH", label: "DEX quoters disagreed with our maths" },
+  { key: "unverified", code: "NOT_VERIFIED", label: "no on-chain check possible (local maths only)" },
+  { key: "verified", code: "VERIFIED", label: "passed the on-chain check" },
+];
 
 export function renderDigest(d: DigestInput): string {
   const p = d.paperDays.find((x) => x.day === d.day);
@@ -120,6 +137,18 @@ export function renderDigest(d: DigestInput): string {
   }
   if (d.refreshStats) {
     out.push(`Event-driven refresh self-checks: ${d.refreshStats.checks}, pools that drifted from a full re-read: ${d.refreshStats.driftedPools}.\n`);
+  }
+
+  if (d.funnel && d.funnel.candidates) {
+    const f = d.funnel;
+    out.push("## Why opportunities don't trade (block scanner, since start)");
+    out.push(
+      md(
+        ["code", "stage", "count", "% of candidates"],
+        FUNNEL_STAGES.map((st) => [st.code, st.label, String(f[st.key] ?? 0), `${(((f[st.key] ?? 0) / f.candidates!) * 100).toFixed(st.key === "candidates" ? 0 : 3)}%`]),
+      ),
+    );
+    if (d.recorded) out.push(`Recorded as new paper opportunities: ${d.recorded.recorded}; skipped because the same route was already pending or just traded: ${d.recorded.alreadyTracked}.\n`);
   }
 
   if (d.flashblockStats) {

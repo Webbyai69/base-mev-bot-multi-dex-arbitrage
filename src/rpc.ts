@@ -30,13 +30,14 @@ export type BlockTag = number | "latest" | "pending";
  * endpoint looks like a revert at first glance. The original error is kept
  * in err.info.error, which is what we inspect here.
  */
-export async function withRetry<T>(fn: () => Promise<T>, attempts = 6, baseDelayMs = 250): Promise<T> {
+export async function withRetry<T>(fn: () => Promise<T>, attempts = 6, baseDelayMs = 250, onTransient?: (err: unknown) => void): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
+      if (isTransient(err)) onTransient?.(err);
       if (!isTransient(err) || i === attempts - 1) throw err;
       const delay = Math.min(baseDelayMs * 2 ** i, 3000);
       (i >= 2 ? log.warn : log.debug)(`rpc transient error (attempt ${i + 1}/${attempts}), retrying in ${delay}ms: ${describeError(err).slice(0, 120)}`);
@@ -132,7 +133,12 @@ export interface RpcUsage {
   alchemyCu: number;
   alchemyCuPerDay: number;
   activeEndpoint: string;
+  /** False while a fallback endpoint is in use. */
+  onPrimary: boolean;
   failovers: number;
+  /** Transient failures (timeouts, resets, 5xx) and, among them, rate-limit answers (429 and similar). */
+  transientErrors: number;
+  rateLimited: number;
 }
 
 interface Endpoint {
@@ -238,9 +244,19 @@ export class Chain {
       alchemyCu: cu,
       alchemyCuPerDay: Math.round((cu / hours) * 24),
       activeEndpoint: redactUrl(this.rpcUrl),
+      onPrimary: this.active === 0,
       failovers: this.failoverCount,
+      transientErrors: this.transientCount,
+      rateLimited: this.rateLimitCount,
     };
   }
+
+  private transientCount = 0;
+  private rateLimitCount = 0;
+  private noteTransient = (err: unknown): void => {
+    this.transientCount++;
+    if (/429|rate limit|too many requests|limit exceeded|capacity|-32005|-32016/i.test(describeError(err))) this.rateLimitCount++;
+  };
 
   /**
    * Every request goes through the active endpoint's pacer and the transient-error
@@ -259,6 +275,8 @@ export class Chain {
             return fn(ep.provider);
           },
           this.endpoints.length > 1 ? 3 : 6,
+          250,
+          this.noteTransient,
         );
       } catch (err) {
         lastErr = err;

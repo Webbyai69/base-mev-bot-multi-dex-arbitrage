@@ -1,6 +1,6 @@
 # Tasks for helper agents
 
-Six self-contained prompts for other AI agents (DeepSeek, Codex, Cursor, another
+Eight self-contained prompts for other AI agents (DeepSeek, Codex, Cursor, another
 Claude Code session). Copy one whole block into the agent. Each block already
 contains the shared rules, so nothing else needs pasting.
 
@@ -10,12 +10,15 @@ A chat-only agent such as DeepSeek can't open the private repo. For those, attac
 the files listed under "Attach" in each prompt, and paste its answer back to
 Claude to integrate. Tasks 2 and 5 work well that way.
 
-**Avoiding clashes.** Claude is changing these files in parallel (low-RPC mode
-and the dashboard): `src/main.ts`, `src/rpc.ts`, `src/pools.ts` (the refresh
-path), `src/classifier.ts`, `src/liquidations.ts` (the log plumbing),
-`src/executor.ts`, `contracts/RouteExecutor.sol`, `ui/`, `src/ui/`. Each prompt
-says what it may touch. Anything else goes in new files, plus a short note on
-how to wire it in. Claude merges the branches.
+**Avoiding clashes.** Claude owns these files and may change them in parallel:
+`src/main.ts`, `src/rpc.ts`, `src/pools.ts` (the refresh path),
+`src/classifier.ts`, `src/liquidations.ts` (the log plumbing),
+`src/executor.ts`, `src/alerts.ts`, `contracts/RouteExecutor.sol`, `ui/`,
+`src/ui/`. Each prompt says what it may touch. Anything else goes in new
+files, plus a short note on how to wire it in. Claude merges the branches.
+Rebase onto the latest base branch before you start: it now has the dashboard
+(`src/ui/server.ts`, `ui/dashboard.html`), Telegram alerts, and a funnel of
+rejection counters in `src/scanner.ts` (`Scanner.funnel`).
 
 | # | Task | Branch | Size |
 |---|---|---|---|
@@ -25,6 +28,8 @@ how to wire it in. Claude merges the branches.
 | 4 | Aave liquidation executor contract | `agent/aave-liquidator` | large |
 | 5 | Encrypted key store | `agent/keystore` | small |
 | 6 | Tests against a copy of real Base pools, gas calibration, CI | `agent/fork-tests` | medium |
+| 7 | Opportunity history, near misses and size curves | `agent/opportunity-history` | medium |
+| 8 | Why did a rival get it? Replay and classify missed trades | `agent/miss-replay` | large |
 
 ---
 
@@ -270,7 +275,7 @@ WHAT TO BUILD
    - Find real pools through their factories at runtime (Uniswap V3 factory 0x33128a8fC17869897dcE68Ed026d694621f6FDfD getPool(WETH, USDC, 500); the Aerodrome factory in src/config.ts). Don't hard-code pool addresses.
    - Create a real price gap: vm.deal a test account, wrap ETH to WETH (0x4200000000000000000000000000000000000006), swap a large amount through one pool, then check that a two-hop route back through another pool simulates with Simulated(profit > 0). Do this for a Morpho flash loan (real Morpho Blue at 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb) and a Balancer V2 flash loan (real vault 0xBA12222222228d8Ba445958a75a0704d566BF2C8).
    - Execute the same route as the owner and assert the realised profit equals the simulated profit. Do a three-hop route (V2 -> Aerodrome -> V3) as well.
-   - RouteExecutor is getting an owner/operator role split in parallel. Write the tests against the contract on your base branch, and add operator-role cases after rebasing onto the branch that adds it.
+   - RouteExecutor has an owner/operator split: the deployer is the owner (withdraws, sets the operator); the operator or the owner may call execute(). Cover both, plus a stranger being refused.
 3. Gas calibration: from the fork runs, record the gas used by execute() for two- and three-hop routes with V2-only, CL-only and mixed hops, with each flash-loan source. Recommend values for GAS_ROUTE_BASE, GAS_HOP_V2 and GAS_HOP_CL (src/config.ts defaults: 70000 / 75000 / 115000) in docs/gas-calibration.md. Don't change the defaults yourself.
 4. CI (.github/workflows/test.yml): on push and PR, Node 20, npm ci, npm run build, npm test, then Foundry (foundry-rs/foundry-toolchain) with forge test --no-match-path "test/fork/*". Add a second job that runs the fork tests only when a BASE_RPC_URL repository secret exists.
 
@@ -285,4 +290,66 @@ RULES
 3. Don't edit src/ (except fixing a bug you can prove; describe it and keep it small), contracts/RouteExecutor.sol, ui/ or src/ui/. New files go in scripts/, test/fork/, docs/ and .github/.
 
 ATTACH (only if you can't open the repo): contracts/RouteExecutor.sol, test/forge/RouteExecutor.t.sol, foundry.toml, src/math.ts, src/clmath.ts, src/pools.ts, src/scanner.ts, src/config.ts, package.json
+```
+
+---
+
+## 7. Opportunity history, near misses and size curves
+
+```text
+You are helping build base-arb-bot, a TypeScript arbitrage bot for Base (chain id 8453): Node 20, ESM, strict TypeScript, ethers v6. It runs in PAPER mode. Repo: github.com/Webbyai69/base-mev-bot-multi-dex-arbitrage (private). Base branch: upgrade/v3-multihop-flashblocks-liquidations. Work on a new branch: agent/opportunity-history.
+
+WHY
+The dashboard (src/ui/server.ts + ui/dashboard.html) shows the last 40 opportunities and since-start counters of where candidates drop out (Scanner.funnel in src/scanner.ts: gasAteIt, belowMin, muted, overlapping, reverted, quoteMismatch, verified...). To decide what to improve next we need history: search every recorded opportunity, see "near misses" that just failed the minimum, and see how profit changes with trade size.
+
+HOW THE DATA LOOKS
+- data/opportunities.jsonl: one JSON object per line. kind "opportunity" (an Opportunity from src/scanner.ts plus mode) and kind "outcome" (src/paper.ts OutcomeRecord: id, status persisted|taken|closed, realisticNetUsd, takenBy). bigints are stored as decimal strings. Files grow to hundreds of MB, so never load a whole file into memory at once; stream it (Store.read in src/store.ts) or index it.
+- Day = the UTC date of foundAt.
+
+WHAT TO BUILD
+1. src/history.ts: class OpportunityIndex(store). It builds a compact in-memory index by streaming opportunities.jsonl once, then follows new records through store.onAppend (src/store.ts). query({ from?, to?, pair?, dex?, kind?: "classic"|"cl"|"triangular", status?, sim?, minNetUsd?, limit, offset }) returns { total, rows } with rows slimmed the way UiServer.slimOpp does (no bigints, legs with token symbols). Memory budget: under 200 bytes per opportunity in the index; full records are re-read from the file by byte offset when a page of rows is returned.
+2. Near misses: in src/scanner.ts, where a candidate is dropped for gas or the minimum (the priceOut helper in scan()), keep at most 5 per block with the best net value, and append them to data/near-misses.jsonl as { block, at, code: "NET_NEGATIVE_AFTER_GAS"|"NET_PROFIT_TOO_LOW", pairSymbols, dexes, amountIn, profitUsd, gasUsd, netUsd }. Only when NEAR_MISSES=true (default false) and only candidates whose net is within 50% of MIN_PROFIT_USD. Use the same codes as FUNNEL_STAGES in src/digest.ts.
+3. Size curves: give optimizeRoute in src/routes.ts an optional callback that receives every (amountIn, profit) pair it evaluates. In the scanner, keep up to 12 evenly spread samples per recorded opportunity as sizeCurve: Array<[amountIn: string, profitUsd: number]>. This is what shows sizing bugs.
+4. Tests (node:test, test/history.test.js) with a generated 50k-line file: correct totals per filter, paging, offsets stable while new records are appended, memory per record under the budget.
+5. A short WIRING.md section: how Claude should expose OpportunityIndex as GET /api/opportunities in src/ui/server.ts and draw sizeCurve in the opportunity detail. Don't edit src/ui/ or ui/ yourself.
+
+RULES
+1. Paper only: nothing here may send a transaction.
+2. Don't edit src/main.ts, src/rpc.ts, src/ui/, ui/, src/executor.ts or contracts/. In src/scanner.ts and src/routes.ts keep changes small and behind the new options.
+3. The extra work per block must stay under 2 ms with 400 pools (measure it and say so).
+
+ATTACH (only if you can't open the repo): src/scanner.ts, src/routes.ts, src/paper.ts, src/store.ts, src/digest.ts, src/ui/server.ts
+```
+
+---
+
+## 8. Why did a rival get it? Replay and classify missed trades
+
+```text
+You are helping build base-arb-bot, a TypeScript arbitrage bot for Base (chain id 8453): Node 20, ESM, strict TypeScript, ethers v6. It runs in PAPER mode. Repo: github.com/Webbyai69/base-mev-bot-multi-dex-arbitrage (private). Base branch: upgrade/v3-multihop-flashblocks-liquidations. Work on a new branch: agent/miss-replay.
+
+WHY
+src/classifier.ts records every arbitrage other bots land on Base (data/mev.jsonl: block, txHash, bot, pools, dexes, tokens, profitUsd). The dashboard already shows whether those trades used pools our bot watches. A rival trade isn't automatically "profit we missed": it may depend on ordering, inventory or access we don't have. We need a defensible, repeatable classification of why our bot didn't have each one, so the next engineering task is obvious.
+
+WHAT TO BUILD
+scripts/replay-misses.mjs (run after npm run build; reads RPC_URL from .env; needs an RPC that serves historical state for recent blocks, so check that first and stop with a clear message if it doesn't). For a day (default: yesterday UTC), take up to MAX_REPLAYS (default 200) rival arbitrages from data/mev.jsonl, and for each:
+1. Rebuild the state of its pools at block N-1 (the state the rival saw) with the bot's own code: PoolRegistry from dist/pools.js (addPoolsByAddress, then refreshReserves(pools, N - 1)).
+2. Classify into exactly one of:
+   - COVERAGE: at least one pool wasn't in our watch list at that time (data/pools.json snapshot history if available, otherwise "not watched now").
+   - PROTOCOL: a pool type the bot can't model (Uniswap V4, Curve, Balancer, anything unknown).
+   - ROUTE_SEARCH: all pools supported and watched, but the route's shape is outside what findCycles searches (more than MAX_HOPS hops, a start token other than WETH/USDC, or pruned by minLogEdge).
+   - PRICING: the bot's maths for the route at N-1 disagrees with the DEX quoters at N-1 by more than 0.1%.
+   - ECONOMICS: the route was there at N-1 but our gas model makes it net-negative or below MIN_PROFIT_USD (report the gap).
+   - TIMING: the route was profitable for us at N-1 and our paper engine recorded it too (match data/opportunities.jsonl by pools and block): we saw it and lost the race. Report their priority fee vs ours.
+   - UNKNOWN: anything that doesn't fit; say why.
+3. Write reports/misses-<day>.md (counts per class, top 20 uncovered pools with how often they appeared, top routes by lost profit) and reports/misses-<day>.json. The daily AI review will read the Markdown file, so keep it under 10 KB.
+4. Cap RPC use: at most 15 calls per replay, and print the total at the end.
+5. Tests with recorded fixtures (no network): one case per class.
+
+RULES
+1. Read-only: eth_call and eth_getLogs only; never send a transaction.
+2. Never commit RPC URLs or keys.
+3. Don't edit src/; import from dist/. If you need a hook in src/, describe it in WIRING.md for Claude.
+
+ATTACH (only if you can't open the repo): src/classifier.ts, src/pools.ts, src/routes.ts, src/scanner.ts, src/config.ts, src/paper.ts
 ```

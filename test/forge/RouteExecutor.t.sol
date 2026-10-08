@@ -292,13 +292,49 @@ contract RouteExecutorTest {
         } catch {}
     }
 
-    function testOnlyOwner() public {
+    function testStrangerCannotExecute() public {
         (address[] memory tokens, RouteExecutor.Hop[] memory hops) = _route();
         vm.prank(address(0xBEEF));
         try ex.execute(tokens, hops, 1e18, 0, 1) {
-            revert("non-owner executed");
+            revert("stranger executed");
         } catch (bytes memory err) {
-            require(bytes4(err) == RouteExecutor.NotOwner.selector, "wrong error");
+            require(bytes4(err) == RouteExecutor.NotOperator.selector, "wrong error");
+        }
+    }
+
+    function testOperatorExecutesButCannotWithdrawOrReassign() public {
+        address bot = address(0xB07);
+        ex.setOperator(bot);
+        require(ex.operator() == bot, "operator not set");
+        uint256 sim = _simulate(1e18, 1);
+        (address[] memory tokens, RouteExecutor.Hop[] memory hops) = _route();
+        vm.prank(bot);
+        uint256 profit = ex.execute(tokens, hops, 1e18, sim, 1);
+        require(profit == sim && profit > 0, "operator execute");
+        // The hot key can trade but never move the profits or change roles.
+        vm.prank(bot);
+        try ex.withdraw(address(weth), 0) {
+            revert("operator withdrew");
+        } catch (bytes memory err) {
+            require(bytes4(err) == RouteExecutor.NotOwner.selector, "withdraw: wrong error");
+        }
+        vm.prank(bot);
+        try ex.setOperator(bot) {
+            revert("operator changed roles");
+        } catch (bytes memory err) {
+            require(bytes4(err) == RouteExecutor.NotOwner.selector, "setOperator: wrong error");
+        }
+        // The owner withdraws everything to itself.
+        uint256 before = weth.balanceOf(address(this));
+        ex.withdraw(address(weth), 0);
+        require(weth.balanceOf(address(this)) == before + profit, "owner withdraw");
+        // Revoking the operator stops it.
+        ex.setOperator(address(0));
+        vm.prank(bot);
+        try ex.execute(tokens, hops, 1e18, 0, 1) {
+            revert("revoked operator executed");
+        } catch (bytes memory err) {
+            require(bytes4(err) == RouteExecutor.NotOperator.selector, "revoked: wrong error");
         }
     }
 

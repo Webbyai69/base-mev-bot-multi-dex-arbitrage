@@ -17,6 +17,72 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
               ──► every minute: reports/YYYY-MM-DD.html
 ```
 
+## What's new in 0.3: dashboard and Telegram alerts
+
+**Dashboard.** While the bot runs, open **http://localhost:8787** in a browser
+on the same PC. It shows:
+
+- **Simulated profit today**, kept apart from real money, next to a live
+  **block tape**: one bar per Base block, marking where your bot found an
+  opportunity, where another bot arbitraged, and where the bot fell behind.
+- **Bot health** (healthy, lagging, stalled, on backup RPC) and the RPC load.
+- **Opportunities.** Select one to see each hop with its amounts and fees, the
+  cost breakdown, the on-chain check result and what happened a block later.
+- **Why opportunities don't trade.** Where candidates drop out: gas ate the
+  spread, below `MIN_PROFIT_USD`, quoter disagreed, simulation reverted, and so on.
+- **Other bots**: who arbitraged today, how many of your finds they took, the
+  priority fees they pay, and whether their trades used pools your bot watches.
+- **Aave liquidations**, **safety** (what is allowed to send, and what's only
+  paper), **what's built and tested**, **pool-state drift checks**, and the
+  **latest AI review**.
+- **Wallet and contracts.** Connect MetaMask, Coinbase Wallet, Rabby or Brave
+  Wallet to see balances, deploy the RouteExecutor (you become its owner),
+  allow the bot's key to trade through it, withdraw profits to yourself, and
+  top up the bot's gas. Every transaction opens in your wallet for you to
+  approve.
+
+The dashboard listens on this computer only (127.0.0.1), rejects other sites
+that try to reach it, never shows `PRIVATE_KEY` or RPC keys, and can't edit
+`.env` or switch modes. Its only control over the bot is a **Stop sending**
+button in live mode. Resuming means deleting the `STOP` file yourself, on
+purpose. To browse saved results without running the bot:
+`node dist/main.js ui`.
+
+**Telegram alerts** for the bot starting, stopping or crashing, no new blocks
+for 3 minutes, an RPC failover, verified opportunities over
+`ALERT_MIN_PROFIT_USD`, liquidations over `ALERT_MIN_LIQ_PROFIT_USD`, every
+live transaction result, the circuit breaker, and a summary of each day.
+Messages are rate-limited and scrubbed of keys. Set up in two minutes:
+
+```powershell
+# 1. In Telegram, message @BotFather, send /newbot, put the token in .env as TELEGRAM_BOT_TOKEN
+# 2. Send your new bot any message, then:
+node dist/main.js telegram     # prints your TELEGRAM_CHAT_ID; add it to .env
+node dist/main.js telegram     # sends a test message
+```
+
+The daily digest also gains the "why opportunities don't trade" counts with
+stable codes (`NET_NEGATIVE_AFTER_GAS`, `NET_PROFIT_TOO_LOW`, `QUOTE_MISMATCH`,
+`SIMULATION_REVERT`, …) for the AI review to work from.
+
+Updating from 0.2: no new dependencies.
+
+```powershell
+cd C:\Users\joshu\source\base-arb-bot
+git pull
+npm run build
+npm test
+node dist/main.js run          # then open http://localhost:8787
+```
+
+Optional `.env` additions (all have defaults): `BOT_ADDRESS`, `UI_PORT`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ALERT_MIN_PROFIT_USD`,
+`ALERT_MIN_LIQ_PROFIT_USD`, `ALERT_MAX_PER_HOUR`. See `.env.example`.
+
+The RouteExecutor contract now separates its **owner** (your wallet: deploys,
+withdraws, chooses the operator) from its **operator** (the bot's hot key: may
+only trade through it). A leaked bot key can't drain the contract.
+
 ## What's new in 0.2
 
 All five upgrades run in **paper mode**. Multi-hop routes are never sent live
@@ -186,6 +252,10 @@ Leave it running for a few days. `data\opportunities.jsonl` and
 | `src/digest.ts` | daily Markdown digest for the AI review |
 | `contracts/RouteExecutor.sol` | multi-hop executor: V2 / Aerodrome / CL hops, Morpho or Balancer flash loan, `simulate()` |
 | `src/simBytecodeRoute.ts` | compiled RouteExecutor runtime (solc 0.8.26) for state-override simulation |
+| `src/deployBytecode.ts` | RouteExecutor creation bytecode for the dashboard's Deploy button (built with `simBytecodeRoute.ts`) |
+| `src/ui/server.ts` | local dashboard server: page, API, live event stream, balance reads (no keys, localhost only) |
+| `ui/dashboard.html` | the dashboard page (also works on its own with example data) |
+| `src/alerts.ts` | Telegram alerts, rate-limited and scrubbed of secrets; `telegram` setup command |
 | `test/forge/` | EVM tests for RouteExecutor (`npm run test:contracts`, needs Foundry) |
 | `test/` | unit tests, a mock Base JSON-RPC chain for end-to-end tests, an in-EVM contract test |
 
@@ -274,7 +344,7 @@ source file or chat.
 ## Tests
 
 ```powershell
-npm test                 # maths, CL maths, routing, mock-chain end-to-end
+npm test                 # maths, CL maths, routing, mock-chain end-to-end, dashboard security, alerts
 npm run test:contracts   # RouteExecutor in an EVM (needs Foundry: https://getfoundry.sh)
 ```
 Unit tests for the maths, an end-to-end run against a mock Base chain, and

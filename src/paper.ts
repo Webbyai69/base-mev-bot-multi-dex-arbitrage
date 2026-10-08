@@ -109,11 +109,18 @@ export class PaperEngine {
    * happens on the very next confirmed block — exactly the block our
    * transaction would have landed in.
    */
+  /** Since start: opportunities recorded, and ones skipped because the same route was already pending or just traded. */
+  readonly stats = { recorded: 0, alreadyTracked: 0 };
+
   register(newOpps: Opportunity[]): void {
     const pendingRoutes = new Set([...this.pending.values()].map((p) => routeKey(p.opp)));
     for (const o of newOpps) {
       const r = routeKey(o);
-      if (pendingRoutes.has(r) || this.consumed.has(r)) continue;
+      if (pendingRoutes.has(r) || this.consumed.has(r)) {
+        this.stats.alreadyTracked++;
+        continue;
+      }
+      this.stats.recorded++;
       pendingRoutes.add(r);
       const rec: OpportunityRecord = { ...o, kind: "opportunity", mode: "paper" };
       this.store.append(OPPS_FILE, rec);
