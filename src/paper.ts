@@ -66,6 +66,9 @@ export class PaperEngine {
    */
   private consumed = new Set<string>();
 
+  /** Called with every outcome (the learning engine listens). */
+  onOutcome?: (o: Opportunity, status: OutcomeRecord["status"], takenBy: string | undefined) => void;
+
   constructor(readonly store: Store, readonly registry: PoolRegistry) {}
 
   /** Called once per block AFTER reserves are refreshed and the classifier has run. */
@@ -171,6 +174,11 @@ export class PaperEngine {
     };
     this.store.append(OPPS_FILE, rec);
     this.pending.delete(id);
+    try {
+      this.onOutcome?.(p.opp, status, p.takenBy);
+    } catch (err) {
+      log.warn("learning from an outcome failed:", (err as Error).message.slice(0, 120));
+    }
     if (status === "persisted") this.consumed.add(routeKey(p.opp));
     const who = p.takenBy ? ` by ${p.takenBy.slice(0, 10)}` : "";
     log.info(`paper: ${p.opp.pairSymbols} @${p.opp.block} -> ${status}${who}; realistic net $${realisticNetUsd.toFixed(3)}`);

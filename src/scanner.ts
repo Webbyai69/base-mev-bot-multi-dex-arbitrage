@@ -3,6 +3,7 @@
  * more watched pools, quote both directions and both pool orderings, price the
  * profit in USD, subtract the estimated gas, and rank.
  */
+import type { Learner } from "./learn.js";
 import { AbiCoder } from "ethers";
 import { DEXES, USDC, WETH } from "./config.js";
 import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface } from "./abi.js";
@@ -113,6 +114,12 @@ export class Scanner {
   simMode: "executor" | "override" | "quoter";
   /** Routes whose simulation reverted, suppressed until the given block. */
   private failed = new Map<string, { count: number; until: number }>();
+  /** The learning engine (src/learn.ts): skips what keeps failing, and learns from every test run. */
+  learner?: Learner;
+  /** Tokens you blocked on the dashboard (Tuning). */
+  blockedTokens?: () => Set<string>;
+  /** The latest learned skips, for the dashboard ("why it skipped …"). */
+  readonly lastLearnedSkips: Array<{ label: string; why: string; at: string }> = [];
   /** Blocks a reverting route stays muted (600 blocks = 20 minutes). */
   failureMuteBlocks = 600;
   /** After this many revert failures the token pair's pools are dropped from the watch list. */
@@ -303,11 +310,22 @@ export class Scanner {
     // Routes whose on-chain simulation reverted recently are skipped entirely.
     const seen = new Set<string>();
     const usedPools = new Set<string>();
+    const now = Date.now();
+    const blocked = this.blockedTokens?.() ?? new Set<string>();
     const unique = opps.filter((o) => {
       const f = this.failed.get(routeKeyOf(o));
       if (f && f.until > block) {
         F.muted++;
         return false;
+      }
+      if (this.learner) {
+        const why = this.learner.skipReason(o, now, blocked);
+        if (why) {
+          F.learnedSkip++;
+          this.lastLearnedSkips.unshift({ label: o.pairSymbols, why, at: new Date(now).toISOString() });
+          if (this.lastLearnedSkips.length > 10) this.lastLearnedSkips.length = 10;
+          return false;
+        }
       }
       const ps = poolsOf(o);
       if ((!o.route && seen.has(o.pair)) || ps.some((p) => usedPools.has(p))) {
@@ -323,6 +341,10 @@ export class Scanner {
     const multi = unique.filter((o) => o.route);
     await Promise.all([classic.length ? this.verify(classic, tag) : undefined, multi.length ? this.verifyRoutes(multi, tag) : undefined]);
     for (const o of unique) {
+      if (this.learner) {
+        this.learner.onFound(o, now);
+        this.learner.onSim(o, now);
+      }
       if (o.sim === "executor-revert") this.recordFailure(o, block);
       if (o.sim === "executor-ok" || o.sim === "quoter-ok") F.verified++;
       else if (o.sim === "executor-revert") F.reverted++;
@@ -349,6 +371,8 @@ export class Scanner {
     belowMin: 0,
     /** Same route reverted on-chain recently; muted for 20 minutes. */
     muted: 0,
+    /** The learning engine skipped it: the route, a token or a pool keeps failing test runs. */
+    learnedSkip: 0,
     /** Shares a pool (or classic pair) with a better route in the same block. */
     overlapping: 0,
     /** On-chain check passed (executor simulation or quoters). */

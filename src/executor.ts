@@ -28,11 +28,36 @@ import type { Chain } from "./rpc.js";
 import type { Opportunity } from "./scanner.js";
 import type { Store } from "./store.js";
 import { SIM_EXECUTOR_RUNTIME } from "./simBytecode.js";
+import type { Evaluation, Learner } from "./learn.js";
 import { log } from "./log.js";
 
 /** Live mode only sends classic two-pool routes that passed the on-chain simulation: the best one, not just the top find. */
 export function pickLiveOpportunity(opps: Opportunity[]): Opportunity | undefined {
   return opps.filter((o) => !o.route && o.sim === "executor-ok").sort((a, b) => b.netUsd - a.netUsd)[0];
+}
+
+/**
+ * With the learning engine: of the eligible finds, the one with the best
+ * expected value (chance it lands x profit, minus chance it fails x the gas it
+ * burns), if that is above `evMinUsd`, with the bid to send it at. The rest are
+ * returned with their reason, so the log can say why nothing was sent.
+ */
+export function pickLiveSend(
+  opps: Opportunity[],
+  learner: Learner,
+  ctx: { ethUsd: number; gasUnits: number; basePriorityGwei: number; maxBidShare: number; evMinUsd: number },
+): { send?: { o: Opportunity; ev: Evaluation }; passed: Array<{ o: Opportunity; ev: Evaluation }> } {
+  const passed: Array<{ o: Opportunity; ev: Evaluation }> = [];
+  let send: { o: Opportunity; ev: Evaluation } | undefined;
+  for (const o of opps) {
+    if (o.route || o.sim !== "executor-ok") continue;
+    const ev = learner.evaluate(o, ctx);
+    if (ev.evUsd > ctx.evMinUsd && (!send || ev.evUsd > send.ev.evUsd)) {
+      if (send) passed.push(send);
+      send = { o, ev };
+    } else passed.push({ o, ev });
+  }
+  return { ...(send ? { send } : {}), passed };
 }
 
 export interface LiveCheck {
@@ -113,6 +138,8 @@ export interface LiveRecord {
   sentAt: string;
   txHash: string;
   status: "pending" | "success" | "reverted" | "dropped";
+  /** Priority fee bid, in gwei. */
+  priorityFeeGwei?: number;
   gasUsedWei?: bigint;
   minedBlock?: number;
   expectedProfitUsd: number;
@@ -159,6 +186,8 @@ export class LiveExecutor {
   onTrip?: (reason: string) => void;
   /** Called when sending becomes possible, or stops being possible. */
   onReadyChange?: (ready: boolean, reason: string | null) => void;
+  /** Called with every finished send (the learning engine listens). */
+  onResult?: (o: Opportunity, status: "success" | "reverted" | "dropped", gasUsd: number, priorityFeeGwei: number) => void;
 
   constructor(
     readonly chain: Chain,
@@ -235,8 +264,8 @@ export class LiveExecutor {
     return this.store.exists("STOP");
   }
 
-  /** Fire-and-track. Returns false if the opportunity was not sent. */
-  trySend(o: Opportunity, ethUsd: number): boolean {
+  /** Fire-and-track. Returns false if the opportunity was not sent. `priorityFeeGwei` overrides PRIORITY_FEE_GWEI (the learned bid). */
+  trySend(o: Opportunity, ethUsd: number, priorityFeeGwei?: number): boolean {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== this.day) {
       this.day = today;
@@ -265,13 +294,14 @@ export class LiveExecutor {
       log.warn(`refusing to send ${o.id}: simulation state is ${o.sim} (${o.simDetail ?? ""})`);
       return false;
     }
-    this.inFlight = this.send(o, ethUsd).finally(() => {
+    const bid = priorityFeeGwei !== undefined && Number.isFinite(priorityFeeGwei) && priorityFeeGwei >= 0 ? priorityFeeGwei : this.opts.priorityFeeGwei;
+    this.inFlight = this.send(o, ethUsd, bid).finally(() => {
       this.inFlight = null;
     });
     return true;
   }
 
-  private async send(o: Opportunity, ethUsd: number): Promise<void> {
+  private async send(o: Opportunity, ethUsd: number, bidGwei: number): Promise<void> {
     // Give up 5% of the modelled profit to reserve slack for reserve drift within the block.
     const minProfit = (o.profit * 95n) / 100n;
     const fn = this.opts.useFlash ? "executeFlash" : "executeWithCapital";
@@ -280,7 +310,7 @@ export class LiveExecutor {
     const wallet = this.wallet.connect(this.chain.provider);
     let tx: TransactionResponse;
     try {
-      const [fees, pending] = await Promise.all([liveFees(this.chain, this.opts.priorityFeeGwei), this.chain.provider.getTransactionCount(this.wallet.address, "pending")]);
+      const [fees, pending] = await Promise.all([liveFees(this.chain, bidGwei), this.chain.provider.getTransactionCount(this.wallet.address, "pending")]);
       tx = await wallet.sendTransaction({
         to: this.executorAddress,
         data,
@@ -299,7 +329,7 @@ export class LiveExecutor {
       return;
     }
     this.sent++;
-    const rec: LiveRecord = { kind: "live", id: o.id, block: o.block, sentAt: new Date().toISOString(), txHash: tx.hash, status: "pending", expectedProfitUsd: o.netUsd };
+    const rec: LiveRecord = { kind: "live", id: o.id, block: o.block, sentAt: new Date().toISOString(), txHash: tx.hash, status: "pending", priorityFeeGwei: bidGwei, expectedProfitUsd: o.netUsd };
     this.store.append("live.jsonl", rec);
     log.info(`live: sent ${tx.hash} for ${o.pairSymbols} expecting net $${o.netUsd.toFixed(3)}`);
     let receipt: TransactionReceipt | null = null;
@@ -316,6 +346,7 @@ export class LiveExecutor {
       this.store.append("live.jsonl", { ...rec, status: "dropped" });
       this.nextNonce = 0; // a dropped transaction leaves its nonce unused
       this.recordFailure("dropped");
+      this.report(o, "dropped", 0, bidGwei);
       return;
     }
     // On Base the fee is L2 gas plus an L1 data fee, which only the raw receipt carries.
@@ -335,6 +366,15 @@ export class LiveExecutor {
       void this.verify().catch(() => undefined);
     }
     log[status === "success" ? "info" : "warn"](`live: ${tx.hash} ${status} in block ${receipt.blockNumber}, gas $${gasUsd.toFixed(3)}`);
+    this.report(o, status, gasUsd, bidGwei);
+  }
+
+  private report(o: Opportunity, status: "success" | "reverted" | "dropped", gasUsd: number, bidGwei: number): void {
+    try {
+      this.onResult?.(o, status, gasUsd, bidGwei);
+    } catch (err) {
+      log.warn("learning from a live result failed:", (err as Error).message.slice(0, 120));
+    }
   }
 
   /** Circuit breaker: too many failed sends in a row writes the STOP file. */

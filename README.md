@@ -17,6 +17,39 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
               ──► every minute: reports/YYYY-MM-DD.html
 ```
 
+## What's new in 0.6: it learns as it trades
+
+The bot now keeps a memory, `data/learned.json`, of everything it sees: which
+test runs passed or reverted, which finds were still there a block later or
+taken by another bot, what those bots paid in priority fee, and how its own
+live sends went. Old evidence counts for half after 3 days, so it keeps up as
+the market changes. On its first start it learns from the data files it
+already has. It uses that memory to decide (`src/learn.ts`):
+
+1. **Skip what keeps failing.** Tokens, pools and routes that keep reverting
+   in test runs are skipped before the test, which saves RPC calls. Each gets
+   one re-test every 6 hours in case it was fixed.
+2. **Know where it can't win.** Each route keeps its own record: still there
+   a block later, taken by another bot (and which one), or closed.
+3. **Send only when it's worth it.** Before a live send it works out the
+   expected value: the chance it lands times the profit, minus the chance it
+   fails times the gas a failed attempt burns. It sends only when that is
+   positive, and the log says why when it isn't.
+4. **Bid like the market.** The priority fee follows what other bots paid
+   for trades of that size, goes up on a route after a race it lost and down
+   after a win, and never costs more than 30% of the profit
+   (`LIVE_MAX_BID_SHARE`) or 2 gwei.
+5. **Stop watching dead pools.** Pools with no swaps, finds or rival trades
+   for 3 days of watching are dropped (time the PC is off doesn't count).
+6. **Suggest setting changes.** The dashboard's *What it has learned* panel
+   shows what it believes and why, and suggests changes the evidence supports
+   (block a token, raise the minimum profit, raise the bid cap), also from the
+   daily AI review. You press **Apply**; changes stay within fixed limits and
+   are saved in `data/tuning.json`. The mode, the daily gas limit and keys
+   stay in `.env`, which only you edit.
+
+Turn it off with `LEARNING=false`; the other settings are in `.env.example`.
+
 ## What's new in 0.5: going live safely
 
 Live mode now keeps your own wallet's key out of every file. Your wallet
@@ -293,6 +326,7 @@ Leave it running for a few days. `data\opportunities.jsonl` and
 | `src/report.ts` | daily HTML report |
 | `src/executor.ts` | live sender: setup check, one tx in flight, STOP file, daily gas budget, circuit breaker; classic routes only |
 | `src/wallet.ts` | `new-wallet`: the bot's own gas wallet, key written straight into `.env` |
+| `src/learn.ts` | learning engine: decayed records of test runs, outcomes, rival bids and live sends (`data/learned.json`); skips, P(land), expected value, bids, pool pruning; bounded dashboard tuning (`data/tuning.json`) |
 | `contracts/ArbExecutor.sol` | on-chain executor: flash-swap or own-capital, min-profit check, `simulate()`, owner/operator roles |
 | `src/clmath.ts` | exact concentrated-liquidity maths (tick maths, single-range swaps, tick bitmap) |
 | `src/routes.ts` | cycle search over the pool graph + exact route optimiser |

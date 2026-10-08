@@ -13,7 +13,8 @@
  *
  * While "run" is going, the dashboard is at http://localhost:8787 (UI_PORT).
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Wallet } from "ethers";
 import { loadSettings, type Settings } from "./config.js";
@@ -25,7 +26,8 @@ import { Store } from "./store.js";
 import { PaperEngine, summarize } from "./paper.js";
 import { Classifier, fetchFullBlock, marketSummary } from "./classifier.js";
 import { renderReport, writeReport } from "./report.js";
-import { LiveExecutor, pickLiveOpportunity } from "./executor.js";
+import { LiveExecutor, pickLiveSend } from "./executor.js";
+import { Learner, Tuning } from "./learn.js";
 import { addBotWalletToEnv } from "./wallet.js";
 import { runCheck } from "./check.js";
 import { log, setLogLevel } from "./log.js";
@@ -119,7 +121,21 @@ function dashboardSources(s: Settings, chain: Chain, registry: PoolRegistry, sto
     summaries: () => dashboardSummaries(store, registry, s),
     multicall: (calls) => chain.multicall(calls),
     symbol: (a) => registry.symbol(a),
+    learning: () => (extras?.learner ? { ...extras.learner.summary(Date.now(), extras.tuning?.blocked), recentSkips: extras.scanner?.lastLearnedSkips.slice(0, 6) ?? [] } : null),
+    tuning: () => extras?.tuning?.view() ?? null,
+    tune: (action, id) => extras?.tune?.(action, id) ?? { ok: false, error: "only while the bot runs" },
   };
+}
+
+/** The newest reports/ai-review-*.md (written by the daily AI review), or null. */
+function latestReviewText(reportDir: string): string | null {
+  try {
+    const files = readdirSync(reportDir).filter((f) => /^ai-review-.*\.md$/i.test(f)).sort();
+    const last = files[files.length - 1];
+    return last ? readFileSync(join(reportDir, last), "utf8").slice(0, 64 * 1024) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Yesterday's numbers to Telegram when the UTC day rolls over. */
@@ -192,6 +208,10 @@ interface Extras {
   paper?: PaperEngine;
   live?: LiveExecutor;
   cloud?: CloudPublisher;
+  learner?: Learner;
+  tuning?: Tuning;
+  /** Apply / dismiss / reset a suggested setting change from the dashboard. */
+  tune?: (action: string, id?: string) => { ok: boolean; error?: string };
 }
 
 async function writeDailyReport(store: Store, registry: PoolRegistry, s: Settings, day = new Date().toISOString().slice(0, 10), extras: Extras = {}): Promise<string> {
@@ -231,6 +251,8 @@ async function writeDailyDigest(store: Store, registry: PoolRegistry, s: Setting
     ...(extras.chain ? { rpc: extras.chain.usage() } : {}),
     ...(extras.refreshStats ? { refreshStats: extras.refreshStats } : {}),
     ...(extras.scanner ? { funnel: { ...extras.scanner.funnel }, recorded: extras.paper ? { ...extras.paper.stats } : undefined } : {}),
+    ...(extras.learner ? { learning: extras.learner.summary(Date.now(), extras.tuning?.blocked) } : {}),
+    ...(extras.tuning ? { tuning: extras.tuning.view() } : {}),
   });
   return writeDigest(s.reportDir, day, text);
 }
@@ -271,6 +293,63 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       minProfitUsd: s.minProfitUsd,
     });
   }
+  // The learning engine: remembers what keeps failing, where rivals win and what they pay,
+  // across restarts (data/learned.json), and the setting changes you approve (data/tuning.json).
+  const tuning = new Tuning(store, { minProfitUsd: s.minProfitUsd, maxBidShare: s.liveMaxBidShare, evMinUsd: s.liveMinEvUsd });
+  extras.tuning = tuning;
+  const learner = s.learning
+    ? new Learner(store, { halfLifeMs: s.learnHalfLifeHours * 3_600_000, pruneAfterMs: s.learnPruneDays * 86_400_000 }, (a) => registry.symbol(a))
+    : undefined;
+  if (learner) {
+    // Trades by the bot's own wallet or contract are its own results, never a rival's.
+    learner.setSelf([s.executorAddress, botAddressOf(s)]);
+    const how = await learner.load();
+    learner.track(registry.pools.keys());
+    const L = learner.summary();
+    log.info(
+      how === "loaded"
+        ? `learning: picked up where it left off (${L.counts.sims} test runs, ${L.counts.outcomes} outcomes, ${L.counts.rivalArbs} rival trades since ${L.since.slice(0, 10)})`
+        : how === "warm-start"
+          ? `learning: learned from past data first (${L.counts.sims} test runs, ${L.counts.outcomes} outcomes, ${L.counts.rivalArbs} rival trades since ${L.since.slice(0, 10)}); ${L.skipping.length} tokens to skip`
+          : "learning: starting fresh",
+    );
+    scanner.learner = learner;
+    scanner.blockedTokens = () => tuning.blocked;
+    if (extras.fbScanner) {
+      extras.fbScanner.learner = learner;
+      extras.fbScanner.blockedTokens = () => tuning.blocked;
+    }
+    paper.onOutcome = (o, status, takenBy) => learner.onOutcome(o, status, takenBy);
+    extras.learner = learner;
+    tuning.refresh(learner, latestReviewText(s.reportDir));
+  }
+  // Tokens you blocked on the dashboard stay out of discovery and the watch list.
+  const dropToken = (token: string): number => {
+    registry.blacklist.add(token);
+    const drop = [...registry.pools.values()].filter((p) => p.token0.toLowerCase() === token || p.token1.toLowerCase() === token);
+    for (const p of drop) registry.pools.delete(p.address.toLowerCase());
+    if (drop.length) registry.dirty = true;
+    return drop.length;
+  };
+  for (const t of tuning.blocked) dropToken(t);
+  const tv = tuning.view();
+  if (Object.keys(tv.overrides).length || tv.blockedTokens.length) {
+    log.info(
+      `tuning from the dashboard: ${Object.entries(tv.overrides)
+        .map(([k, v]) => `${k} ${v}`)
+        .join(", ")}${tv.blockedTokens.length ? `${Object.keys(tv.overrides).length ? ", " : ""}${tv.blockedTokens.length} blocked tokens` : ""} (data/tuning.json)`,
+    );
+  }
+  extras.tune = (action, id) => {
+    const r = tuning.act(action, id);
+    if (r.ok) {
+      const dropped = r.blockedToken ? dropToken(r.blockedToken) : 0;
+      log.info(`tuning: ${action}${id ? ` ${id}` : ""} from the dashboard${dropped ? `; stopped watching ${dropped} pools` : ""}`);
+      if (learner) tuning.refresh(learner, latestReviewText(s.reportDir));
+    }
+    return r;
+  };
+
   const live =
     s.mode === "live"
       ? new LiveExecutor(chain, store, s.privateKey!, s.executorAddress!, {
@@ -288,6 +367,10 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   const t0 = Date.now();
 
   let lastDigest = 0;
+  let lastLearnSave = Date.now();
+  // The first prune waits an hour after start, so a restart never drops pools straight away.
+  let lastPrune = Date.now();
+  const quietSkips = new Map<string, number>();
   let lastFullRefresh = 0;
   const refreshStats: RefreshStats = { checks: 0, driftedPools: 0, lastCheckBlock: 0, lastDrift: [] };
   extras.refreshStats = refreshStats;
@@ -323,6 +406,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       void alerts?.liveReady(ready, { bot: live.wallet.address, maxDailyGasUsd: live.opts.maxDailyGasUsd, reason });
       ui?.publish("live-status", { ready, reason });
     };
+    if (learner) live.onResult = (o, status, gasUsd, bid) => learner.onLive(o, status, gasUsd, bid);
     // Nothing is sent until the contract, the bot wallet's role and its gas money check out.
     live.startChecks();
   }
@@ -369,6 +453,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     const periodic = n - lastFullRefresh >= s.fullRefreshBlocks;
     const [blk, logs] = await Promise.all([fetchFullBlock(chain, n), logsFetcher.fetch(canEvents ? registry.syncedBlock + 1 : n, n)]);
     if (canEvents) await registry.applyLogs(logs, n);
+    learner?.onPoolActivity(logs.map((l) => l.address));
     if (!canEvents || periodic) {
       // Periodic full re-read; in events mode it doubles as a self-check of the log-driven state.
       const snap = canEvents ? registry.stateSnapshot() : null;
@@ -396,10 +481,23 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       gas.quote(n, baseFee),
       classifier ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), [])) : Promise.resolve([]),
     ]);
-    const opps = await scanner.scan(n, gasQuote, ethUsd, s.minProfitUsd, { stage: "block" });
+    learner?.onRivalArbs(detected);
+    const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block" });
     paper.onBlock(n, opps, detected, ethUsd);
-    if (live) {
-      const pick = pickLiveOpportunity(opps);
+    if (live && learner) {
+      const ctx = { ethUsd, gasUnits: s.arbGasLimit, basePriorityGwei: s.priorityFeeGwei, maxBidShare: tuning.maxBidShare, evMinUsd: tuning.evMinUsd };
+      const { send, passed } = pickLiveSend(opps, learner, ctx);
+      for (const x of passed) {
+        const key = `${x.o.buyPool}-${x.o.sellPool}`;
+        if (Date.now() - (quietSkips.get(key) ?? 0) < 300_000) continue;
+        quietSkips.set(key, Date.now());
+        log.info(`live: not sending ${x.o.pairSymbols} (net $${x.o.netUsd.toFixed(3)}): expected value $${x.ev.evUsd.toFixed(3)}, lands ${(x.ev.pLand * 100).toFixed(0)}% of the time on ${x.ev.evidence.toFixed(1)} outcomes`);
+      }
+      if (send && live.trySend(send.o, ethUsd, send.ev.bidGwei)) {
+        log.info(`live: sending ${send.o.pairSymbols} (net $${send.o.netUsd.toFixed(3)}): lands ${(send.ev.pLand * 100).toFixed(0)}% of the time on ${send.ev.evidence.toFixed(1)} outcomes, expected $${send.ev.evUsd.toFixed(3)}, bid ${send.ev.bidGwei} gwei (${send.ev.bidWhy})`);
+      }
+    } else if (live) {
+      const pick = opps.filter((o) => !o.route && o.sim === "executor-ok").sort((a, b) => b.netUsd - a.netUsd)[0];
       if (pick) live.trySend(pick, ethUsd);
     }
     if (extras.fb) {
@@ -421,6 +519,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       if (cands.length) {
         const added = await registry.addPoolsByAddress(cands.map((c) => c.address)).catch((e: Error) => (log.warn("watch-list add failed:", e.message.slice(0, 100)), []));
         for (const p of added) log.info(`watch list: added ${p.dex} pool ${p.address} (${registry.symbol(p.token0)}/${registry.symbol(p.token1)}) seen in an arbitrage`);
+        learner?.track(added.map((p) => p.address));
       }
     }
     if (registry.dirty) {
@@ -457,12 +556,27 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       const rpcNote = `, rpc ${u.requests} calls (~${(u.alchemyCuPerDay / 1e6).toFixed(1)}M Alchemy CU/day at this pace)`;
       log.info(`block ${n}: ${registry.pools.size} pools, ${opps.length} opps, ${detected.length} mev txs, ${ms}ms, gas/tx $${((Number(gasQuote.totalWei) / 1e18) * ethUsd).toFixed(4)}${fb}${lq}${rpcNote}, uptime ${((Date.now() - t0) / 60000).toFixed(0)}m`);
     }
+    if (learner && Date.now() - lastLearnSave > 60_000) {
+      lastLearnSave = Date.now();
+      learner.save();
+    }
+    if (learner && Date.now() - lastPrune > 3_600_000) {
+      lastPrune = Date.now();
+      const prune = learner.pruneList([...registry.pools.values()]);
+      if (prune.length) {
+        for (const a of prune) registry.pools.delete(a);
+        registry.dirty = true;
+        learner.notePruned(prune);
+        log.info(`learning: stopped watching ${prune.length} pools (no swaps, finds or rival trades for ${s.learnPruneDays} days, or every test run through them failed); ${registry.pools.size} left`);
+      }
+    }
     if (Date.now() - lastReport > 60_000) {
       lastReport = Date.now();
       writeDailyReport(store, registry, s, undefined, extras).catch((e: Error) => log.warn("report failed:", e.message));
     }
     if (Date.now() - lastDigest > 10 * 60_000) {
       lastDigest = Date.now();
+      if (learner) tuning.refresh(learner, latestReviewText(s.reportDir));
       writeDailyDigest(store, registry, s, undefined, extras).catch((e: Error) => log.warn("digest failed:", e.message));
     }
   };
@@ -477,6 +591,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     clearInterval(watchdog);
     extras.fb?.stop();
     extras.liq?.saveBorrowers(await chain.blockNumber().catch(() => 0));
+    learner?.save(true);
     await writeDailyReport(store, registry, s, undefined, extras).catch(() => undefined);
     await writeDailyDigest(store, registry, s, undefined, extras).catch(() => undefined);
     void alerts?.stopped(why);

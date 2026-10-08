@@ -82,6 +82,13 @@ nothing is sent.
   wallet's key into a wallet app (it's in `.env`), or simply leave it for later.
 - Every attempt is logged in `data/live.jsonl` and on the dashboard
   (*Trades sent*), with its gas, including Base's L1 data fee.
+- **Why it did or didn't send:** with learning on (the default since 0.6) a
+  find is sent only when its expected value is positive. The log says
+  `live: sending … lands 50% of the time … bid 0.16 gwei (rivals' p60 …)` or
+  `live: not sending … expected value $-0.004`, and the dashboard's *What it
+  has learned* panel shows the record behind it. Suggested changes there take
+  effect when you press **Apply**; nothing changes the mode, the daily gas limit
+  or the keys but you, in `.env`.
 
 ## Going back to paper
 

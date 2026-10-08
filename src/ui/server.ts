@@ -82,6 +82,10 @@ export interface UiSources {
   usage?: () => RpcUsage;
   pools: () => { total: number; cl: number; pairs: number };
   ethUsd: () => number;
+  /** The learning engine's summary (null when it's off), the tuning view, and the dashboard's apply/dismiss/reset. */
+  learning?: () => unknown;
+  tuning?: () => unknown;
+  tune?: (action: string, id?: string) => { ok: boolean; error?: string };
   extras?: () => {
     flashblocks?: Record<string, number> | undefined;
     liquidations?: { watched: number; stats: Record<string, number> } | undefined;
@@ -378,6 +382,21 @@ export class UiServer {
         return this.json(res, 200, this.review());
       case "POST /api/stop":
         return this.json(res, 200, this.writeStop("stopped from the dashboard"));
+      case "POST /api/tuning": {
+        // Only this PC's dashboard can change settings: the online copy has no route for it.
+        if (!this.src.tune) return this.json(res, 404, { error: "only while the bot runs" });
+        let body: { action?: unknown; id?: unknown } = {};
+        try {
+          body = JSON.parse((await readBody(req, 4096)) || "{}");
+        } catch {
+          return this.json(res, 400, { error: "bad request" });
+        }
+        const action = String(body.action ?? "");
+        if (!["apply", "dismiss", "reset"].includes(action)) return this.json(res, 400, { error: "unknown action" });
+        const r = this.src.tune(action, typeof body.id === "string" ? body.id.slice(0, 200) : undefined);
+        this.publish("live-status", { tuning: true });
+        return this.json(res, 200, { ...r, tuning: this.src.tuning?.() ?? null });
+      }
       default:
         return this.json(res, 404, { error: "not found" });
     }
@@ -482,6 +501,8 @@ export class UiServer {
         live: x.live ?? null,
       },
       capabilities: capabilities(s),
+      learning: this.src.learning?.() ?? null,
+      tuning: this.src.tuning?.() ?? null,
       code: this.code,
       cloud: this.src.cloud?.() ?? null,
       telegram: this.src.telegram,
@@ -800,4 +821,23 @@ export function capabilities(s: Settings): Array<{ name: string; built: "yes" | 
     { name: "Liquidation executor contract", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
     { name: "Encrypted key store (instead of PRIVATE_KEY in .env)", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
   ];
+}
+
+/** A small request body, or an error past `max` bytes. */
+function readBody(req: IncomingMessage, max: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > max) {
+        reject(new Error("too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
 }

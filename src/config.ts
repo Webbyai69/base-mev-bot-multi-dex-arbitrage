@@ -242,6 +242,13 @@ export interface Settings {
   cloudPushMs: number;
   /** Ceiling for the watch list, which grows as the bot learns pools other bots trade on. */
   maxWatchedPools: number;
+  /** The learning engine (src/learn.ts). */
+  learning: boolean;
+  learnHalfLifeHours: number;
+  learnPruneDays: number;
+  /** Live: most of the expected profit it may bid as priority fee, and the smallest expected value worth a send. */
+  liveMaxBidShare: number;
+  liveMinEvUsd: number;
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -356,6 +363,11 @@ export function loadSettings(): Settings {
     cloudAccessClientSecret: str("CLOUD_ACCESS_CLIENT_SECRET"),
     cloudPushMs: Math.max(2000, num("CLOUD_PUSH_MS", 4000)),
     maxWatchedPools: num("MAX_WATCHED_POOLS", 1500),
+    learning: bool("LEARNING", true),
+    learnHalfLifeHours: num("LEARN_HALF_LIFE_HOURS", 72),
+    learnPruneDays: num("LEARN_PRUNE_DAYS", 3),
+    liveMaxBidShare: num("LIVE_MAX_BID_SHARE", 0.3),
+    liveMinEvUsd: num("LIVE_MIN_EV_USD", 0.01),
   };
   if (settings.cloudUrl) {
     let u: URL;
@@ -375,6 +387,10 @@ export function loadSettings(): Settings {
   if (!["morpho", "balancer", "capital"].includes(settings.flashSource)) throw new Error("FLASH_SOURCE must be morpho, balancer or capital");
   if (settings.refreshMode !== "events" && settings.refreshMode !== "full") throw new Error("REFRESH_MODE must be events or full");
   if (settings.discovery !== "activity" && settings.discovery !== "full") throw new Error("DISCOVERY must be activity or full");
+  if (!(settings.learnHalfLifeHours >= 1 && settings.learnHalfLifeHours <= 720)) throw new Error("LEARN_HALF_LIFE_HOURS must be between 1 and 720");
+  if (!(settings.learnPruneDays >= 0.5 && settings.learnPruneDays <= 60)) throw new Error("LEARN_PRUNE_DAYS must be between 0.5 and 60");
+  if (!(settings.liveMaxBidShare >= 0 && settings.liveMaxBidShare <= 0.5)) throw new Error("LIVE_MAX_BID_SHARE must be between 0 and 0.5");
+  if (!(settings.liveMinEvUsd >= 0 && settings.liveMinEvUsd <= 1)) throw new Error("LIVE_MIN_EV_USD must be between 0 and 1");
   if (settings.mode === "live") {
     if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS (deploy the ArbExecutor from the dashboard, then copy its address into .env)");
     if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY (run: node dist/main.js new-wallet)");
