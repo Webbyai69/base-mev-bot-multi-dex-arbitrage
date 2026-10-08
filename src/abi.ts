@@ -55,6 +55,7 @@ export const aeroPoolIface = new Interface([
   "function getAmountOut(uint256 amountIn, address tokenIn) view returns (uint256)",
   "function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes data)",
   "event Swap(address indexed sender, address indexed to, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out)",
+  "event Sync(uint256 reserve0, uint256 reserve1)",
 ]);
 
 /** Uniswap V3 pool (classifier + concentrated-liquidity trading). */
@@ -68,6 +69,8 @@ export const univ3PoolIface = new Interface([
   "function tickBitmap(int16 wordPosition) view returns (uint256)",
   "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
+  "event Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
+  "event Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)",
 ]);
 
 /**
@@ -149,5 +152,9 @@ export const TOPIC_SWAP_AERO = aeroPoolIface.getEvent("Swap")!.topicHash;
 export const TOPIC_SWAP_V3 = univ3PoolIface.getEvent("Swap")!.topicHash;
 export const TOPIC_TRANSFER = erc20Iface.getEvent("Transfer")!.topicHash;
 export const TOPIC_SYNC = univ2PairIface.getEvent("Sync")!.topicHash;
+/** Aerodrome pools emit Sync(uint256,uint256), a different topic from Uniswap V2's Sync(uint112,uint112). */
+export const TOPIC_SYNC_AERO = aeroPoolIface.getEvent("Sync")!.topicHash;
+export const TOPIC_MINT_V3 = univ3PoolIface.getEvent("Mint")!.topicHash;
+export const TOPIC_BURN_V3 = univ3PoolIface.getEvent("Burn")!.topicHash;
 export const TOPIC_AAVE_BORROW = aavePoolIface.getEvent("Borrow")!.topicHash;
 export const TOPIC_AAVE_LIQUIDATION = aavePoolIface.getEvent("LiquidationCall")!.topicHash;

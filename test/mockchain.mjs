@@ -26,6 +26,9 @@ const ifaces = {
 const SIMULATE_SELECTOR = new Interface(["function simulate(address,address,address,uint256,uint256,uint256,bool)"]).getFunction("simulate").selector;
 export const TOPIC_SWAP_V2 = id("Swap(address,uint256,uint256,uint256,uint256,address)");
 export const TOPIC_SWAP_AERO = id("Swap(address,address,uint256,uint256,uint256,uint256)");
+// Real pools emit Sync with the new reserves whenever they change (Uniswap V2 forks: uint112, Aerodrome: uint256).
+export const TOPIC_SYNC_V2 = id("Sync(uint112,uint112)");
+export const TOPIC_SYNC_AERO = id("Sync(uint256,uint256)");
 
 function v2Out(amountIn, rIn, rOut, feePpm) {
   const withFee = amountIn * BigInt(1_000_000 - feePpm);
@@ -44,6 +47,8 @@ export class MockChain {
     this.pools = new Map(); // address -> pool state
     this.factories = new Map(); // address -> { kind, pools: [], router }
     this.logsByBlock = new Map();
+    /** Logs to include in the next block (from setReserves). */
+    this.queuedLogs = [];
     this.txsByBlock = new Map();
     this.baseFee = 10_000_000n; // 0.01 gwei
     this.l1Fee = 20_000_000_000_000n; // 0.00002 ETH
@@ -197,14 +202,34 @@ export class MockChain {
       } else {
         log = { address: pool.address, topics: [TOPIC_SWAP_V2, pad(s.from), pad(s.to ?? s.from)], data: abi.encode(["uint256", "uint256", "uint256", "uint256"], [a0In, a1In, a0Out, a1Out]) };
       }
-      logs.push({ ...log, blockNumber: "0x" + this.block.toString(16), blockHash: this.blockHash(this.block), transactionHash: s.tx, transactionIndex: "0x" + txIdx.toString(16), logIndex: "0x" + (logIndex++).toString(16), removed: false });
+      const meta = { blockNumber: "0x" + this.block.toString(16), blockHash: this.blockHash(this.block), transactionHash: s.tx, transactionIndex: "0x" + txIdx.toString(16), removed: false };
       if (s.applyToReserves) {
         if (zeroIn) { pool.reserve0 += s.amountIn; pool.reserve1 -= s.amountOut; } else { pool.reserve1 += s.amountIn; pool.reserve0 -= s.amountOut; }
+        // Like the real contracts: _update() emits Sync with the new reserves, then Swap.
+        logs.push({ ...this.syncLog(pool), ...meta, logIndex: "0x" + (logIndex++).toString(16) });
       }
+      logs.push({ ...log, ...meta, logIndex: "0x" + (logIndex++).toString(16) });
+    }
+    for (const q of this.queuedLogs.splice(0)) {
+      logs.push({ ...q, blockNumber: "0x" + this.block.toString(16), blockHash: this.blockHash(this.block), transactionHash: "0x" + "ee".repeat(32), transactionIndex: "0x0", logIndex: "0x" + (logIndex++).toString(16), removed: false });
     }
     this.logsByBlock.set(this.block, logs);
     this.txsByBlock.set(this.block, txList);
     return this.block;
+  }
+
+  syncLog(pool) {
+    return pool.kind === "aerodrome"
+      ? { address: pool.address, topics: [TOPIC_SYNC_AERO], data: abi.encode(["uint256", "uint256"], [pool.reserve0, pool.reserve1]) }
+      : { address: pool.address, topics: [TOPIC_SYNC_V2], data: abi.encode(["uint112", "uint112"], [pool.reserve0, pool.reserve1]) };
+  }
+
+  /** Change a pool's reserves the way a mint/burn/sync would: the Sync log lands in the next block. */
+  setReserves(address, reserve0, reserve1) {
+    const pool = this.pools.get(address.toLowerCase());
+    pool.reserve0 = reserve0;
+    pool.reserve1 = reserve1;
+    this.queuedLogs.push(this.syncLog(pool));
   }
 
   blockHash(n) {

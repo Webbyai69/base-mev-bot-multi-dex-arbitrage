@@ -50,6 +50,8 @@ export interface DetectedMev {
   backrunTx?: string;
   /** Best-effort transaction cost (gas) in USD when receipts are available. */
   costUsd?: number;
+  /** Priority fee the bot paid (effective gas price - base fee), in gwei; how searchers bid for position on Base. */
+  priorityGwei?: number;
 }
 
 interface SwapEvent {
@@ -97,11 +99,18 @@ export class Classifier {
 
   constructor(readonly chain: Chain, readonly registry: PoolRegistry, readonly store: Store) {}
 
-  async classifyBlock(block: number, ethUsd: number, fullBlock?: FullBlock | null): Promise<DetectedMev[]> {
-    const [logs, blk] = await Promise.all([
-      this.chain.getLogs({ fromBlock: block, toBlock: block, topics: [[TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3]] }),
+  /**
+   * @param logs this block's logs when the caller already fetched them (low-RPC mode shares one
+   *             eth_getLogs per block between the classifier, the pool refresh and the liquidation
+   *             monitor); only the Swap logs are used here.
+   */
+  async classifyBlock(block: number, ethUsd: number, fullBlock?: FullBlock | null, prefetched?: Log[]): Promise<DetectedMev[]> {
+    const swapTopics = new Set([TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3]);
+    const [rawLogs, blk] = await Promise.all([
+      prefetched ? Promise.resolve(prefetched) : this.chain.getLogs({ fromBlock: block, toBlock: block, topics: [[TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3]] }),
       fullBlock !== undefined ? Promise.resolve(fullBlock) : fetchFullBlock(this.chain, block),
     ]);
+    const logs = rawLogs.filter((l) => l.blockNumber === block && swapTopics.has(l.topics[0] ?? ""));
     if (!blk) return [];
     const timestamp = new Date(Number(blk.timestamp) * 1000).toISOString();
     const txs = new Map<string, TxInfo>();
@@ -116,7 +125,7 @@ export class Classifier {
     detected.push(...this.detectArbitrage(swaps, txs, block, timestamp, ethUsd));
     detected.push(...this.detectSandwiches(swaps, txs, block, timestamp, ethUsd));
 
-    if (detected.length) await this.attachCosts(detected, block, ethUsd);
+    if (detected.length) await this.attachCosts(detected, block, ethUsd, blk.baseFeePerGas ? BigInt(blk.baseFeePerGas) : null);
     for (const d of detected) {
       this.store.append(MEV_FILE, d);
       log.info(
@@ -297,7 +306,7 @@ export class Classifier {
    * eth_getTransactionReceipt per MEV tx, capped per block; OP-stack receipts
    * carry the L1 data fee as `l1Fee`).
    */
-  private async attachCosts(detected: DetectedMev[], _block: number, ethUsd: number): Promise<void> {
+  private async attachCosts(detected: DetectedMev[], _block: number, ethUsd: number, baseFee: bigint | null): Promise<void> {
     const targets = detected.slice(0, this.maxReceiptsPerBlock);
     await Promise.all(
       targets.map(async (d) => {
@@ -306,6 +315,10 @@ export class Classifier {
           if (!r) return;
           const wei = BigInt(r.gasUsed) * BigInt(r.effectiveGasPrice) + (r.l1Fee ? BigInt(r.l1Fee) : 0n);
           d.costUsd = (Number(wei) / 1e18) * ethUsd;
+          if (baseFee !== null) {
+            const tip = BigInt(r.effectiveGasPrice) - baseFee;
+            d.priorityGwei = Number(tip > 0n ? tip : 0n) / 1e9;
+          }
         } catch (err) {
           log.debug(`receipt for ${d.txHash.slice(0, 12)} unavailable: ${(err as Error).message.slice(0, 80)}`);
         }
@@ -419,6 +432,14 @@ export interface MarketSummary {
   topDexRoutes: Array<{ route: string; txs: number; profitUsd: number }>;
   hourly: Array<{ hour: string; txs: number; profitUsd: number }>;
   watched: BotStats[];
+  /** Priority fees paid by arbitrage transactions (gwei): what it takes to win position on Base. */
+  arbPriority: { samples: number; medianGwei: number | null; p90Gwei: number | null; maxGwei: number | null };
+}
+
+function quantile(sorted: number[], q: number): number | null {
+  if (sorted.length === 0) return null;
+  const i = Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))));
+  return sorted[i]!;
 }
 
 export async function marketSummary(store: Store, symbolOf: (a: string) => string, watchBots: string[] = [], days?: string[]): Promise<MarketSummary[]> {
@@ -427,16 +448,22 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
   const pairs = new Map<string, Map<string, { txs: number; profitUsd: number }>>();
   const routes = new Map<string, Map<string, { txs: number; profitUsd: number }>>();
   const hourly = new Map<string, Map<string, { txs: number; profitUsd: number }>>();
+  const tips = new Map<string, number[]>();
   for await (const d of store.read<DetectedMev>(MEV_FILE)) {
     if (d.kind !== "mev") continue;
     const day = dayKey(d.timestamp);
     if (days && !days.includes(day)) continue;
     let s = byDay.get(day);
     if (!s) {
-      s = { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [] };
+      s = { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [], arbPriority: { samples: 0, medianGwei: null, p90Gwei: null, maxGwei: null } };
       byDay.set(day, s);
     }
     const usd = d.profitUsd ?? 0;
+    if (d.type === "arbitrage" && typeof d.priorityGwei === "number") {
+      const t = tips.get(day) ?? [];
+      t.push(d.priorityGwei);
+      tips.set(day, t);
+    }
     if (d.type === "arbitrage") {
       s.arbitrageTxs++;
       s.arbitrageProfitUsd += usd;
@@ -486,6 +513,8 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
     s.topPairs = [...(pairs.get(s.day) ?? new Map()).entries()].map(([pair, v]) => ({ pair, ...v })).sort((a, b) => b.txs - a.txs).slice(0, 15);
     s.topDexRoutes = [...(routes.get(s.day) ?? new Map()).entries()].map(([route, v]) => ({ route, ...v })).sort((a, b) => b.txs - a.txs).slice(0, 10);
     s.hourly = [...(hourly.get(s.day) ?? new Map()).entries()].map(([hour, v]) => ({ hour, ...v })).sort((a, b) => (a.hour < b.hour ? -1 : 1));
+    const t = (tips.get(s.day) ?? []).sort((a, b) => a - b);
+    s.arbPriority = { samples: t.length, medianGwei: quantile(t, 0.5), p90Gwei: quantile(t, 0.9), maxGwei: t.length ? t[t.length - 1]! : null };
   }
   return [...byDay.values()].sort((a, b) => (a.day < b.day ? 1 : -1));
 }

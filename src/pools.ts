@@ -13,12 +13,16 @@
  *      local maths reproduces on-chain outputs to the wei.
  * The MEV classifier can add pools it sees arbitrage bots use at runtime.
  */
-import { getAddress, AbiCoder } from "ethers";
+import { getAddress, AbiCoder, type Log } from "ethers";
 import { CL_DEXES, DEXES, TOKENS, WETH, USDC, type ClDexInfo, type DexInfo, type DexKind } from "./config.js";
 import {
+  TOPIC_BURN_V3,
+  TOPIC_MINT_V3,
   TOPIC_SWAP_AERO,
   TOPIC_SWAP_V2,
   TOPIC_SWAP_V3,
+  TOPIC_SYNC,
+  TOPIC_SYNC_AERO,
   aeroFactoryIface,
   aeroPoolIface,
   erc20Iface,
@@ -32,7 +36,7 @@ import {
 } from "./abi.js";
 import { getAmountOut, type FeeModel } from "./math.js";
 import { compressTick, virtualReserves, wordPosition, wordsNeeded, type ClState } from "./clmath.js";
-import type { Chain, Call } from "./rpc.js";
+import type { Chain, Call, CallResult } from "./rpc.js";
 import { log } from "./log.js";
 
 export interface Pool {
@@ -94,6 +98,10 @@ export class PoolRegistry {
   clPools = true;
   /** Tokens never watched or traded (TOKEN_BLACKLIST). */
   blacklist = new Set<string>();
+  /** Last block whose state every watched pool reflects (0 = never fully read). */
+  syncedBlock = 0;
+  /** Pools last read at the pre-confirmed ("pending") state by the Flashblocks loop; re-read at the next block. */
+  private pendingDirty = new Set<string>();
 
   constructor(readonly chain: Chain) {}
 
@@ -519,6 +527,7 @@ export class PoolRegistry {
   /** `via` lets the Flashblocks loop read pre-confirmed state through its own RPC endpoint. */
   async refreshReserves(pools: Pool[], block: number | "pending", via?: Chain): Promise<void> {
     if (pools.length === 0) return;
+    if (block === "pending") for (const p of pools) this.pendingDirty.add(p.address);
     const v2 = pools.filter((p) => !p.cl);
     const cl = pools.filter((p) => p.cl);
     await Promise.all([this.refreshV2(v2, block, via ?? this.chain), this.refreshCl(cl, block, via ?? this.chain)]);
@@ -609,6 +618,155 @@ export class PoolRegistry {
 
   async refreshAll(block: number): Promise<void> {
     await this.refreshReserves([...this.pools.values()], block);
+    this.pendingDirty.clear();
+    this.syncedBlock = block;
+  }
+
+  /**
+   * Event-driven refresh (low-RPC mode): bring every watched pool from
+   * `syncedBlock` to `block` from that range's logs instead of re-reading all
+   * of them, then re-read only what the logs cannot tell us, in one multicall.
+   *
+   *   V2 / Aerodrome  Sync carries the new reserves: exact, no call needed.
+   *   CL pools        Swap carries sqrtPriceX96, liquidity and tick after the
+   *                   swap: exact. Mint/Burn change liquidity and the tick
+   *                   bitmap, so those pools are re-read. Slipstream's fee is
+   *                   dynamic, so a swapped Slipstream pool re-reads fee(). A
+   *                   tick that moved into a bitmap word we have not read
+   *                   fetches just that word.
+   *   Pending reads   pools the Flashblocks loop read at the pre-confirmed
+   *                   state are re-read at the confirmed block.
+   *
+   * `logs` must cover (syncedBlock, block] and be in chain order (the order
+   * eth_getLogs returns them in). A periodic full refresh (FULL_REFRESH_BLOCKS)
+   * corrects anything this misses.
+   */
+  async applyLogs(logs: Log[], block: number): Promise<{ fromLogs: number; reread: number }> {
+    const fullRead = new Set<Pool>();
+    const v2Read = new Set<Pool>();
+    const feeRead = new Set<Pool>();
+    const touched = new Set<Pool>();
+    let fromLogs = 0;
+    for (const l of logs) {
+      const p = this.pools.get(l.address.toLowerCase());
+      if (!p) continue;
+      const t0 = l.topics[0];
+      if (!p.cl) {
+        if (t0 === TOPIC_SYNC || t0 === TOPIC_SYNC_AERO) {
+          const [r0, r1] = abi.decode(["uint256", "uint256"], l.data) as unknown as [bigint, bigint];
+          p.reserve0 = r0;
+          p.reserve1 = r1;
+          p.updatedBlock = l.blockNumber;
+          fromLogs++;
+        }
+        continue;
+      }
+      if (t0 === TOPIC_SWAP_V3) {
+        const d = abi.decode(["int256", "int256", "uint160", "uint128", "int24"], l.data);
+        const s = p.cl;
+        s.sqrtPriceX96 = d[2] as bigint;
+        s.liquidity = d[3] as bigint;
+        s.tick = Number(d[4]);
+        p.updatedBlock = l.blockNumber;
+        touched.add(p);
+        if (p.kind === "slipstream") feeRead.add(p);
+        fromLogs++;
+      } else if (t0 === TOPIC_MINT_V3 || t0 === TOPIC_BURN_V3) {
+        fullRead.add(p);
+      }
+    }
+    for (const a of this.pendingDirty) {
+      const p = this.pools.get(a);
+      if (p) (p.cl ? fullRead : v2Read).add(p);
+    }
+    this.pendingDirty.clear();
+    // CL pools never read, or whose tick moved into bitmap words we don't have.
+    const wordRead = new Map<Pool, number[]>();
+    for (const p of this.pools.values()) {
+      if (!p.cl || fullRead.has(p)) continue;
+      if (p.cl.sqrtPriceX96 === 0n) {
+        fullRead.add(p);
+        continue;
+      }
+      const need = wordsNeeded(p.cl.tick, p.cl.tickSpacing).filter((w) => !p.cl!.words.has(w));
+      if (need.length) wordRead.set(p, need);
+    }
+    for (const p of touched) {
+      if (!fullRead.has(p)) {
+        const v = virtualReserves(p.cl!);
+        p.reserve0 = v.reserve0;
+        p.reserve1 = v.reserve1;
+      }
+    }
+
+    // One multicall for everything the logs could not settle.
+    const calls: Call[] = [];
+    const apply: Array<(res: CallResult[]) => void> = [];
+    for (const p of v2Read) {
+      const at = calls.length;
+      calls.push({ target: p.address, callData: (p.kind === "aerodrome" ? aeroPoolIface : univ2PairIface).encodeFunctionData("getReserves") });
+      apply.push((res) => {
+        const r = res[at]!;
+        if (!r.success || r.returnData.length < 2 + 64 * 3) return;
+        const [r0, r1] = abi.decode(["uint256", "uint256", "uint256"], r.returnData) as unknown as [bigint, bigint, bigint];
+        p.reserve0 = r0;
+        p.reserve1 = r1;
+        p.updatedBlock = block;
+      });
+    }
+    for (const p of feeRead) {
+      if (fullRead.has(p)) continue;
+      const at = calls.length;
+      calls.push({ target: p.address, callData: univ3PoolIface.encodeFunctionData("fee") });
+      apply.push((res) => {
+        const r = res[at]!;
+        if (!r.success || r.returnData.length < 66) return;
+        p.cl!.feePips = Number(abi.decode(["uint24"], r.returnData)[0]);
+        p.feePpm = p.cl!.feePips;
+      });
+    }
+    for (const [p, words] of wordRead) {
+      const at = calls.length;
+      for (const w of words) calls.push({ target: p.address, callData: univ3PoolIface.encodeFunctionData("tickBitmap", [w]) });
+      apply.push((res) => {
+        words.forEach((w, k) => {
+          const r = res[at + k]!;
+          if (r.success && r.returnData.length >= 66) p.cl!.words.set(w, abi.decode(["uint256"], r.returnData)[0] as bigint);
+        });
+      });
+    }
+    const reread = v2Read.size + feeRead.size + wordRead.size + fullRead.size;
+    await Promise.all([
+      calls.length ? this.chain.multicall(calls, block).then((res) => apply.forEach((f) => f(res))) : undefined,
+      fullRead.size ? this.refreshCl([...fullRead], block, this.chain) : undefined,
+    ]);
+    this.syncedBlock = block;
+    return { fromLogs, reread };
+  }
+
+  /** Price-relevant state of every watched pool, for the drift check (fee and bitmap words excluded). */
+  stateSnapshot(): Map<string, string> {
+    const m = new Map<string, string>();
+    for (const p of this.pools.values()) {
+      m.set(p.address, p.cl ? `${p.cl.sqrtPriceX96}:${p.cl.liquidity}:${p.cl.tick}` : `${p.reserve0}:${p.reserve1}`);
+    }
+    return m;
+  }
+
+  /**
+   * Pools whose state now differs from a snapshot. Used at each periodic full
+   * refresh in events mode: take the snapshot after applying the block's logs,
+   * re-read everything at the same block, and any difference is state the
+   * event-driven path got wrong.
+   */
+  driftAgainst(snapshot: Map<string, string>): string[] {
+    const now = this.stateSnapshot();
+    const out: string[] = [];
+    for (const [a, v] of snapshot) {
+      const w = now.get(a);
+      if (w !== undefined && w !== v) out.push(a);
+    }
+    return out;
   }
 
   /** Pools sharing a token pair with any of the given pools (the other side of a spread). */

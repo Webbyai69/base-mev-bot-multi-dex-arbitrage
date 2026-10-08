@@ -211,6 +211,15 @@ export interface Settings {
   liqSwapCostBps: number;
   // --- risk ---
   tokenBlacklist: Set<string>;
+  // --- low-RPC mode ---
+  /** "events": update pools from each block's logs (one eth_getLogs) and re-read only what changed; "full": re-read every pool every block. */
+  refreshMode: "events" | "full";
+  /** In events mode, re-read every pool anyway every N blocks (catches anything the logs missed). */
+  fullRefreshBlocks: number;
+  /** Fall back to a full refresh when this many blocks behind (instead of fetching that many blocks of logs). */
+  maxLogGap: number;
+  /** Extra HTTP endpoints, used in order when the active one keeps failing. */
+  rpcFallbackUrls: string[];
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -298,6 +307,13 @@ export function loadSettings(): Settings {
     liqLookbackBlocks: num("LIQ_LOOKBACK_BLOCKS", 1800),
     liqCheckEvery: num("LIQ_CHECK_EVERY", 5),
     liqSwapCostBps: num("LIQ_SWAP_COST_BPS", 30),
+    refreshMode: (str("REFRESH_MODE", "events") as Settings["refreshMode"]),
+    fullRefreshBlocks: num("FULL_REFRESH_BLOCKS", 150),
+    maxLogGap: num("MAX_LOG_GAP", 30),
+    rpcFallbackUrls: (str("RPC_FALLBACK_URLS", "") ?? "")
+      .split(",")
+      .map((u) => u.trim())
+      .filter((u) => /^https?:\/\//.test(u)),
     tokenBlacklist: new Set(
       (str("TOKEN_BLACKLIST", "") ?? "")
         .split(",")
@@ -306,6 +322,7 @@ export function loadSettings(): Settings {
     ),
   };
   if (!["morpho", "balancer", "capital"].includes(settings.flashSource)) throw new Error("FLASH_SOURCE must be morpho, balancer or capital");
+  if (settings.refreshMode !== "events" && settings.refreshMode !== "full") throw new Error("REFRESH_MODE must be events or full");
   if (settings.discovery !== "activity" && settings.discovery !== "full") throw new Error("DISCOVERY must be activity or full");
   if (settings.mode === "live") {
     if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS");

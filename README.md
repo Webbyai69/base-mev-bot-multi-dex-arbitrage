@@ -51,6 +51,37 @@ node dist/main.js run
 Then copy the new settings from `.env.example` into your `.env`. Every one
 has a default, so you only need to add the ones you want to change.
 
+## Running 24/7 without blowing an RPC budget
+
+Every block the bot needs the new block, its logs, and the state of every
+watched pool. With ~400 pools (300+ of them concentrated-liquidity, 6 reads
+each) a full re-read every block costs about **560 Alchemy compute units per
+2-second block, ~24M CU a day**. Alchemy's free plan is 30M CU a month
+(300 CU/s), so a full-refresh bot empties it in about a day.
+
+`REFRESH_MODE=events` (the default) brings that down to roughly **140 CU per
+block (~6M CU a day)**:
+
+* one `eth_getLogs` per block, shared by the pool refresh, the MEV classifier
+  and the liquidation monitor;
+* V2/Aerodrome pools update from their `Sync` events and concentrated-liquidity
+  pools from their `Swap` events (both carry the exact new state), so only
+  pools with liquidity changes, a moved bitmap word or a dynamic fee are re-read;
+* without `WS_URL`, new blocks are found with an adaptive poll timed to Base's
+  2-second blocks (~1.5 `eth_blockNumber` per block instead of 4);
+* every `FULL_REFRESH_BLOCKS` everything is re-read anyway and compared with
+  the log-driven state; any difference is logged as "event refresh drift".
+
+The status line every 30 blocks and the daily digest show the request count
+and the Alchemy CU it implies. Options for a 24/7 run:
+
+| setup | cost | notes |
+|---|---|---|
+| `RPC_URL=https://mainnet.base.org`, Alchemy in `RPC_FALLBACK_URLS` | free | public endpoint is rate-limited and "not for production"; the bot paces itself and fails over |
+| Alchemy free plan | free for ~5 days a month | then requests fail until the month resets |
+| Alchemy pay-as-you-go | about $0.53 per 1M CU, ~6M CU/day in events mode | reliable; check the current price |
+| your own Base node | hardware only | best latency; needs a fast multi-TB SSD |
+
 ## What "paper trading" means here
 
 Seeing a spread at block N is not the same as capturing it. For each

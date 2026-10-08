@@ -31,7 +31,7 @@
  * and the swap cost is a flat estimate rather than a quoted route. Execution
  * (a liquidation contract) is the next step once these numbers look real.
  */
-import { AbiCoder } from "ethers";
+import { AbiCoder, type Log } from "ethers";
 import { AAVE_V3 } from "./config.js";
 import { TOPIC_AAVE_BORROW, TOPIC_AAVE_LIQUIDATION, aaveDataProviderIface, aaveOracleIface, aavePoolIface, erc20Iface } from "./abi.js";
 import type { Chain, Call } from "./rpc.js";
@@ -204,9 +204,40 @@ export class LiquidationMonitor {
   }
 
   private busy = false;
+  /** Liquidations seen in shared logs that the next step has not resolved yet. */
+  private queued: Array<{ user: string; liquidator: string; tx: string; block: number }> = [];
+  private sharedLogs = false;
 
-  /** Not awaited by the block loop; overlapping calls are skipped (the next one catches up from lastLogBlock). */
-  async onBlock(block: number, ethUsd: number, gasPriceWei: bigint): Promise<void> {
+  /**
+   * Take Borrow / LiquidationCall events from logs the block loop already fetched
+   * (low-RPC mode), instead of a separate eth_getLogs. Runs synchronously, so
+   * nothing is lost even while a slower health-factor step is still running.
+   */
+  ingest(logs: Log[], uptoBlock: number): void {
+    this.sharedLogs = true;
+    const pool = AAVE_V3.pool.toLowerCase();
+    for (const l of logs) {
+      if (l.address.toLowerCase() !== pool) continue;
+      if (l.topics[0] === TOPIC_AAVE_BORROW) {
+        const onBehalfOf = ("0x" + l.topics[2]!.slice(26)).toLowerCase();
+        if (!this.borrowers.has(onBehalfOf)) {
+          this.borrowers.set(onBehalfOf, { firstSeen: l.blockNumber, lastChecked: 0, hf: null });
+          this.dirtyBorrowers = true;
+        }
+      } else if (l.topics[0] === TOPIC_AAVE_LIQUIDATION) {
+        const parsed = aavePoolIface.parseLog({ topics: [...l.topics], data: l.data });
+        if (parsed) this.queued.push({ user: (parsed.args[2] as string).toLowerCase(), liquidator: (parsed.args[5] as string).toLowerCase(), tx: l.transactionHash, block: l.blockNumber });
+      }
+    }
+    if (uptoBlock > this.lastLogBlock) this.lastLogBlock = uptoBlock;
+  }
+
+  /**
+   * Not awaited by the block loop; overlapping calls are skipped (the next one catches up).
+   * Pass the block's logs when the caller already has them (low-RPC mode).
+   */
+  async onBlock(block: number, ethUsd: number, gasPriceWei: bigint, logs?: Log[]): Promise<void> {
+    if (logs) this.ingest(logs, block);
     if (this.busy) return;
     this.busy = true;
     try {
@@ -217,7 +248,13 @@ export class LiquidationMonitor {
   }
 
   private async step(block: number, ethUsd: number, gasPriceWei: bigint): Promise<void> {
-    const liquidations = await this.scanLogs(this.lastLogBlock + 1, block);
+    let liquidations: Array<{ user: string; liquidator: string; tx: string; block: number }>;
+    if (this.sharedLogs) {
+      liquidations = this.queued;
+      this.queued = [];
+    } else {
+      liquidations = await this.scanLogs(this.lastLogBlock + 1, block);
+    }
     this.resolve(block, liquidations);
 
     const nearEvery = this.opts.checkEvery;

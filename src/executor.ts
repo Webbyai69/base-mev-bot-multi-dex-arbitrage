@@ -8,7 +8,11 @@
  *     gas for the revert, which is why paper mode comes first
  *   - a file named STOP in the data directory halts sending immediately
  *   - a daily gas budget (MAX_DAILY_GAS_USD) stops the bot if reverts pile up
+ *   - after MAX_CONSECUTIVE_FAILURES reverted or dropped transactions in a row
+ *     the executor writes the STOP file itself (a circuit breaker: repeated
+ *     failures usually mean a bug or a stale model, not bad luck)
  */
+import { writeFileSync } from "node:fs";
 import { Wallet, type TransactionResponse } from "ethers";
 import { executorIface } from "./abi.js";
 import type { Chain } from "./rpc.js";
@@ -32,14 +36,17 @@ export class LiveExecutor {
   private inFlight: Promise<void> | null = null;
   private gasSpentTodayUsd = 0;
   private day = "";
+  private consecutiveFailures = 0;
   readonly wallet: Wallet;
+  /** Called when the circuit breaker trips (alerts hook). */
+  onTrip?: (reason: string) => void;
 
   constructor(
     readonly chain: Chain,
     readonly store: Store,
     privateKey: string,
     readonly executorAddress: string,
-    readonly opts: { gasLimit: number; priorityFeeGwei: number; maxDailyGasUsd: number; useFlash: boolean },
+    readonly opts: { gasLimit: number; priorityFeeGwei: number; maxDailyGasUsd: number; useFlash: boolean; maxConsecutiveFailures?: number },
   ) {
     this.wallet = new Wallet(privateKey, chain.provider);
   }
@@ -89,12 +96,14 @@ export class LiveExecutor {
     const minProfit = (o.profit * 95n) / 100n;
     const fn = this.opts.useFlash ? "executeFlash" : "executeWithCapital";
     const data = executorIface.encodeFunctionData(fn, [o.buyPool, o.sellPool, o.tokenIn, o.amountIn, o.amountMid, o.amountOut, minProfit]);
+    // Re-bind to whichever RPC endpoint is active now (the client fails over between endpoints).
+    const wallet = this.wallet.connect(this.chain.provider);
     const fee = await this.chain.provider.getFeeData();
     const priority = BigInt(Math.round(this.opts.priorityFeeGwei * 1e9));
     const base = fee.maxFeePerGas ?? (fee.gasPrice ?? 0n);
     let tx: TransactionResponse;
     try {
-      tx = await this.wallet.sendTransaction({
+      tx = await wallet.sendTransaction({
         to: this.executorAddress,
         data,
         gasLimit: this.opts.gasLimit,
@@ -113,6 +122,7 @@ export class LiveExecutor {
       const receipt = await tx.wait(1, 60_000);
       if (!receipt) {
         this.store.append("live.jsonl", { ...rec, status: "dropped" });
+        this.recordFailure("dropped");
         return;
       }
       const gasWei = receipt.gasUsed * (receipt.gasPrice ?? 0n);
@@ -120,10 +130,28 @@ export class LiveExecutor {
       this.gasSpentTodayUsd += gasUsd;
       const status = receipt.status === 1 ? "success" : "reverted";
       this.store.append("live.jsonl", { ...rec, status, gasUsedWei: gasWei, minedBlock: receipt.blockNumber });
+      if (status === "success") this.consecutiveFailures = 0;
+      else this.recordFailure("reverted");
       log[status === "success" ? "info" : "warn"](`live: ${tx.hash} ${status} in block ${receipt.blockNumber}, gas $${gasUsd.toFixed(3)}`);
     } catch (err) {
       log.warn("live: wait failed:", (err as Error).message.slice(0, 160));
       this.store.append("live.jsonl", { ...rec, status: "dropped" });
+      this.recordFailure("dropped");
     }
+  }
+
+  /** Circuit breaker: too many failed sends in a row writes the STOP file. */
+  private recordFailure(kind: "reverted" | "dropped"): void {
+    this.consecutiveFailures++;
+    const limit = this.opts.maxConsecutiveFailures ?? 5;
+    if (this.consecutiveFailures < limit || this.stopped()) return;
+    const reason = `${this.consecutiveFailures} live transactions in a row failed (last: ${kind}); sending stopped. Investigate, then delete ${this.store.path("STOP")} to resume.`;
+    try {
+      writeFileSync(this.store.path("STOP"), `${new Date().toISOString()} ${reason}\n`);
+    } catch (err) {
+      log.error("could not write the STOP file:", (err as Error).message);
+    }
+    log.error(`circuit breaker: ${reason}`);
+    this.onTrip?.(reason);
   }
 }

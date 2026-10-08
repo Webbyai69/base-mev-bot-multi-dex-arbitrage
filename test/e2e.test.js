@@ -16,6 +16,7 @@ import { Classifier, marketSummary } from "../dist/classifier.js";
 import { renderReport } from "../dist/report.js";
 import { runCheck } from "../dist/check.js";
 import { setLogLevel } from "../dist/log.js";
+import { BlockLogFetcher } from "../dist/blocklogs.js";
 
 setLogLevel("error");
 const E18 = 10n ** 18n, E6 = 10n ** 6n;
@@ -309,6 +310,58 @@ test("discovery adapts to a provider's eth_getLogs range cap (Alchemy free tier:
   const det = await classifier.classifyBlock(n, 2000);
   assert.equal(det.length, 1);
   assert.ok(det[0].costUsd > 0, "gas cost attached from the receipt");
+});
+
+test("event-driven refresh (low-RPC mode) matches a full re-read exactly", async (t) => {
+  const sc = baseScenario();
+  await sc.c.listen();
+  t.after(() => sc.c.close().catch(() => undefined));
+  sc.c.activityBlock();
+  const c = new Chain(sc.c.url);
+  t.after(() => c.destroy().catch(() => undefined));
+  const r = new PoolRegistry(c);
+  await r.discover({ minLiquidityWeth: 2, maxPools: 400, mode: "activity", lookbackBlocks: 5, logRange: 2 });
+  let n = await c.blockNumber();
+  await r.refreshAll(n);
+  assert.equal(r.syncedBlock, n);
+  const fetcher = new BlockLogFetcher(c, { liquidations: false });
+  const bot = "0xb0b000000000000000000000000000000000000b";
+  // Three blocks of reserve-moving swaps on a Uniswap and an Aerodrome pool, then a direct
+  // reserve change (mint/burn/sync) on SushiSwap; one fetch covers the whole catch-up range.
+  for (let i = 0; i < 3; i++) {
+    const hash = "0x" + String(40 + i).repeat(32);
+    const uni = sc.c.pools.get(sc.uniWethUsdc.address);
+    const aero = sc.c.pools.get(sc.aeroWethUsdc.address);
+    const inW = E18 / BigInt(3 + i);
+    const inU = 1000n * E6 * BigInt(i + 1);
+    n = sc.c.nextBlock({
+      txs: [{ hash, from: bot, to: bot }],
+      swaps: [
+        { tx: hash, pool: sc.uniWethUsdc.address, from: bot, tokenIn: sc.WETH, amountIn: inW, amountOut: sc.c.quote(uni, sc.WETH.toLowerCase(), inW), applyToReserves: true },
+        { tx: hash, pool: sc.aeroWethUsdc.address, from: bot, tokenIn: sc.USDC, amountIn: inU, amountOut: sc.c.quote(aero, sc.USDC.toLowerCase(), inU), applyToReserves: true },
+      ],
+    });
+  }
+  const sushi = sc.c.pools.get(sc.sushiWethUsdc.address);
+  sc.c.setReserves(sc.sushiWethUsdc.address, sushi.reserve0 + 12345n, sushi.reserve1 - 6789n);
+  n = sc.c.nextBlock();
+  const logs = await fetcher.fetch(r.syncedBlock + 1, n);
+  const { fromLogs } = await r.applyLogs(logs, n);
+  assert.ok(fromLogs >= 7, `pool updates taken from logs (${fromLogs})`);
+  assert.equal(r.syncedBlock, n);
+  // The same pools read fresh from the chain must agree to the wei.
+  const fresh = new PoolRegistry(c);
+  fresh.loadSnapshot(r.toSnapshot(n));
+  await fresh.refreshAll(n);
+  for (const p of r.pools.values()) {
+    const q = fresh.pools.get(p.address);
+    assert.equal(p.reserve0, q.reserve0, `${p.dex} ${p.address} reserve0`);
+    assert.equal(p.reserve1, q.reserve1, `${p.dex} ${p.address} reserve1`);
+  }
+  // And the drift check used at each periodic full refresh reports nothing.
+  const snap = r.stateSnapshot();
+  await r.refreshAll(n);
+  assert.deepEqual(r.driftAgainst(snap), []);
 });
 
 test("survives a rate-limited endpoint (JSON-RPC error and HTTP 429)", async (t) => {

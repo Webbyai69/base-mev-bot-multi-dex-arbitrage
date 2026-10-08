@@ -17,6 +17,7 @@ import type { DaySummary, OutcomeStats } from "./paper.js";
 import type { MarketSummary } from "./classifier.js";
 import type { LiqDaySummary } from "./liquidations.js";
 import type { Settings } from "./config.js";
+import type { RpcUsage } from "./rpc.js";
 
 const usd = (n: number): string => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(2);
 const pct = (x: number | null): string => (x === null ? "–" : `${(x * 100).toFixed(0)}%`);
@@ -43,6 +44,8 @@ export interface DigestInput {
   market?: MarketSummary;
   liq?: LiqDaySummary;
   flashblockStats?: { ticks: number; scans: number; skippedUnchanged: number; opps: number; errors: number; maxMs: number };
+  rpc?: RpcUsage;
+  refreshStats?: { checks: number; driftedPools: number };
 }
 
 export function renderDigest(d: DigestInput): string {
@@ -68,6 +71,8 @@ export function renderDigest(d: DigestInput): string {
         ["FLASHBLOCKS (poll ms / max pools)", `${s.flashblocks} (${s.flashblockPollMs} / ${s.flashblockMaxPools})`],
         ["LIQUIDATIONS (check every / swap cost bps)", `${s.liquidations} (${s.liqCheckEvery} / ${s.liqSwapCostBps})`],
         ["TOKEN_BLACKLIST size", String(s.tokenBlacklist.size)],
+        ["REFRESH_MODE / FULL_REFRESH_BLOCKS", `${s.refreshMode} / ${s.fullRefreshBlocks}`],
+        ["RPC fallbacks", String(s.rpcFallbackUrls.length)],
       ],
     ),
   );
@@ -102,6 +107,21 @@ export function renderDigest(d: DigestInput): string {
     ),
   );
 
+  if (d.rpc) {
+    const r = d.rpc;
+    out.push("## RPC usage (since start)");
+    out.push(
+      md(
+        ["endpoint", "requests", "failovers", "est. Alchemy CU so far", "est. Alchemy CU/day at this pace"],
+        [[r.activeEndpoint, String(r.requests), String(r.failovers), (r.alchemyCu / 1e6).toFixed(2) + "M", (r.alchemyCuPerDay / 1e6).toFixed(1) + "M"]],
+      ),
+    );
+    out.push(md(["method", "calls"], Object.entries(r.byMethod).sort((a, b) => b[1] - a[1]).map(([m, n]) => [m, String(n)])));
+  }
+  if (d.refreshStats) {
+    out.push(`Event-driven refresh self-checks: ${d.refreshStats.checks}, pools that drifted from a full re-read: ${d.refreshStats.driftedPools}.\n`);
+  }
+
   if (d.flashblockStats) {
     const f = d.flashblockStats;
     out.push("## Flashblocks loop (since start)");
@@ -127,6 +147,11 @@ export function renderDigest(d: DigestInput): string {
     out.push(`Arbitrage txs ${m.arbitrageTxs} (${usd(m.arbitrageProfitUsd)}), sandwiches ${m.sandwichTxs} (${usd(m.sandwichProfitUsd)}).\n`);
     out.push(md(["bot", "txs", "arb", "profit", "gas"], m.bots.slice(0, 10).map((b) => [b.bot, String(b.txs), String(b.arbitrage), usd(b.profitUsd), usd(b.costUsd)])));
     out.push(md(["most arbed pair", "txs", "profit"], m.topPairs.slice(0, 10).map((x) => [x.pair, String(x.txs), usd(x.profitUsd)])));
+    if (m.arbPriority?.samples) {
+      out.push(
+        `Priority fees paid by arbitrage txs (${m.arbPriority.samples} receipts): median ${m.arbPriority.medianGwei?.toFixed(4)} gwei, p90 ${m.arbPriority.p90Gwei?.toFixed(4)} gwei, max ${m.arbPriority.maxGwei?.toFixed(4)} gwei (our PRIORITY_FEE_GWEI: ${s.priorityFeeGwei}).\n`,
+      );
+    }
     out.push(md(["dex combination", "txs", "profit"], m.topDexRoutes.slice(0, 8).map((x) => [x.route, String(x.txs), usd(x.profitUsd)])));
   }
   return out.join("\n");

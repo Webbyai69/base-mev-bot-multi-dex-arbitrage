@@ -10,7 +10,7 @@
  *   node dist/main.js digest     write reports/digest-latest.md (what the daily AI review reads)
  */
 import { loadSettings, type Settings } from "./config.js";
-import { Chain } from "./rpc.js";
+import { Chain, redactUrl } from "./rpc.js";
 import { PoolRegistry, type PoolSnapshot } from "./pools.js";
 import { Scanner, type RouteOptions } from "./scanner.js";
 import { GasEstimator } from "./gas.js";
@@ -26,6 +26,7 @@ import { LiquidationMonitor, liquidationSummary } from "./liquidations.js";
 import { FlashblockWatcher } from "./flashblocks.js";
 import { renderDigest, writeDigest } from "./digest.js";
 import { poolsOf } from "./scanner.js";
+import { BlockLogFetcher } from "./blocklogs.js";
 
 const POOLS_FILE = "pools.json";
 
@@ -66,6 +67,8 @@ function routeOptions(s: Settings): RouteOptions {
 interface Extras {
   liq?: LiquidationMonitor;
   fb?: FlashblockWatcher;
+  chain?: Chain;
+  refreshStats?: { checks: number; driftedPools: number };
 }
 
 async function writeDailyReport(store: Store, registry: PoolRegistry, s: Settings, day = new Date().toISOString().slice(0, 10), extras: Extras = {}): Promise<string> {
@@ -102,6 +105,8 @@ async function writeDailyDigest(store: Store, registry: PoolRegistry, s: Setting
     ...(market[0] ? { market: market[0] } : {}),
     ...(liq[0] ? { liq: liq[0] } : {}),
     ...(extras.fb ? { flashblockStats: extras.fb.stats } : {}),
+    ...(extras.chain ? { rpc: extras.chain.usage() } : {}),
+    ...(extras.refreshStats ? { refreshStats: extras.refreshStats } : {}),
   });
   return writeDigest(s.reportDir, day, text);
 }
@@ -147,6 +152,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
           gasLimit: s.arbGasLimit,
           priorityFeeGwei: s.priorityFeeGwei,
           maxDailyGasUsd: Number(process.env.MAX_DAILY_GAS_USD ?? 20),
+          maxConsecutiveFailures: Number(process.env.MAX_CONSECUTIVE_FAILURES ?? 5),
           useFlash: (process.env.USE_FLASH ?? "true") !== "false",
         })
       : undefined;
@@ -157,6 +163,16 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   const t0 = Date.now();
 
   let lastDigest = 0;
+  let lastFullRefresh = 0;
+  const refreshStats = { checks: 0, driftedPools: 0 };
+  extras.refreshStats = refreshStats;
+  extras.chain = chain;
+  const logsFetcher = new BlockLogFetcher(chain, { liquidations: !!extras.liq });
+  log.info(
+    s.refreshMode === "events"
+      ? `pool refresh: event-driven (one eth_getLogs per block, re-reading only pools that changed; full re-read every ${s.fullRefreshBlocks} blocks)`
+      : "pool refresh: full re-read of every pool every block (REFRESH_MODE=full)",
+  );
   const onBlock = async (n: number): Promise<void> => {
     try {
       await handleBlock(n);
@@ -172,13 +188,36 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       extras.fb.paused = true;
       await extras.fb.idle;
     }
-    // One block fetch serves the gas estimator (base fee) and the classifier (tx senders).
-    const [blk] = await Promise.all([fetchFullBlock(chain, n), registry.refreshAll(n)]);
+    // One block fetch serves the gas estimator (base fee) and the classifier (tx senders);
+    // one log fetch serves the pool refresh, the classifier and the liquidation monitor.
+    const canEvents = s.refreshMode === "events" && registry.syncedBlock > 0 && n - registry.syncedBlock <= s.maxLogGap;
+    const periodic = n - lastFullRefresh >= s.fullRefreshBlocks;
+    const [blk, logs] = await Promise.all([fetchFullBlock(chain, n), logsFetcher.fetch(canEvents ? registry.syncedBlock + 1 : n, n)]);
+    if (canEvents) await registry.applyLogs(logs, n);
+    if (!canEvents || periodic) {
+      // Periodic full re-read; in events mode it doubles as a self-check of the log-driven state.
+      const snap = canEvents ? registry.stateSnapshot() : null;
+      await registry.refreshAll(n);
+      lastFullRefresh = n;
+      if (snap) {
+        const drift = registry.driftAgainst(snap);
+        refreshStats.checks++;
+        refreshStats.driftedPools += drift.length;
+        if (drift.length) {
+          log.warn(
+            `event refresh drift: ${drift.length} of ${snap.size} pools differed from a full re-read at block ${n} (${drift
+              .slice(0, 4)
+              .map((a) => `${registry.pools.get(a)?.dex ?? "?"} ${a.slice(0, 10)}`)
+              .join(", ")}${drift.length > 4 ? ", …" : ""}); corrected`,
+          );
+        }
+      }
+    }
     const baseFee = blk?.baseFeePerGas ? BigInt(blk.baseFeePerGas) : null;
     const ethUsd = registry.ethPrice();
     const [gasQuote, detected] = await Promise.all([
       gas.quote(n, baseFee),
-      classifier ? classifier.classifyBlock(n, ethUsd, blk).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), [])) : Promise.resolve([]),
+      classifier ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), [])) : Promise.resolve([]),
     ]);
     const opps = await scanner.scan(n, gasQuote, ethUsd, s.minProfitUsd, { stage: "block" });
     paper.onBlock(n, opps, detected, ethUsd);
@@ -193,7 +232,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     }
     if (extras.liq) {
       const gasPrice = gasQuote.baseFeeWei + gasQuote.priorityFeeWei;
-      extras.liq.onBlock(n, ethUsd, gasPrice).catch((e: Error) => log.warn("liquidation monitor:", e.message.slice(0, 120)));
+      extras.liq.onBlock(n, ethUsd, gasPrice, logs).catch((e: Error) => log.warn("liquidation monitor:", e.message.slice(0, 120)));
     }
 
     // Learn pools that real bots trade on, a few per block so discovery stays cheap.
@@ -214,7 +253,9 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     if (blocksSeen % 30 === 0 || ms > 1800) {
       const fb = extras.fb ? `, flashblocks ${extras.fb.stats.scans} scans/${extras.fb.stats.opps} opps` : "";
       const lq = extras.liq ? `, ${extras.liq.watched} borrowers` : "";
-      log.info(`block ${n}: ${registry.pools.size} pools, ${opps.length} opps, ${detected.length} mev txs, ${ms}ms, gas/tx $${((Number(gasQuote.totalWei) / 1e18) * ethUsd).toFixed(4)}${fb}${lq}, uptime ${((Date.now() - t0) / 60000).toFixed(0)}m`);
+      const u = chain.usage();
+      const rpcNote = `, rpc ${u.requests} calls (~${(u.alchemyCuPerDay / 1e6).toFixed(1)}M Alchemy CU/day at this pace)`;
+      log.info(`block ${n}: ${registry.pools.size} pools, ${opps.length} opps, ${detected.length} mev txs, ${ms}ms, gas/tx $${((Number(gasQuote.totalWei) / 1e18) * ethUsd).toFixed(4)}${fb}${lq}${rpcNote}, uptime ${((Date.now() - t0) / 60000).toFixed(0)}m`);
     }
     if (Date.now() - lastReport > 60_000) {
       lastReport = Date.now();
@@ -294,12 +335,19 @@ async function main(): Promise<void> {
   const s = loadSettings();
   setLogLevel(s.logLevel);
   const store = new Store(s.dataDir);
-  const chain = new Chain(s.rpcUrl, s.wsUrl, {
-    ...(s.rpcConcurrency !== undefined ? { concurrency: s.rpcConcurrency } : {}),
-    ...(s.rpcMinIntervalMs !== undefined ? { minIntervalMs: s.rpcMinIntervalMs } : {}),
-    ...(s.rpcBatchMaxCount !== undefined ? { batchMaxCount: s.rpcBatchMaxCount } : {}),
-  });
-  log.info(`rpc ${s.rpcUrl.replace(/\/v2\/.*|\/[0-9a-f]{20,}.*/i, "/…")} · concurrency ${chain.opts.concurrency}, min interval ${chain.opts.minIntervalMs}ms, batch ${chain.opts.batchMaxCount}`);
+  const chain = new Chain(
+    s.rpcUrl,
+    s.wsUrl,
+    {
+      ...(s.rpcConcurrency !== undefined ? { concurrency: s.rpcConcurrency } : {}),
+      ...(s.rpcMinIntervalMs !== undefined ? { minIntervalMs: s.rpcMinIntervalMs } : {}),
+      ...(s.rpcBatchMaxCount !== undefined ? { batchMaxCount: s.rpcBatchMaxCount } : {}),
+    },
+    s.rpcFallbackUrls,
+  );
+  log.info(
+    `rpc ${redactUrl(s.rpcUrl)}${s.rpcFallbackUrls.length ? ` (+${s.rpcFallbackUrls.length} fallback: ${s.rpcFallbackUrls.map(redactUrl).join(", ")})` : ""} · concurrency ${chain.opts.concurrency}, min interval ${chain.opts.minIntervalMs}ms, batch ${chain.opts.batchMaxCount}`,
+  );
   const registry = new PoolRegistry(chain);
   registry.clPools = s.clPools;
   registry.blacklist = s.tokenBlacklist;
