@@ -15,7 +15,7 @@
  * leaderboard, most-arbed pairs and a per-day market summary.
  */
 import { AbiCoder, type Log } from "ethers";
-import { DEXES, UNISWAP_V3_FACTORY } from "./config.js";
+import { CL_DEXES, DEXES, UNISWAP_V3_FACTORY } from "./config.js";
 import { TOPIC_SWAP_AERO, TOPIC_SWAP_V2, TOPIC_SWAP_V3, aeroPoolIface, univ2PairIface, univ3PoolIface } from "./abi.js";
 import type { PoolRegistry } from "./pools.js";
 import type { Chain, Call } from "./rpc.js";
@@ -319,7 +319,7 @@ export class Classifier {
     for (const a of addresses) {
       if (this.poolMeta.has(a)) continue;
       const p = this.registry.pools.get(a);
-      if (p) this.poolMeta.set(a, { token0: p.token0, token1: p.token1, kind: p.kind, dex: p.dex });
+      if (p) this.poolMeta.set(a, { token0: p.token0, token1: p.token1, kind: p.kind === "slipstream" ? "univ3" : p.kind, dex: p.dex });
     }
     const unknown = addresses.filter((a) => !this.poolMeta.has(a));
     if (unknown.length === 0) return;
@@ -350,6 +350,9 @@ export class Classifier {
       } else if (rFee.success && rFee.returnData.length >= 66 && factory === UNISWAP_V3_FACTORY.toLowerCase()) {
         kind = "univ3";
         dex = "uniswap-v3";
+      } else if (rFee.success && rFee.returnData.length >= 66 && CL_DEXES.some((d) => d.factory.toLowerCase() === factory)) {
+        kind = "univ3"; // Slipstream emits the Uniswap V3 Swap event
+        dex = CL_DEXES.find((d) => d.factory.toLowerCase() === factory)!.id;
       } else if (rFee.success && rFee.returnData.length >= 66 && !(rStable.success && rStable.returnData.length >= 66)) {
         // fee() but no stable(): some V3-style fork we do not know by factory.
         kind = "univ3";
@@ -381,7 +384,8 @@ export class Classifier {
         if (this.registry.pools.has(p)) continue;
         const m = this.poolMeta.get(p);
         if (!m) continue;
-        if (!DEXES.some((x) => x.id === m.dex)) continue;
+        const tradable = DEXES.some((x) => x.id === m.dex) || (this.registry.clPools && CL_DEXES.some((x) => x.id === m.dex));
+        if (!tradable) continue;
         out.push({ address: p, dex: m.dex });
       }
     }

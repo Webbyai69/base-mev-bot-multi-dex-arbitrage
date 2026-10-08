@@ -19,7 +19,7 @@ export interface CallResult {
   returnData: string;
 }
 
-export type BlockTag = number | "latest";
+export type BlockTag = number | "latest" | "pending";
 
 /**
  * Retry transient RPC failures (rate limits, timeouts, resets); never retry a
@@ -151,7 +151,7 @@ export class Chain {
    * CALL_EXCEPTION whose `data` is the revert payload.
    */
   async callWithOverrides(to: string, data: string, blockTag: BlockTag, overrides: Record<string, { code?: string; balance?: string }>): Promise<string> {
-    const tag = blockTag === "latest" ? "latest" : "0x" + blockTag.toString(16);
+    const tag = typeof blockTag === "number" ? "0x" + blockTag.toString(16) : blockTag;
     return this.rpc(async () => (await this.provider.send("eth_call", [{ to, data }, tag, overrides])) as string);
   }
 
