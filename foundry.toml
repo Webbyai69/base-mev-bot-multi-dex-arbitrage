@@ -1,0 +1,11 @@
+# Optional: Foundry config for the contract tests in test/forge (forge test).
+[profile.default]
+src = "contracts"
+test = "test/forge"
+out = "build/forge"
+cache_path = "build/forge-cache"
+libs = []
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 1000

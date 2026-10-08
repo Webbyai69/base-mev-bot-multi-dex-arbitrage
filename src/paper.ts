@@ -15,8 +15,9 @@
  *              we could not classify) -> counted as lost.
  */
 import { quoteArb } from "./math.js";
-import type { PoolRegistry } from "./pools.js";
-import type { Opportunity } from "./scanner.js";
+import { evaluateRoute } from "./routes.js";
+import type { Pool, PoolRegistry } from "./pools.js";
+import { routeKey, poolsOf, type Opportunity } from "./scanner.js";
 import type { DetectedMev } from "./classifier.js";
 import { Store, dayKey } from "./store.js";
 import { log } from "./log.js";
@@ -54,7 +55,6 @@ interface Pending {
   takenBlock?: number;
 }
 
-const routeKey = (o: Opportunity): string => `${o.buyPool}-${o.sellPool}-${o.tokenIn}`;
 
 export class PaperEngine {
   private pending = new Map<string, Pending>();
@@ -81,9 +81,8 @@ export class PaperEngine {
       if (p.checks >= 2 || age >= 2) p.profitAtN2Usd = profitUsd;
 
       if (!p.takenBy) {
-        const taker = mevInBlock.find(
-          (m) => m.type === "arbitrage" && (m.pools.includes(p.opp.buyPool) || m.pools.includes(p.opp.sellPool)),
-        );
+        const ours = poolsOf(p.opp);
+        const taker = mevInBlock.find((m) => m.type === "arbitrage" && ours.some((x) => m.pools.includes(x)));
         if (taker) {
           p.takenBy = taker.bot;
           p.takenTx = taker.txHash;
@@ -100,6 +99,17 @@ export class PaperEngine {
     //    stay muted until the spread has closed once).
     const routesNow = new Set(newOpps.map(routeKey));
     for (const r of [...this.consumed]) if (!routesNow.has(r)) this.consumed.delete(r);
+    this.register(newOpps);
+  }
+
+  /**
+   * Record new opportunities without evaluating pending ones. Used directly by
+   * the Flashblocks loop: an opportunity found mid-block on pre-confirmed
+   * state carries the last confirmed block number, so its first outcome check
+   * happens on the very next confirmed block — exactly the block our
+   * transaction would have landed in.
+   */
+  register(newOpps: Opportunity[]): void {
     const pendingRoutes = new Set([...this.pending.values()].map((p) => routeKey(p.opp)));
     for (const o of newOpps) {
       const r = routeKey(o);
@@ -108,8 +118,9 @@ export class PaperEngine {
       const rec: OpportunityRecord = { ...o, kind: "opportunity", mode: "paper" };
       this.store.append(OPPS_FILE, rec);
       this.pending.set(o.id, { opp: o, checks: 0, profitAtN1Usd: null, profitAtN2Usd: null });
+      const via = o.route ? `via ${o.route.dexes.join(">")}` : `buy ${o.buyDex} sell ${o.sellDex}`;
       log.info(
-        `paper: ${o.pairSymbols} buy ${o.buyDex} sell ${o.sellDex} in=${formatUnits(o.amountIn, this.registry.token(o.tokenIn)?.decimals ?? 18, 5)} ${o.tokenInSymbol} ` +
+        `paper${o.stage === "flashblock" ? " [flashblock]" : ""}: ${o.pairSymbols} ${via} in=${formatUnits(o.amountIn, this.registry.token(o.tokenIn)?.decimals ?? 18, 5)} ${o.tokenInSymbol} ` +
           `profit=$${o.profitUsd.toFixed(3)} gas=$${o.gasUsd.toFixed(3)} net=$${o.netUsd.toFixed(3)} sim=${o.sim}`,
       );
     }
@@ -117,6 +128,13 @@ export class PaperEngine {
 
   /** Same route, same input size, current reserves. Null when no longer profitable. */
   private repriceUsd(o: Opportunity, ethUsd: number): number | null {
+    if (o.route) {
+      const pools = o.route.pools.map((a) => this.registry.pools.get(a));
+      if (pools.some((x) => !x)) return null;
+      const q = evaluateRoute({ pools: pools as Pool[], tokens: o.route.tokens }, o.amountIn);
+      if (!q || q.profit <= 0n) return null;
+      return this.registry.usdValue(o.tokenIn, q.profit, ethUsd);
+    }
     const buy = this.registry.pools.get(o.buyPool);
     const sell = this.registry.pools.get(o.sellPool);
     if (!buy || !sell) return null;
@@ -170,6 +188,45 @@ export interface DaySummary {
   byRoute: Array<{ route: string; count: number; netUsd: number }>;
   takers: Array<{ bot: string; count: number }>;
   simMismatches: number;
+  /** Results per strategy (classic V2, concentrated-liquidity, triangular) and per stage (block vs flashblock). */
+  byKind: OutcomeStats[];
+  byStage: OutcomeStats[];
+  /** Win rate per route: how often a verified opportunity on this route was still there one block later. */
+  scores: OutcomeStats[];
+}
+
+export interface OutcomeStats {
+  key: string;
+  found: number;
+  persisted: number;
+  taken: number;
+  closed: number;
+  /** persisted / (persisted + taken + closed); null until something finalized. */
+  winRate: number | null;
+  realisticNetUsd: number;
+  optimisticNetUsd: number;
+}
+
+export function strategyKind(o: Pick<Opportunity, "route" | "hops">): string {
+  if (!o.route) return "classic V2 two-pool";
+  return (o.hops ?? o.route.pools.length) >= 3 ? "triangular / multi-hop" : "concentrated-liquidity two-pool";
+}
+
+function statsAgg(): Map<string, OutcomeStats> {
+  return new Map();
+}
+
+function bump(m: Map<string, OutcomeStats>, key: string, o: OpportunityRecord, out: OutcomeRecord | undefined, verified: boolean): void {
+  const e = m.get(key) ?? { key, found: 0, persisted: 0, taken: 0, closed: 0, winRate: null, realisticNetUsd: 0, optimisticNetUsd: 0 };
+  e.found++;
+  e.optimisticNetUsd += Number(o.netUsd);
+  if (out) {
+    e[out.status]++;
+    if (verified) e.realisticNetUsd += out.realisticNetUsd;
+  }
+  const done = e.persisted + e.taken + e.closed;
+  e.winRate = done ? e.persisted / done : null;
+  m.set(key, e);
 }
 
 export async function summarize(store: Store, days?: string[]): Promise<DaySummary[]> {
@@ -183,7 +240,7 @@ export async function summarize(store: Store, days?: string[]): Promise<DaySumma
   const ensure = (day: string): DaySummary => {
     let s = byDay.get(day);
     if (!s) {
-      s = { day, found: 0, optimisticNetUsd: 0, realisticNetUsd: 0, persisted: 0, taken: 0, closed: 0, pending: 0, gasUsd: 0, byPair: [], byRoute: [], takers: [], simMismatches: 0 };
+      s = { day, found: 0, optimisticNetUsd: 0, realisticNetUsd: 0, persisted: 0, taken: 0, closed: 0, pending: 0, gasUsd: 0, byPair: [], byRoute: [], takers: [], simMismatches: 0, byKind: [], byStage: [], scores: [] };
       byDay.set(day, s);
     }
     return s;
@@ -191,6 +248,14 @@ export async function summarize(store: Store, days?: string[]): Promise<DaySumma
   const pairAgg = new Map<string, Map<string, { count: number; netUsd: number }>>();
   const routeAgg = new Map<string, Map<string, { count: number; netUsd: number }>>();
   const takerAgg = new Map<string, Map<string, number>>();
+  const kindAgg = new Map<string, Map<string, OutcomeStats>>();
+  const stageAgg = new Map<string, Map<string, OutcomeStats>>();
+  const scoreAgg = new Map<string, Map<string, OutcomeStats>>();
+  const getAgg = (m: Map<string, Map<string, OutcomeStats>>, day: string) => {
+    let x = m.get(day);
+    if (!x) m.set(day, (x = statsAgg()));
+    return x;
+  };
 
   for (const o of opps.values()) {
     const day = dayKey(o.foundAt);
@@ -218,7 +283,10 @@ export async function summarize(store: Store, days?: string[]): Promise<DaySumma
     pe.netUsd += Number(o.netUsd);
     pm.set(o.pairSymbols, pe);
     pairAgg.set(day, pm);
-    const route = `${o.buyDex} -> ${o.sellDex}`;
+    bump(getAgg(kindAgg, day), strategyKind(o), o, out, verified);
+    bump(getAgg(stageAgg, day), o.stage ?? "block", o, out, verified);
+    if (verified) bump(getAgg(scoreAgg, day), `${o.pairSymbols} [${o.route ? o.route.dexes.join(">") : `${o.buyDex}>${o.sellDex}`}]`, o, out, verified);
+    const route = o.route ? o.route.dexes.join(" -> ") : `${o.buyDex} -> ${o.sellDex}`;
     const rm = routeAgg.get(day) ?? new Map();
     const re = rm.get(route) ?? { count: 0, netUsd: 0 };
     re.count++;
@@ -234,6 +302,12 @@ export async function summarize(store: Store, days?: string[]): Promise<DaySumma
     s.byRoute = [...(routeAgg.get(s.day) ?? new Map()).entries()]
       .map(([route, v]) => ({ route, ...v }))
       .sort((a, b) => b.count - a.count);
+    s.byKind = [...(kindAgg.get(s.day) ?? new Map()).values()].sort((a, b) => b.found - a.found);
+    s.byStage = [...(stageAgg.get(s.day) ?? new Map()).values()].sort((a, b) => b.found - a.found);
+    s.scores = [...(scoreAgg.get(s.day) ?? new Map()).values()]
+      .filter((x) => x.persisted + x.taken + x.closed > 0)
+      .sort((a, b) => b.realisticNetUsd - a.realisticNetUsd || b.found - a.found)
+      .slice(0, 25);
     s.takers = [...(takerAgg.get(s.day) ?? new Map()).entries()]
       .map(([bot, count]) => ({ bot, count }))
       .sort((a, b) => b.count - a.count)

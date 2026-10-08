@@ -13,20 +13,30 @@
  *      local maths reproduces on-chain outputs to the wei.
  * The MEV classifier can add pools it sees arbitrage bots use at runtime.
  */
-import { getAddress, AbiCoder } from "ethers";
-import { DEXES, TOKENS, WETH, type DexInfo, type DexKind } from "./config.js";
+import { getAddress, AbiCoder, type Log } from "ethers";
+import { CL_DEXES, DEXES, TOKENS, WETH, USDC, type ClDexInfo, type DexInfo, type DexKind } from "./config.js";
 import {
+  TOPIC_BURN_V3,
+  TOPIC_MINT_V3,
   TOPIC_SWAP_AERO,
   TOPIC_SWAP_V2,
+  TOPIC_SWAP_V3,
+  TOPIC_SYNC,
+  TOPIC_SYNC_AERO,
   aeroFactoryIface,
   aeroPoolIface,
   erc20Iface,
+  slipstreamFactoryIface,
+  slipstreamPoolIface,
   univ2FactoryIface,
   univ2PairIface,
   univ2RouterIface,
+  univ3FactoryIface,
+  univ3PoolIface,
 } from "./abi.js";
 import { getAmountOut, type FeeModel } from "./math.js";
-import type { Chain, Call } from "./rpc.js";
+import { compressTick, virtualReserves, wordPosition, wordsNeeded, type ClState } from "./clmath.js";
+import type { Chain, Call, CallResult } from "./rpc.js";
 import { log } from "./log.js";
 
 export interface Pool {
@@ -41,7 +51,21 @@ export interface Pool {
   feeModel: FeeModel;
   stable: boolean;
   updatedBlock: number;
+  /** Concentrated-liquidity state (Uniswap V3 / Slipstream). reserve0/1 then hold virtual reserves. */
+  cl?: ClPoolState;
+  /** Real token balances, only used for the liquidity floor during discovery. */
+  bal0?: bigint;
+  bal1?: bigint;
 }
+
+export interface ClPoolState extends ClState {
+  /** Quoter used to cross-check this pool's maths (one per factory). */
+  quoter: string;
+}
+
+type SnapshotPool = Omit<Pool, "reserve0" | "reserve1" | "updatedBlock" | "cl" | "bal0" | "bal1"> & {
+  cl?: { tickSpacing: number; feePips: number; quoter: string };
+};
 
 export interface TokenMeta {
   address: string;
@@ -54,7 +78,7 @@ export interface PoolSnapshot {
   discoveredAt: string;
   block: number;
   tokens: TokenMeta[];
-  pools: Array<Omit<Pool, "reserve0" | "reserve1" | "updatedBlock">>;
+  pools: SnapshotPool[];
 }
 
 const abi = AbiCoder.defaultAbiCoder();
@@ -70,8 +94,20 @@ export class PoolRegistry {
   readonly tokens = new Map<string, TokenMeta>();
   /** Set when the watch list changed since the last snapshot write. */
   dirty = false;
+  /** Watch Uniswap V3 / Slipstream pools too (CL_POOLS). */
+  clPools = true;
+  /** Tokens never watched or traded (TOKEN_BLACKLIST). */
+  blacklist = new Set<string>();
+  /** Last block whose state every watched pool reflects (0 = never fully read). */
+  syncedBlock = 0;
+  /** Pools last read at the pre-confirmed ("pending") state by the Flashblocks loop; re-read at the next block. */
+  private pendingDirty = new Set<string>();
 
   constructor(readonly chain: Chain) {}
+
+  private allowed(p: Pool): boolean {
+    return !this.blacklist.has(p.token0) && !this.blacklist.has(p.token1);
+  }
 
   /** Pools grouped by unordered token pair; only groups with >= 2 pools matter. */
   groups(): Map<string, Pool[]> {
@@ -128,7 +164,9 @@ export class PoolRegistry {
     }
 
     // Reserves for all candidates (one consistent block), then liquidity filter.
+    for (let i = candidates.length - 1; i >= 0; i--) if (!this.allowed(candidates[i]!)) candidates.splice(i, 1);
     await this.refreshReserves(candidates, block);
+    await this.loadClBalances(candidates, block);
     await this.loadTokenMetaForPools(candidates);
     const ethUsd = this.ethPriceFrom(candidates);
     log.info(`reference ETH price from pools: $${ethUsd.toFixed(2)}`);
@@ -142,13 +180,21 @@ export class PoolRegistry {
       for (const t of [p.token0, p.token1]) if (!BASE_TOKEN_SET.has(t)) counterTokens.add(t);
     }
     const have = new Set(kept.map((p) => p.address));
+    const lookups: Array<{ name: string; find: () => Promise<Pool[]> }> = [];
     for (const dex of DEXES) {
       if (mode === "full" && dex.id !== "uniswap-v2") continue; // already enumerated in full
-      const found = (await this.lookupPairs(dex, [...BASE_TOKEN_SET], [...counterTokens, ...BASE_TOKEN_SET], block)).filter((p) => !have.has(p.address));
+      lookups.push({ name: dex.name, find: () => this.lookupPairs(dex, [...BASE_TOKEN_SET], [...counterTokens, ...BASE_TOKEN_SET], block) });
+    }
+    if (this.clPools) {
+      for (const dex of CL_DEXES) lookups.push({ name: dex.name, find: () => this.lookupClPools(dex, [WETH, USDC], [...counterTokens, ...BASE_TOKEN_SET], block) });
+    }
+    for (const { name, find } of lookups) {
+      const found = (await find()).filter((p) => !have.has(p.address) && this.allowed(p));
       await this.refreshReserves(found, block);
+      await this.loadClBalances(found, block);
       await this.loadTokenMetaForPools(found);
       const ok = found.filter((p) => this.liquidityInWeth(p, ethUsd) >= opts.minLiquidityWeth);
-      log.info(`${dex.name}: ${found.length} more pairs found by lookup, ${ok.length} pass liquidity floor`);
+      log.info(`${name}: ${found.length} more pools found by lookup, ${ok.length} pass liquidity floor`);
       for (const p of ok) {
         have.add(p.address);
         kept.push(p);
@@ -173,7 +219,13 @@ export class PoolRegistry {
     log.info(`${calibrated.length} pools calibrated across ${new Set(calibrated.map((p) => pairKey(p.token0, p.token1))).size} token pairs`);
 
     this.pools.clear();
-    for (const p of calibrated) this.pools.set(p.address, p);
+    for (const p of calibrated) {
+      delete p.bal0;
+      delete p.bal1;
+      this.pools.set(p.address, p);
+    }
+    const cl = calibrated.filter((p) => p.cl).length;
+    if (cl) log.info(`${cl} of them are concentrated-liquidity pools (Uniswap V3 / Slipstream)`);
   }
 
   /** Pools (on DEXes we can trade) that emitted a Swap in the last `lookback` blocks. */
@@ -185,7 +237,8 @@ export class PoolRegistry {
     while (start <= block) {
       const end = Math.min(block, start + range - 1);
       try {
-        const logs = await this.chain.getLogs({ fromBlock: start, toBlock: end, topics: [[TOPIC_SWAP_V2, TOPIC_SWAP_AERO]] });
+        const topics = this.clPools ? [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3] : [TOPIC_SWAP_V2, TOPIC_SWAP_AERO];
+        const logs = await this.chain.getLogs({ fromBlock: start, toBlock: end, topics: [topics] });
         for (const l of logs) addrs.add(l.address.toLowerCase());
         log.debug(`blocks ${start}-${end}: ${logs.length} swaps, ${addrs.size} distinct pools so far`);
         start = end + 1;
@@ -211,23 +264,45 @@ export class PoolRegistry {
    * factory is one of ours (and, for Aerodrome, volatile ones).
    */
   async describeUnknownPools(addrs: string[], block: number): Promise<Pool[]> {
+    const PER = 6;
     const calls: Call[] = [];
     for (const a of addrs) {
       calls.push({ target: a, callData: univ2PairIface.encodeFunctionData("token0") });
       calls.push({ target: a, callData: univ2PairIface.encodeFunctionData("token1") });
       calls.push({ target: a, callData: univ2PairIface.encodeFunctionData("factory") });
       calls.push({ target: a, callData: aeroPoolIface.encodeFunctionData("stable") });
+      calls.push({ target: a, callData: univ3PoolIface.encodeFunctionData("tickSpacing") });
+      calls.push({ target: a, callData: univ3PoolIface.encodeFunctionData("fee") });
     }
     const res = await this.chain.multicall(calls, block);
     const byFactory = new Map(DEXES.map((d) => [d.factory.toLowerCase(), d]));
+    const clByFactory = new Map(CL_DEXES.map((d) => [d.factory.toLowerCase(), d]));
     const pools: Pool[] = [];
     addrs.forEach((a, i) => {
-      const r0 = res[i * 4]!;
-      const r1 = res[i * 4 + 1]!;
-      const rf = res[i * 4 + 2]!;
-      const rs = res[i * 4 + 3]!;
+      const r0 = res[i * PER]!;
+      const r1 = res[i * PER + 1]!;
+      const rf = res[i * PER + 2]!;
+      const rs = res[i * PER + 3]!;
       if (!r0.success || !r1.success || !rf.success || r0.returnData.length < 66 || r1.returnData.length < 66 || rf.returnData.length < 66) return;
-      const dex = byFactory.get((abi.decode(["address"], rf.returnData)[0] as string).toLowerCase());
+      const factory = (abi.decode(["address"], rf.returnData)[0] as string).toLowerCase();
+      const clDex = this.clPools ? clByFactory.get(factory) : undefined;
+      if (clDex) {
+        const rt = res[i * PER + 4]!;
+        const rfee = res[i * PER + 5]!;
+        if (!rt.success || !rfee.success || rt.returnData.length < 66 || rfee.returnData.length < 66) return;
+        pools.push(
+          this.newClPool(
+            a,
+            clDex,
+            (abi.decode(["address"], r0.returnData)[0] as string).toLowerCase(),
+            (abi.decode(["address"], r1.returnData)[0] as string).toLowerCase(),
+            Number(abi.decode(["int24"], rt.returnData)[0]),
+            Number(abi.decode(["uint24"], rfee.returnData)[0]),
+          ),
+        );
+        return;
+      }
+      const dex = byFactory.get(factory);
       if (!dex) return;
       const stable = rs.success && rs.returnData.length >= 66 ? Boolean(abi.decode(["bool"], rs.returnData)[0]) : false;
       if (stable) return;
@@ -336,6 +411,72 @@ export class PoolRegistry {
     return this.describePools(dex, addrs, block);
   }
 
+  private newClPool(address: string, dex: ClDexInfo, token0: string, token1: string, tickSpacing: number, feePips: number): Pool {
+    return {
+      address: address.toLowerCase(),
+      dex: dex.id,
+      kind: dex.kind,
+      token0,
+      token1,
+      reserve0: 0n,
+      reserve1: 0n,
+      feePpm: feePips,
+      feeModel: "ppm",
+      stable: false,
+      updatedBlock: 0,
+      cl: { sqrtPriceX96: 0n, tick: 0, liquidity: 0n, tickSpacing, feePips, words: new Map(), quoter: dex.quoter.toLowerCase() },
+    };
+  }
+
+  /** Factory lookups of CL pools for base x token pairs over every fee tier / tick spacing. */
+  private async lookupClPools(dex: ClDexInfo, bases: string[], tokens: string[], block: number): Promise<Pool[]> {
+    const calls: Call[] = [];
+    const meta: Array<{ t0: string; t1: string; key: number }> = [];
+    const seen = new Set<string>();
+    for (const b of bases) {
+      for (const t of tokens) {
+        if (b === t) continue;
+        const k = pairKey(b, t);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const [t0, t1] = k.split("-") as [string, string];
+        for (const key of dex.poolKeys) {
+          meta.push({ t0, t1, key });
+          calls.push({
+            target: dex.factory,
+            callData: dex.kind === "univ3" ? univ3FactoryIface.encodeFunctionData("getPool", [t0, t1, key]) : slipstreamFactoryIface.encodeFunctionData("getPool", [t0, t1, key]),
+          });
+        }
+      }
+    }
+    const res = await this.chain.multicall(calls, block);
+    const addrs: string[] = [];
+    res.forEach((r) => {
+      if (!r.success || r.returnData.length < 66) return;
+      const a = (abi.decode(["address"], r.returnData)[0] as string).toLowerCase();
+      if (a !== "0x0000000000000000000000000000000000000000") addrs.push(a);
+    });
+    // describeUnknownPools reads tickSpacing/fee and checks the factory.
+    return this.describeUnknownPools(addrs, block);
+  }
+
+  /** Real token balances of CL pools (virtual reserves overstate depth for the liquidity floor). */
+  private async loadClBalances(pools: Pool[], block: number): Promise<void> {
+    const cl = pools.filter((p) => p.cl);
+    if (cl.length === 0) return;
+    const calls: Call[] = cl.flatMap((p) => [
+      { target: p.token0, callData: erc20Iface.encodeFunctionData("balanceOf", [p.address]) },
+      { target: p.token1, callData: erc20Iface.encodeFunctionData("balanceOf", [p.address]) },
+    ]);
+    const res = await this.chain.multicall(calls, block);
+    cl.forEach((p, i) => {
+      const a = res[i * 2]!;
+      const b = res[i * 2 + 1]!;
+      p.bal0 = a.success && a.returnData.length >= 66 ? (abi.decode(["uint256"], a.returnData)[0] as bigint) : 0n;
+      p.bal1 = b.success && b.returnData.length >= 66 ? (abi.decode(["uint256"], b.returnData)[0] as bigint) : 0n;
+    });
+  }
+
   async loadTokenMetaForPools(pools: Pool[]): Promise<void> {
     await this.loadTokenMeta(pools.flatMap((p) => [p.token0, p.token1]));
   }
@@ -383,25 +524,261 @@ export class PoolRegistry {
   // ------------------------------------------------------------------------
 
   /** Refresh reserves for the given pools at one block (consistent snapshot). */
-  async refreshReserves(pools: Pool[], block: number): Promise<void> {
+  /** `via` lets the Flashblocks loop read pre-confirmed state through its own RPC endpoint. */
+  async refreshReserves(pools: Pool[], block: number | "pending", via?: Chain): Promise<void> {
+    if (pools.length === 0) return;
+    if (block === "pending") for (const p of pools) this.pendingDirty.add(p.address);
+    const v2 = pools.filter((p) => !p.cl);
+    const cl = pools.filter((p) => p.cl);
+    await Promise.all([this.refreshV2(v2, block, via ?? this.chain), this.refreshCl(cl, block, via ?? this.chain)]);
+  }
+
+  private async refreshV2(pools: Pool[], block: number | "pending", chain: Chain): Promise<void> {
     if (pools.length === 0) return;
     const calls: Call[] = pools.map((p) => ({
       target: p.address,
       callData: (p.kind === "aerodrome" ? aeroPoolIface : univ2PairIface).encodeFunctionData("getReserves"),
     }));
-    const res = await this.chain.multicall(calls, block);
+    const res = await chain.multicall(calls, block);
     pools.forEach((p, i) => {
       const r = res[i]!;
       if (!r.success || r.returnData.length < 2 + 64 * 3) return;
       const [r0, r1] = abi.decode(["uint256", "uint256", "uint256"], r.returnData) as unknown as [bigint, bigint, bigint];
       p.reserve0 = r0;
       p.reserve1 = r1;
-      p.updatedBlock = block;
+      if (block !== "pending") p.updatedBlock = block;
+    });
+  }
+
+  /**
+   * One multicall per refresh for CL pools: slot0, liquidity, fee (dynamic on
+   * Slipstream) and the tick-bitmap words around the last known tick. If the
+   * price moved more than one word since, the words we need are missing and
+   * the pool is simply infeasible for routing until the next refresh.
+   */
+  private async refreshCl(pools: Pool[], block: number | "pending", chain: Chain): Promise<void> {
+    if (pools.length === 0) return;
+    // Pools never refreshed need their tick first to know which words to read.
+    const fresh = pools.filter((p) => p.cl!.sqrtPriceX96 === 0n);
+    if (fresh.length) await this.readCl(fresh, block, false, chain);
+    await this.readCl(pools, block, true, chain);
+  }
+
+  private async readCl(pools: Pool[], block: number | "pending", withWords: boolean, chain: Chain): Promise<void> {
+    const calls: Call[] = [];
+    const layout: Array<{ start: number; words: number[] }> = [];
+    for (const p of pools) {
+      const s = p.cl!;
+      const start = calls.length;
+      const slot0Iface = p.kind === "slipstream" ? slipstreamPoolIface : univ3PoolIface;
+      calls.push({ target: p.address, callData: slot0Iface.encodeFunctionData("slot0") });
+      calls.push({ target: p.address, callData: univ3PoolIface.encodeFunctionData("liquidity") });
+      calls.push({ target: p.address, callData: univ3PoolIface.encodeFunctionData("fee") });
+      let words: number[] = [];
+      if (withWords) {
+        const w = wordPosition(compressTick(s.tick, s.tickSpacing));
+        words = [w - 1, w, w + 1];
+        for (const wp of words) calls.push({ target: p.address, callData: univ3PoolIface.encodeFunctionData("tickBitmap", [wp]) });
+      }
+      layout.push({ start, words });
+    }
+    const res = await chain.multicall(calls, block);
+    pools.forEach((p, i) => {
+      const s = p.cl!;
+      const { start, words } = layout[i]!;
+      const r0 = res[start]!;
+      const rl = res[start + 1]!;
+      const rf = res[start + 2]!;
+      if (!r0.success || !rl.success || r0.returnData.length < 130) {
+        s.liquidity = 0n; // unusable this round
+        return;
+      }
+      const slot0Iface = p.kind === "slipstream" ? slipstreamPoolIface : univ3PoolIface;
+      const slot = slot0Iface.decodeFunctionResult("slot0", r0.returnData);
+      s.sqrtPriceX96 = slot[0] as bigint;
+      s.tick = Number(slot[1]);
+      s.liquidity = abi.decode(["uint128"], rl.returnData)[0] as bigint;
+      if (rf.success && rf.returnData.length >= 66) {
+        s.feePips = Number(abi.decode(["uint24"], rf.returnData)[0]);
+        p.feePpm = s.feePips;
+      }
+      s.words = new Map();
+      words.forEach((wp, k) => {
+        const r = res[start + 3 + k]!;
+        if (r.success && r.returnData.length >= 66) s.words.set(wp, abi.decode(["uint256"], r.returnData)[0] as bigint);
+      });
+      // Words for the *current* tick must be present, or swaps on this pool are not modelled this round.
+      if (withWords && !wordsNeeded(s.tick, s.tickSpacing).every((w) => s.words.has(w))) s.words = new Map();
+      const v = virtualReserves(s);
+      p.reserve0 = v.reserve0;
+      p.reserve1 = v.reserve1;
+      if (block !== "pending") p.updatedBlock = block;
     });
   }
 
   async refreshAll(block: number): Promise<void> {
     await this.refreshReserves([...this.pools.values()], block);
+    this.pendingDirty.clear();
+    this.syncedBlock = block;
+  }
+
+  /**
+   * Event-driven refresh (low-RPC mode): bring every watched pool from
+   * `syncedBlock` to `block` from that range's logs instead of re-reading all
+   * of them, then re-read only what the logs cannot tell us, in one multicall.
+   *
+   *   V2 / Aerodrome  Sync carries the new reserves: exact, no call needed.
+   *   CL pools        Swap carries sqrtPriceX96, liquidity and tick after the
+   *                   swap: exact. Mint/Burn change liquidity and the tick
+   *                   bitmap, so those pools are re-read. Slipstream's fee is
+   *                   dynamic, so a swapped Slipstream pool re-reads fee(). A
+   *                   tick that moved into a bitmap word we have not read
+   *                   fetches just that word.
+   *   Pending reads   pools the Flashblocks loop read at the pre-confirmed
+   *                   state are re-read at the confirmed block.
+   *
+   * `logs` must cover (syncedBlock, block] and be in chain order (the order
+   * eth_getLogs returns them in). A periodic full refresh (FULL_REFRESH_BLOCKS)
+   * corrects anything this misses.
+   */
+  async applyLogs(logs: Log[], block: number): Promise<{ fromLogs: number; reread: number }> {
+    const fullRead = new Set<Pool>();
+    const v2Read = new Set<Pool>();
+    const feeRead = new Set<Pool>();
+    const touched = new Set<Pool>();
+    let fromLogs = 0;
+    for (const l of logs) {
+      const p = this.pools.get(l.address.toLowerCase());
+      if (!p) continue;
+      const t0 = l.topics[0];
+      if (!p.cl) {
+        if (t0 === TOPIC_SYNC || t0 === TOPIC_SYNC_AERO) {
+          const [r0, r1] = abi.decode(["uint256", "uint256"], l.data) as unknown as [bigint, bigint];
+          p.reserve0 = r0;
+          p.reserve1 = r1;
+          p.updatedBlock = l.blockNumber;
+          fromLogs++;
+        }
+        continue;
+      }
+      if (t0 === TOPIC_SWAP_V3) {
+        const d = abi.decode(["int256", "int256", "uint160", "uint128", "int24"], l.data);
+        const s = p.cl;
+        s.sqrtPriceX96 = d[2] as bigint;
+        s.liquidity = d[3] as bigint;
+        s.tick = Number(d[4]);
+        p.updatedBlock = l.blockNumber;
+        touched.add(p);
+        if (p.kind === "slipstream") feeRead.add(p);
+        fromLogs++;
+      } else if (t0 === TOPIC_MINT_V3 || t0 === TOPIC_BURN_V3) {
+        fullRead.add(p);
+      }
+    }
+    for (const a of this.pendingDirty) {
+      const p = this.pools.get(a);
+      if (p) (p.cl ? fullRead : v2Read).add(p);
+    }
+    this.pendingDirty.clear();
+    // CL pools never read, or whose tick moved into bitmap words we don't have.
+    const wordRead = new Map<Pool, number[]>();
+    for (const p of this.pools.values()) {
+      if (!p.cl || fullRead.has(p)) continue;
+      if (p.cl.sqrtPriceX96 === 0n) {
+        fullRead.add(p);
+        continue;
+      }
+      const need = wordsNeeded(p.cl.tick, p.cl.tickSpacing).filter((w) => !p.cl!.words.has(w));
+      if (need.length) wordRead.set(p, need);
+    }
+    for (const p of touched) {
+      if (!fullRead.has(p)) {
+        const v = virtualReserves(p.cl!);
+        p.reserve0 = v.reserve0;
+        p.reserve1 = v.reserve1;
+      }
+    }
+
+    // One multicall for everything the logs could not settle.
+    const calls: Call[] = [];
+    const apply: Array<(res: CallResult[]) => void> = [];
+    for (const p of v2Read) {
+      const at = calls.length;
+      calls.push({ target: p.address, callData: (p.kind === "aerodrome" ? aeroPoolIface : univ2PairIface).encodeFunctionData("getReserves") });
+      apply.push((res) => {
+        const r = res[at]!;
+        if (!r.success || r.returnData.length < 2 + 64 * 3) return;
+        const [r0, r1] = abi.decode(["uint256", "uint256", "uint256"], r.returnData) as unknown as [bigint, bigint, bigint];
+        p.reserve0 = r0;
+        p.reserve1 = r1;
+        p.updatedBlock = block;
+      });
+    }
+    for (const p of feeRead) {
+      if (fullRead.has(p)) continue;
+      const at = calls.length;
+      calls.push({ target: p.address, callData: univ3PoolIface.encodeFunctionData("fee") });
+      apply.push((res) => {
+        const r = res[at]!;
+        if (!r.success || r.returnData.length < 66) return;
+        p.cl!.feePips = Number(abi.decode(["uint24"], r.returnData)[0]);
+        p.feePpm = p.cl!.feePips;
+      });
+    }
+    for (const [p, words] of wordRead) {
+      const at = calls.length;
+      for (const w of words) calls.push({ target: p.address, callData: univ3PoolIface.encodeFunctionData("tickBitmap", [w]) });
+      apply.push((res) => {
+        words.forEach((w, k) => {
+          const r = res[at + k]!;
+          if (r.success && r.returnData.length >= 66) p.cl!.words.set(w, abi.decode(["uint256"], r.returnData)[0] as bigint);
+        });
+      });
+    }
+    const reread = v2Read.size + feeRead.size + wordRead.size + fullRead.size;
+    await Promise.all([
+      calls.length ? this.chain.multicall(calls, block).then((res) => apply.forEach((f) => f(res))) : undefined,
+      fullRead.size ? this.refreshCl([...fullRead], block, this.chain) : undefined,
+    ]);
+    this.syncedBlock = block;
+    return { fromLogs, reread };
+  }
+
+  /** Price-relevant state of every watched pool, for the drift check (fee and bitmap words excluded). */
+  stateSnapshot(): Map<string, string> {
+    const m = new Map<string, string>();
+    for (const p of this.pools.values()) {
+      m.set(p.address, p.cl ? `${p.cl.sqrtPriceX96}:${p.cl.liquidity}:${p.cl.tick}` : `${p.reserve0}:${p.reserve1}`);
+    }
+    return m;
+  }
+
+  /**
+   * Pools whose state now differs from a snapshot. Used at each periodic full
+   * refresh in events mode: take the snapshot after applying the block's logs,
+   * re-read everything at the same block, and any difference is state the
+   * event-driven path got wrong.
+   */
+  driftAgainst(snapshot: Map<string, string>): string[] {
+    const now = this.stateSnapshot();
+    const out: string[] = [];
+    for (const [a, v] of snapshot) {
+      const w = now.get(a);
+      if (w !== undefined && w !== v) out.push(a);
+    }
+    return out;
+  }
+
+  /** Pools sharing a token pair with any of the given pools (the other side of a spread). */
+  siblings(addresses: Iterable<string>): Set<string> {
+    const want = new Set<string>();
+    for (const a of addresses) {
+      const p = this.pools.get(a);
+      if (p) want.add(pairKey(p.token0, p.token1));
+    }
+    const out = new Set<string>();
+    for (const p of this.pools.values()) if (want.has(pairKey(p.token0, p.token1))) out.add(p.address);
+    return out;
   }
 
   // ------------------------------------------------------------------------
@@ -439,8 +816,8 @@ export class PoolRegistry {
   /** Pool depth measured in WETH-equivalent of its base-token side (0 if it has no base token). */
   liquidityInWeth(p: Pool, ethUsd: number): number {
     for (const [tok, res] of [
-      [p.token0, p.reserve0],
-      [p.token1, p.reserve1],
+      [p.token0, p.bal0 ?? p.reserve0],
+      [p.token1, p.bal1 ?? p.reserve1],
     ] as Array<[string, bigint]>) {
       if (tok === WETH) return Number(res) / 1e18;
       const meta = Object.values(TOKENS).find((t) => t.address.toLowerCase() === tok);
@@ -488,7 +865,9 @@ export class PoolRegistry {
    * reproduced (fee-on-transfer tokens, exotic curves) get feePpm = -1 and are
    * excluded, because we could not trust our own profit calculation for them.
    */
-  async calibrateFees(pools: Pool[], block: number): Promise<void> {
+  async calibrateFees(allPools: Pool[], block: number): Promise<void> {
+    // CL pools report their exact fee (read every refresh); only V2-style pools need calibration.
+    const pools = allPools.filter((p) => !p.cl);
     const calls: Call[] = [];
     const samples: bigint[] = [];
     for (const p of pools) {
@@ -555,12 +934,12 @@ export class PoolRegistry {
     const wanted = [...new Set(addresses.map((a) => a.toLowerCase()))].filter((a) => !this.pools.has(a));
     if (wanted.length === 0) return [];
     const block = await this.chain.blockNumber();
-    const found = await this.describeUnknownPools(wanted, block);
+    const found = (await this.describeUnknownPools(wanted, block)).filter((p) => this.allowed(p));
     if (found.length === 0) return [];
     await this.refreshReserves(found, block);
     await this.loadTokenMetaForPools(found);
     await this.calibrateFees(found, block);
-    const ok = found.filter((p) => p.feePpm >= 0);
+    const ok = found.filter((p) => p.feePpm >= 0 && (!p.cl || p.cl.liquidity > 0n));
     for (const p of ok) this.pools.set(p.address, p);
     if (ok.length) this.dirty = true;
     return ok;
@@ -572,7 +951,9 @@ export class PoolRegistry {
       discoveredAt: new Date().toISOString(),
       block,
       tokens: [...this.tokens.values()],
-      pools: [...this.pools.values()].map(({ reserve0: _r0, reserve1: _r1, updatedBlock: _b, ...rest }) => rest),
+      pools: [...this.pools.values()].map(({ reserve0: _r0, reserve1: _r1, updatedBlock: _b, cl, bal0: _x, bal1: _y, ...rest }) =>
+        cl ? { ...rest, cl: { tickSpacing: cl.tickSpacing, feePips: cl.feePips, quoter: cl.quoter } } : rest,
+      ),
     };
   }
 
@@ -580,7 +961,16 @@ export class PoolRegistry {
     this.pools.clear();
     this.tokens.clear();
     for (const t of s.tokens) this.tokens.set(t.address, t);
-    for (const p of s.pools) this.pools.set(p.address, { ...p, reserve0: 0n, reserve1: 0n, updatedBlock: 0 });
+    for (const sp of s.pools) {
+      const { cl, ...rest } = sp;
+      const p: Pool = { ...rest, reserve0: 0n, reserve1: 0n, updatedBlock: 0 };
+      if (cl) {
+        if (!this.clPools) continue;
+        p.cl = { sqrtPriceX96: 0n, tick: 0, liquidity: 0n, tickSpacing: cl.tickSpacing, feePips: cl.feePips, words: new Map(), quoter: cl.quoter };
+      }
+      if (!this.allowed(p)) continue;
+      this.pools.set(p.address, p);
+    }
   }
 }
 

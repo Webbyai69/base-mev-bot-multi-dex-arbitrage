@@ -38,7 +38,7 @@ export const TOKENS: Record<string, TokenInfo> = {
 export const WETH = TOKENS.WETH!.address.toLowerCase();
 export const USDC = TOKENS.USDC!.address.toLowerCase();
 
-export type DexKind = "univ2" | "aerodrome";
+export type DexKind = "univ2" | "aerodrome" | "univ3" | "slipstream";
 
 export interface DexInfo {
   /** Short id used in logs and data files. */
@@ -90,8 +90,72 @@ export const DEXES: DexInfo[] = [
   },
 ];
 
-/** Uniswap V3 factory — used by the MEV classifier only (phase 2 for trading). */
+/** Uniswap V3 factory (classifier + concentrated-liquidity trading). */
 export const UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
+
+/**
+ * Concentrated-liquidity DEXes. Swaps inside one tick range are modelled
+ * exactly (src/clmath.ts); every opportunity is cross-checked with the DEX's
+ * own quoter. Slipstream has three live factories, each with its own quoter,
+ * and its quoter takes tickSpacing where Uniswap's takes fee.
+ * Sources: docs.uniswap.org Base deployments; github.com/aerodrome-finance/slipstream README.
+ */
+export interface ClDexInfo {
+  id: string;
+  name: string;
+  kind: "univ3" | "slipstream";
+  factory: string;
+  quoter: string;
+  /** Uniswap V3: getPool(a, b, fee) over these fee tiers. Slipstream: getPool(a, b, tickSpacing). */
+  poolKeys: number[];
+}
+
+export const CL_DEXES: ClDexInfo[] = [
+  {
+    id: "uniswap-v3",
+    name: "Uniswap V3",
+    kind: "univ3",
+    factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+    quoter: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+    poolKeys: [100, 500, 3000, 10000],
+  },
+  {
+    id: "slipstream",
+    name: "Aerodrome Slipstream",
+    kind: "slipstream",
+    factory: "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
+    quoter: "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
+    poolKeys: [1, 50, 100, 200, 2000],
+  },
+  {
+    id: "slipstream-gc",
+    name: "Aerodrome Slipstream (gauge caps)",
+    kind: "slipstream",
+    factory: "0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a",
+    quoter: "0x3d4C22254F86f64B7eC90ab8F7aeC1FBFD271c6C",
+    poolKeys: [1, 50, 100, 200, 2000],
+  },
+  {
+    id: "slipstream-v3",
+    name: "Aerodrome Slipstream (gauges v3)",
+    kind: "slipstream",
+    factory: "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef",
+    quoter: "0x514c8B5f54112481E28028F1166Bd78501089259",
+    poolKeys: [1, 50, 100, 200, 2000],
+  },
+];
+
+/** Free flash loans: Morpho Blue (single token, no fee) and Balancer V2 (fee set by governance, 0 so far). */
+export const MORPHO_BLUE = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb";
+export const BALANCER_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
+export const BALANCER_FEES_COLLECTOR = "0xce88686553686DA562CE7Cea497CE749DA109f9F";
+
+/** Aave V3 on Base (bgd-labs/aave-address-book AaveV3Base.sol). */
+export const AAVE_V3 = {
+  pool: "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+  dataProvider: "0x0F43731EB8d45A581f4a36DD74F5f358bc90C73A",
+  oracle: "0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156",
+};
 
 // ---------------------------------------------------------------------------
 // Runtime settings
@@ -121,6 +185,41 @@ export interface Settings {
   rpcBatchMaxCount: number | undefined;
   /** Verify opportunities with the executor bytecode injected via eth_call state override (no deployment). */
   simOverride: boolean;
+
+  // --- upgrade 1: concentrated liquidity ---
+  clPools: boolean;
+  // --- upgrade 2: multi-hop routes ---
+  multiHop: boolean;
+  maxHops: 2 | 3;
+  maxCycles: number;
+  /** Gas units per route: fixed overhead + per hop by pool type (paper-mode cost model). */
+  gasRouteBase: number;
+  gasHopV2: number;
+  gasHopCl: number;
+  /** Deployed RouteExecutor (contracts/RouteExecutor.sol) for multi-hop / CL routes. */
+  routeExecutorAddress: string | undefined;
+  flashSource: "morpho" | "balancer" | "capital";
+  // --- upgrade 3: Flashblocks ---
+  flashblocks: boolean;
+  flashblocksRpcUrl: string;
+  flashblockPollMs: number;
+  flashblockMaxPools: number;
+  // --- upgrade 4: liquidations ---
+  liquidations: boolean;
+  liqLookbackBlocks: number;
+  liqCheckEvery: number;
+  liqSwapCostBps: number;
+  // --- risk ---
+  tokenBlacklist: Set<string>;
+  // --- low-RPC mode ---
+  /** "events": update pools from each block's logs (one eth_getLogs) and re-read only what changed; "full": re-read every pool every block. */
+  refreshMode: "events" | "full";
+  /** In events mode, re-read every pool anyway every N blocks (catches anything the logs missed). */
+  fullRefreshBlocks: number;
+  /** Fall back to a full refresh when this many blocks behind (instead of fetching that many blocks of logs). */
+  maxLogGap: number;
+  /** Extra HTTP endpoints, used in order when the active one keeps failing. */
+  rpcFallbackUrls: string[];
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -147,6 +246,12 @@ function num(name: string, fallback: number): number {
   const n = Number(v);
   if (!Number.isFinite(n)) throw new Error(`Environment variable ${name} is not a number: ${v}`);
   return n;
+}
+
+function bool(name: string, fallback: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined || v === "") return fallback;
+  return !["false", "0", "no", "off"].includes(v.toLowerCase());
 }
 
 function str(name: string, fallback?: string): string | undefined {
@@ -185,7 +290,39 @@ export function loadSettings(): Settings {
     rpcMinIntervalMs: process.env.RPC_MIN_INTERVAL_MS ? num("RPC_MIN_INTERVAL_MS", 0) : undefined,
     rpcBatchMaxCount: process.env.RPC_BATCH_MAX_COUNT ? num("RPC_BATCH_MAX_COUNT", 20) : undefined,
     simOverride: (str("SIM_OVERRIDE", "true") ?? "true").toLowerCase() !== "false",
+    clPools: bool("CL_POOLS", true),
+    multiHop: bool("MULTI_HOP", true),
+    maxHops: num("MAX_HOPS", 3) >= 3 ? 3 : 2,
+    maxCycles: num("MAX_CYCLES", 150),
+    gasRouteBase: num("GAS_ROUTE_BASE", 70_000),
+    gasHopV2: num("GAS_HOP_V2", 75_000),
+    gasHopCl: num("GAS_HOP_CL", 115_000),
+    routeExecutorAddress: str("ROUTE_EXECUTOR_ADDRESS"),
+    flashSource: (str("FLASH_SOURCE", "morpho") as Settings["flashSource"]),
+    flashblocks: bool("FLASHBLOCKS", false),
+    flashblocksRpcUrl: str("FLASHBLOCKS_RPC_URL", "https://mainnet.base.org")!,
+    flashblockPollMs: num("FLASHBLOCK_POLL_MS", 400),
+    flashblockMaxPools: num("FLASHBLOCK_MAX_POOLS", 120),
+    liquidations: bool("LIQUIDATIONS", true),
+    liqLookbackBlocks: num("LIQ_LOOKBACK_BLOCKS", 1800),
+    liqCheckEvery: num("LIQ_CHECK_EVERY", 5),
+    liqSwapCostBps: num("LIQ_SWAP_COST_BPS", 30),
+    refreshMode: (str("REFRESH_MODE", "events") as Settings["refreshMode"]),
+    fullRefreshBlocks: num("FULL_REFRESH_BLOCKS", 150),
+    maxLogGap: num("MAX_LOG_GAP", 30),
+    rpcFallbackUrls: (str("RPC_FALLBACK_URLS", "") ?? "")
+      .split(",")
+      .map((u) => u.trim())
+      .filter((u) => /^https?:\/\//.test(u)),
+    tokenBlacklist: new Set(
+      (str("TOKEN_BLACKLIST", "") ?? "")
+        .split(",")
+        .map((x) => x.trim().toLowerCase())
+        .filter((x) => /^0x[0-9a-f]{40}$/.test(x)),
+    ),
   };
+  if (!["morpho", "balancer", "capital"].includes(settings.flashSource)) throw new Error("FLASH_SOURCE must be morpho, balancer or capital");
+  if (settings.refreshMode !== "events" && settings.refreshMode !== "full") throw new Error("REFRESH_MODE must be events or full");
   if (settings.discovery !== "activity" && settings.discovery !== "full") throw new Error("DISCOVERY must be activity or full");
   if (settings.mode === "live") {
     if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS");

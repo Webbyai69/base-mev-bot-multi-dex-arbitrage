@@ -8,3 +8,5 @@ reports/*.html
 *.log
 vendor/
 *.zip
+build/
+reports/*.md
