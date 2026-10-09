@@ -142,6 +142,24 @@ export async function liveFees(chain: Chain, priorityFeeGwei: number): Promise<{
 }
 
 /**
+ * Forward-looking gas budget check for one send: the worst-case USD cost at the full gas limit and this
+ * max fee, and whether it still fits inside the day's remaining MAX_DAILY_GAS_USD. Conservative — it uses
+ * the whole gas limit (a revert costs ~60% of this) and ignores the L1 data fee (cents on Base) — so it
+ * errs toward not overspending. Pure, so it is unit-tested directly.
+ */
+export function gasBudgetGuard(
+  gasLimit: number,
+  maxFeePerGasWei: bigint,
+  ethUsd: number,
+  gasSpentTodayUsd: number,
+  maxDailyGasUsd: number,
+): { worstCaseUsd: number; remainingUsd: number; fits: boolean } {
+  const worstCaseUsd = (Number((BigInt(Math.max(0, Math.floor(gasLimit))) * maxFeePerGasWei) / 1_000_000_000n) / 1e9) * ethUsd;
+  const remainingUsd = maxDailyGasUsd - gasSpentTodayUsd;
+  return { worstCaseUsd, remainingUsd, fits: worstCaseUsd <= remainingUsd };
+}
+
+/**
  * Is everything in place to trade? Reads the contract code, its owner and
  * operator, and the bot wallet's balance. Never throws: RPC trouble becomes a problem line.
  */
@@ -531,6 +549,17 @@ export class LiveExecutor {
     let tx: TransactionResponse;
     try {
       const [fees, pending] = await Promise.all([liveFees(this.chain, bidGwei), this.chain.provider.getTransactionCount(this.wallet.address, "pending")]);
+      // Forward-looking budget guard: never START a send whose own worst-case gas (landed, at the full
+      // gas limit and this bid) would push today's spend past MAX_DAILY_GAS_USD. gate() only stops AFTER
+      // an overshoot, so without this one high bid could blow the whole daily cap in a single transaction
+      // and drain the gas wallet. Raise MAX_DAILY_GAS_USD to let the bot bid this hard on a valuable trade.
+      const budget = gasBudgetGuard(gasLimit, fees.maxFeePerGas, ethUsd, this.gasSpentTodayUsd, this.opts.maxDailyGasUsd);
+      if (!budget.fits) {
+        log.warn(
+          `not sending ${job.label}: worst-case gas $${budget.worstCaseUsd.toFixed(2)} at ${bidGwei.toFixed(3)} gwei would exceed today's remaining budget $${Math.max(0, budget.remainingUsd).toFixed(2)} — skipped (raise MAX_DAILY_GAS_USD to bid this hard)`,
+        );
+        return;
+      }
       tx = await wallet.sendTransaction({
         to: target,
         data,

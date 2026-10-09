@@ -14,7 +14,7 @@
     "scan": "node dist/main.js scan",
     "report": "node dist/main.js report",
     "check": "node dist/main.js check",
-    "test": "node --test test/math.test.js test/clmath.test.js test/routes.test.js test/e2e.test.js test/executor.test.js test/wallet.test.js test/learn.test.js test/liquidate.test.js test/ui.test.js test/alerts.test.js test/cloud.test.js test/blocktime.test.js test/rivals.test.js test/classifier.test.js test/livesend.test.js test/bidding.test.js test/poolscore.test.js",
+    "test": "node --test test/math.test.js test/clmath.test.js test/routes.test.js test/e2e.test.js test/executor.test.js test/wallet.test.js test/learn.test.js test/liquidate.test.js test/ui.test.js test/alerts.test.js test/cloud.test.js test/blocktime.test.js test/rivals.test.js test/classifier.test.js test/livesend.test.js test/bidding.test.js test/poolscore.test.js test/gasbudget.test.js",
     "test:contracts": "forge test",
     "digest": "node dist/main.js digest",
     "build:bytecode": "node scripts/build-bytecode.cjs",
