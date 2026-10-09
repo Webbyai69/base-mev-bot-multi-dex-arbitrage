@@ -258,6 +258,8 @@ export interface Settings {
   liveMinEvUsd: number;
   /** Act mode (0.9): send every find that passes the on-chain simulation + min-profit floor, bid sized by learning, instead of only positive expected-value finds. */
   liveActAlways: boolean;
+  /** Hard ceiling (gwei) for the live priority-fee bid; the bid is also capped at liveMaxBidShare of a trade's profit, so a higher ceiling lets bigger-profit trades bid proportionally more to win. */
+  liveMaxBidGwei: number;
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -382,6 +384,7 @@ export function loadSettings(): Settings {
     liveMaxBidShare: num("LIVE_MAX_BID_SHARE", 0.3),
     liveMinEvUsd: num("LIVE_MIN_EV_USD", 0.01),
     liveActAlways: bool("LIVE_ACT_ALWAYS", true),
+    liveMaxBidGwei: num("LIVE_MAX_BID_GWEI", 25),
   };
   if (settings.cloudUrl) {
     let u: URL;
@@ -405,6 +408,7 @@ export function loadSettings(): Settings {
   if (!(settings.learnPruneDays >= 0.5 && settings.learnPruneDays <= 60)) throw new Error("LEARN_PRUNE_DAYS must be between 0.5 and 60");
   if (!(settings.liveMaxBidShare >= 0 && settings.liveMaxBidShare <= 0.5)) throw new Error("LIVE_MAX_BID_SHARE must be between 0 and 0.5");
   if (!(settings.liveMinEvUsd >= 0 && settings.liveMinEvUsd <= 1)) throw new Error("LIVE_MIN_EV_USD must be between 0 and 1");
+  if (!(settings.liveMaxBidGwei >= 0 && settings.liveMaxBidGwei <= 100)) throw new Error("LIVE_MAX_BID_GWEI must be between 0 and 100");
   if (settings.mode === "live") {
     if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS (deploy the ArbExecutor from the dashboard, then copy its address into .env)");
     if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY (run: node dist/main.js new-wallet)");

@@ -323,7 +323,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   const tuning = new Tuning(store, { minProfitUsd: s.minProfitUsd, maxBidShare: s.liveMaxBidShare, evMinUsd: s.liveMinEvUsd });
   extras.tuning = tuning;
   const learner = s.learning
-    ? new Learner(store, { halfLifeMs: s.learnHalfLifeHours * 3_600_000, pruneAfterMs: s.learnPruneDays * 86_400_000 }, (a) => registry.symbol(a))
+    ? new Learner(store, { halfLifeMs: s.learnHalfLifeHours * 3_600_000, pruneAfterMs: s.learnPruneDays * 86_400_000, maxBidGwei: s.liveMaxBidGwei }, (a) => registry.symbol(a))
     : undefined;
   if (learner) {
     // Trades by the bot's own wallet or contract are its own results, never a rival's.
