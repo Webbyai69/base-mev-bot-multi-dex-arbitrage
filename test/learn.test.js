@@ -261,3 +261,57 @@ test("the digest reports live sends per day, with gas and the safety rails, for 
   const none = renderDigest({ day: day.day, settings: s, pools: { total: 1, cl: 0, pairs: 1 }, paperDays: [], live: { days: [] } });
   assert.match(none, /No live transactions sent yet/);
 });
+
+test("a hub token isn't blamed for the small tokens paired with it; the one plausible culprit is", () => {
+  const HUB = "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b";
+  const L = new Learner(null, {}, (a) => (a === HUB ? "HUB" : a.slice(0, 6)));
+  const t0 = Date.now();
+  const via = (partner, sim) => ({
+    ...opp(HUB),
+    pairSymbols: "WETH>HUB>X>WETH",
+    sim,
+    simDetail: sim === "executor-revert" ? "Error(transferFrom reverted)" : undefined,
+    route: { pools: [pool(), pool(), pool()], tokens: [WETH, HUB, partner, WETH], dexes: ["aerodrome", "uniswap-v2", "uniswap-v3"] },
+  });
+  // Before the hub has passed anything, a failure through it and a partner is ambiguous: no token is blamed.
+  const partners = Array.from({ length: 8 }, () => pool());
+  for (const x of partners) L.onSim(via(x, "executor-revert"), t0);
+  assert.equal(L.summary(t0).skipping.length, 0);
+  assert.equal(L.skipReason(opp(HUB), t0), null, "the hub is still tested");
+  // Once the hub passes a test run, its partners' failures are pinned on them, not on it.
+  L.onSim(via(GOOD, "executor-ok"), t0);
+  const bad = partners[0];
+  for (let i = 0; i < 5; i++) L.onSim(via(bad, "executor-revert"), t0);
+  const skipping = L.summary(t0).skipping.map((x) => x.token);
+  assert.ok(skipping.includes(bad), "the partner that keeps failing is skipped");
+  assert.ok(!skipping.includes(HUB), "the hub is not");
+  assert.equal(L.skipReason(opp(HUB), t0 + HOUR), null);
+  assert.match(L.skipReason(via(bad, "executor-ok"), t0 + HOUR) ?? "", /failed/);
+});
+
+test("a memory file built with the older blame rules is re-learned from the data files", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "relearn-"));
+  const now = Date.now();
+  writeFileSync(join(dir, "learned.json"), JSON.stringify({ v: 1, since: now, tokens: { [GOOD]: { ok: { v: 0, t: 0 }, fail: { v: 50, t: now } } }, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, prunedTotal: 0, counts: { sims: 50, outcomes: 0, rivalArbs: 0, liveSends: 0 } }));
+  writeFileSync(join(dir, "opportunities.jsonl"), JSON.stringify({ ...opp(GOOD), kind: "opportunity", amountIn: "1", amountMid: "1", amountOut: "2", profit: "1" }) + "\n");
+  const L = new Learner(new Store(dir), {}, sym);
+  assert.equal(await L.load(), "relearned");
+  assert.equal(L.summary().counts.sims, 1);
+  assert.equal(L.skipReason(opp(GOOD)), null, "the old blame is gone");
+  L.save(true);
+  assert.equal(await new Learner(new Store(dir), {}, sym).load(), "loaded");
+});
+
+test("tuning: a blocked token can be unblocked, and isn't suggested again for a week", () => {
+  const L = new Learner(null, {}, sym);
+  for (let i = 0; i < 12; i++) L.onSim(opp(BAD, { sim: "executor-revert", simDetail: "TransferFailed()" }));
+  const T = new Tuning(null, { minProfitUsd: 0.25, maxBidShare: 0.3, evMinUsd: 0.01 });
+  const block = T.refresh(L, null).find((x) => x.key === "blockToken");
+  assert.equal(T.act("apply", block.id).ok, true);
+  assert.ok(T.blocked.has(BAD));
+  assert.deepEqual(T.act("unblock", "0xBAD0000000000000000000000000000000000001"), { ok: true, unblockedToken: BAD });
+  assert.ok(!T.blocked.has(BAD));
+  assert.ok(!T.refresh(L, null).some((x) => x.id === `block:${BAD}`), "not suggested again straight away");
+  assert.equal(T.act("unblock", BAD).ok, false);
+  assert.match(T.view().applied[0].title, /^Unblock /);
+});

@@ -392,7 +392,7 @@ export class UiServer {
           return this.json(res, 400, { error: "bad request" });
         }
         const action = String(body.action ?? "");
-        if (!["apply", "dismiss", "reset"].includes(action)) return this.json(res, 400, { error: "unknown action" });
+        if (!["apply", "dismiss", "unblock", "reset"].includes(action)) return this.json(res, 400, { error: "unknown action" });
         const r = this.src.tune(action, typeof body.id === "string" ? body.id.slice(0, 200) : undefined);
         this.publish("live-status", { tuning: true });
         return this.json(res, 200, { ...r, tuning: this.src.tuning?.() ?? null });

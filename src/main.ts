@@ -333,8 +333,8 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     log.info(
       how === "loaded"
         ? `learning: picked up where it left off (${L.counts.sims} test runs, ${L.counts.outcomes} outcomes, ${L.counts.rivalArbs} rival trades since ${L.since.slice(0, 10)})`
-        : how === "warm-start"
-          ? `learning: learned from past data first (${L.counts.sims} test runs, ${L.counts.outcomes} outcomes, ${L.counts.rivalArbs} rival trades since ${L.since.slice(0, 10)}); ${L.skipping.length} tokens to skip`
+        : how === "warm-start" || how === "relearned"
+          ? `learning: ${how === "relearned" ? "re-learned from past data with this version's rules" : "learned from past data first"} (${L.counts.sims} test runs, ${L.counts.outcomes} outcomes, ${L.counts.rivalArbs} rival trades since ${L.since.slice(0, 10)}); ${L.skipping.length} tokens to skip`
           : "learning: starting fresh",
     );
     scanner.learner = learner;
@@ -368,7 +368,16 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     const r = tuning.act(action, id);
     if (r.ok) {
       const dropped = r.blockedToken ? dropToken(r.blockedToken) : 0;
-      log.info(`tuning: ${action}${id ? ` ${id}` : ""} from the dashboard${dropped ? `; stopped watching ${dropped} pools` : ""}`);
+      let back = "";
+      if (r.unblockedToken) {
+        // Its pools come back as other bots trade them (the watch list), or with "discover".
+        if (s.tokenBlacklist.has(r.unblockedToken)) back = "; it stays out because TOKEN_BLACKLIST in .env lists it";
+        else {
+          registry.blacklist.delete(r.unblockedToken);
+          back = "; its pools come back as other bots trade them";
+        }
+      }
+      log.info(`tuning: ${action}${id ? ` ${id}` : ""} from the dashboard${dropped ? `; stopped watching ${dropped} pools` : ""}${back}`);
       if (learner) tuning.refresh(learner, latestReviewText(s.reportDir));
     }
     return r;
@@ -712,7 +721,8 @@ async function main(): Promise<void> {
   );
   const registry = new PoolRegistry(chain);
   registry.clPools = s.clPools;
-  registry.blacklist = s.tokenBlacklist;
+  // A copy: tokens blocked on the dashboard join it at run time, TOKEN_BLACKLIST from .env stays as written.
+  registry.blacklist = new Set(s.tokenBlacklist);
   if (cmd === "run" && s.telegramBotToken && s.telegramChatId) {
     alerts = new Alerts({
       token: s.telegramBotToken,

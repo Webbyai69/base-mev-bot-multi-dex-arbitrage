@@ -228,6 +228,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .sugs { display: grid; gap: 10px; margin: 16px 0 4px; }
 .sug { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--well); }
 .sug p { margin: 2px 0 0; color: var(--ink-2); font-size: 13.5px; }
+.blocked { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.blocked > span { display: inline-flex; align-items: center; gap: 6px; }
 .sug .row { gap: 8px; }
 @media (max-width: 560px) { .sug { grid-template-columns: minmax(0, 1fr); } }
 .fr-group { font-size: 12.5px; font-weight: 600; color: var(--ink-2); padding: 18px 0 6px; border-bottom: 1px solid var(--line-strong); }
@@ -1498,7 +1500,12 @@ details.optional[open] > summary { margin-bottom: 8px; }
         ["Minimum profit", mark("minProfitUsd", `${usd(e.minProfitUsd)} after gas`)],
         ["Bid cap", mark("maxBidShare", `${Math.round(e.maxBidShare * 100)}% of the expected profit`)],
         ["Smallest worthwhile send", mark("evMinUsd", `${usd(e.evMinUsd)} expected value`)],
-        ["Blocked tokens", T.blockedTokens.length ? T.blockedTokens.map((b) => b.sym).join(", ") : "None"],
+        ["Blocked tokens", T.blockedTokens.length
+          ? (canTune
+            ? h("span", { class: "blocked" }, T.blockedTokens.map((b) => h("span", null, b.sym, " ",
+              h("button", { class: "btn ghost small", type: "button", disabled: !!S.tuneBusy, "aria-label": `Unblock ${b.sym}`, onclick: () => tune("unblock", b.token) }, S.tuneBusy === b.token ? "Unblocking…" : "Unblock"))))
+            : T.blockedTokens.map((b) => b.sym).join(", "))
+          : "None"],
       ]), canTune && (Object.keys(T.overrides || {}).length || T.blockedTokens.length)
         ? h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn ghost small", type: "button", disabled: !!S.tuneBusy, onclick: () => tune("reset") }, "Back to the .env settings"))
         : null,

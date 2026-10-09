@@ -1,6 +1,6 @@
 {
   "name": "base-arb-bot",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Cross-DEX atomic arbitrage bot for Base with paper-trading mode and an on-chain MEV market feed (arbitrage classifier, competitor leaderboard, daily report).",
   "type": "module",
   "private": true,

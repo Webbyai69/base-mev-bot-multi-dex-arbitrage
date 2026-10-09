@@ -109,7 +109,8 @@ interface PoolRec {
 }
 
 interface Memory {
-  v: 1;
+  /** 2 since token blame became single-culprit (0.6.1); a v1 file is re-learned from the data files. */
+  v: 2;
   since: number;
   /** Last save; on the next start the time in between doesn't count toward pruning (the bot wasn't watching). */
   savedAt?: number;
@@ -181,7 +182,7 @@ export class Learner {
   }
 
   private fresh(now: number): Memory {
-    return { v: 1, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 } };
+    return { v: 2, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 } };
   }
 
   // ------------------------------------------------------------- decayed counts
@@ -200,22 +201,25 @@ export class Learner {
   static FILE = "learned.json";
 
   /** Load data/learned.json, or learn from the existing data files the first time. */
-  async load(now = Date.now()): Promise<"loaded" | "warm-start" | "fresh"> {
+  async load(now = Date.now()): Promise<"loaded" | "relearned" | "warm-start" | "fresh"> {
     if (!this.store) return "fresh";
+    let older = false;
     try {
-      const saved = this.store.readJson<Memory>(Learner.FILE);
-      if (saved && saved.v === 1) {
-        this.m = { ...this.fresh(saved.since ?? now), ...saved };
+      const saved = this.store.readJson<{ v?: number } & Partial<Memory>>(Learner.FILE);
+      if (saved && saved.v === 2) {
+        this.m = { ...this.fresh(saved.since ?? now), ...(saved as Memory) };
         this.pauseClock(now - (saved.savedAt ?? now));
         return "loaded";
       }
+      // An older memory was built with rules since corrected: learn it again from the data files.
+      older = !!saved;
     } catch (err) {
       log.warn("learned.json unreadable, starting over:", (err as Error).message.slice(0, 120));
     }
     const n = await this.warmStart();
     // Swaps were never watched before now, so every pool's quiet-time clock starts here.
     for (const p of Object.values(this.m.poolSeen)) p.firstSeen = now;
-    return n ? "warm-start" : "fresh";
+    return n ? (older ? "relearned" : "warm-start") : "fresh";
   }
 
   /** Time the bot was off doesn't count as a quiet pool: move the pruning clocks forward by it. */
@@ -356,8 +360,13 @@ export class Learner {
   }
 
   /**
-   * The test run's verdict. A failure is blamed on the route, on its non-core
-   * tokens, and on its pools when every token is core (WETH, USDC…).
+   * The test run's verdict, always kept for the route. A pass also clears every
+   * token on it. A failure is blamed on a token only when that token is the one
+   * plausible culprit: the route's only non-core token, or the only one without a
+   * recent passing test run. A hub token such as VIRTUAL sits on every route of
+   * the small tokens paired with it, so blaming every token on a failed route
+   * would ban the hub for its partners' faults. When every token is core (WETH,
+   * USDC…) the pools take the blame instead.
    */
   onSim(o: Opportunity, now = Date.now()): void {
     const ok = o.sim === "executor-ok" || o.sim === "quoter-ok";
@@ -368,7 +377,13 @@ export class Learner {
     r.lastTestAt = now;
     if (fail) r.lastFail = (o.simDetail ?? o.sim).slice(0, 120);
     const exotic = r.tokens.filter((t) => !CORE.has(t));
-    const blame = exotic.length ? exotic.map((t) => [this.m.tokens, t] as const) : r.pools.map((p) => [this.m.pools, p] as const);
+    let blame: Array<readonly [Record<string, Rel>, string]>;
+    if (!exotic.length) blame = r.pools.map((p) => [this.m.pools, p] as const);
+    else if (ok) blame = exotic.map((t) => [this.m.tokens, t] as const);
+    else {
+      const suspects = exotic.length === 1 ? exotic : exotic.filter((t) => !this.trusted(t, now));
+      blame = suspects.length === 1 ? [[this.m.tokens, suspects[0]!] as const] : [];
+    }
     for (const [map, key] of blame) {
       const rel = this.rel(map, key, map === this.m.tokens ? this.symbolOf(key) : undefined);
       this.add(ok ? rel.ok : rel.fail, 1, now);
@@ -461,6 +476,14 @@ export class Learner {
   }
 
   // ------------------------------------------------------------------- deciding
+
+  /** A token with a recent passing test run, and at least as many passes as failures pinned on it. */
+  private trusted(token: string, now: number): boolean {
+    const rel = this.m.tokens[token];
+    if (!rel) return false;
+    const ok = this.val(rel.ok, now);
+    return ok >= 0.5 && ok >= this.val(rel.fail, now);
+  }
 
   private pFail(rel: { ok: Dc; fail: Dc }, now: number): { p: number; n: number } {
     const ok = this.val(rel.ok, now);
@@ -856,8 +879,21 @@ export class Tuning {
     return this.suggestions;
   }
 
-  /** Apply, dismiss or reset. Values are re-checked against the limits here, whatever the caller sent. */
-  act(action: string, id: string | undefined, now = new Date()): { ok: boolean; error?: string; blockedToken?: string } {
+  /** Apply, dismiss, unblock (id = token address) or reset. Values are re-checked against the limits here, whatever the caller sent. */
+  act(action: string, id: string | undefined, now = new Date()): { ok: boolean; error?: string; blockedToken?: string; unblockedToken?: string } {
+    if (action === "unblock") {
+      const token = String(id ?? "").toLowerCase();
+      const b = this.t.blockedTokens[token];
+      if (!b) return { ok: false, error: "That token isn't blocked any more. Reload the page." };
+      delete this.t.blockedTokens[token];
+      // Don't suggest blocking it again for a week: you just decided otherwise.
+      this.t.dismissed[`block:${token}`] = now.toISOString();
+      this.suggestions = this.suggestions.filter((x) => x.id !== `block:${token}`);
+      this.t.applied.push({ key: "unblockToken", value: token, at: now.toISOString(), source: "you", title: `Unblock ${b.sym}` });
+      if (this.t.applied.length > 50) this.t.applied.splice(0, this.t.applied.length - 50);
+      this.save();
+      return { ok: true, unblockedToken: token };
+    }
     if (action === "reset") {
       this.t.values = {};
       this.t.blockedTokens = {};

@@ -50,6 +50,15 @@ already has. It uses that memory to decide (`src/learn.ts`):
 
 Turn it off with `LEARNING=false`; the other settings are in `.env.example`.
 
+0.6.1 fixes how a failed test run is blamed. In 0.6.0 every token on the
+route was blamed, so a hub token like VIRTUAL, which sits on every route of
+the small tokens paired with it, was marked as failing for its partners'
+faults. Now a token is blamed only when it is the one plausible culprit: the
+route's only token other than WETH, USDC and the like, or the only one
+without a recent passing test run. The bot re-learns its memory from the data
+files with the new rule on the first start. Blocked tokens now have an
+**Unblock** button on the dashboard.
+
 ## What's new in 0.5: going live safely
 
 Live mode now keeps your own wallet's key out of every file. Your wallet
