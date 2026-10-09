@@ -630,7 +630,8 @@ export class UiServer {
     const s = this.src.settings;
     const accounts = [...new Set([...list.split(","), this.src.botAddress ?? ""].map((a) => a.trim().toLowerCase()).filter(isAddress))].slice(0, 6);
     const contracts = [
-      ["routeExecutor", s.routeExecutorAddress ?? (isAddress(routeOverride) ? routeOverride : undefined)],
+      // The page only passes a route override while .env holds an outdated RouteExecutor (or none), so it wins here.
+      ["routeExecutor", isAddress(routeOverride) ? routeOverride : s.routeExecutorAddress],
       ["arbExecutor", s.executorAddress ?? (isAddress(arbOverride) ? arbOverride : undefined)],
       ["liqExecutor", s.liqExecutorAddress ?? (isAddress(liqOverride) ? liqOverride : undefined)],
     ].filter((c): c is [string, string] => isAddress(c[1]));
