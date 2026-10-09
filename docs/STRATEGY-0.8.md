@@ -117,3 +117,51 @@ Treat #3 (latency/infra) as the honest constraint we optimise within, and keep
 XDP-scale gas wars out of scope.
 
 Decide at the 5pm check-in with a few hours of live 0.7.0 data in hand.
+
+## Reality check (added 11:05): the hardware can't backrun
+
+Follow-up research changed the recommendation. The profitable arbs are won
+**inside a single 200 ms flashblock** — see a swap, append your backrun before
+the sub-block closes. Our bot processes a block in **~2 seconds** (nearly every
+block exceeds the 1.8 s "lagging" line), because each block is several RPC
+round-trips from a home connection in Ireland to a US-hosted Alchemy endpoint.
+That is a **~10× gap**, and it is **network latency, not CPU** — no incremental
+scan, faster poll, or code change closes it. A home PC on a shared RPC will lose
+every contested backrun race to bots co-located with the sequencer. The
+`~$1,900/day` "uncontested" tail still mostly goes to whoever is merely *fast
+enough*, which we are not.
+
+**Conclusion: chasing CL backruns from this setup is the wrong fight.** We keep
+the arb bot running (it still catches the occasional slow/large spread for
+cents-to-a-few-dollars), but the realistic ways to actually earn on *this*
+hardware are the ones that are **not** a millisecond race:
+
+### The real options (pick deliberately, not in an hour)
+1. **Faster infrastructure** — a Base node co-located / in-region (dedicated
+   RPC, or a cheap VPS in the sequencer's region running a Flashblocks-aware
+   node). This is a **cost** (~tens to low-hundreds /month) and the only thing
+   that makes backrunning viable. Without it, the arb bot is a learning project,
+   not an income stream.
+2. **Aave V3 liquidations, made live** — the best fit for a home PC. The window
+   is seconds, not milliseconds; it's permissionless (within our ethics, no
+   front-running); and we already monitor 607 borrowers on paper. It needs a
+   proper, forge-tested liquidation contract (flash-loan the debt, call
+   `liquidationCall`, swap the seized collateral, repay, keep the bonus). That's
+   a deliberate, tested build — not a same-day live ship — and it only earns when
+   the market moves enough to put positions underwater (none today).
+3. **New-pool / new-token early arbs** — fresh launches carry fat, uncontested
+   spreads for minutes before the pros arrive. Latency-tolerant; a watcher that
+   aggressively tracks brand-new pools could catch these.
+
+### Honest targets
+- Today, on this hardware: realistically **cents to maybe a dollar or two** if a
+  slow spread or a liquidation happens to land — **not $10–20**, and **nowhere
+  near $3k** (those are co-located professional operations).
+- With option 1 (infra) **or** option 2 (a tested liquidations engine): a few
+  dollars a day becomes plausible; double digits on active days is a stretch
+  goal, not a baseline.
+
+The next real build is **the liquidations engine (option 2)** — it suits the
+hardware and respects the ethics line. Build it carefully and tested, ship it
+behind a flag (off by default), and enable once validated. Infra (option 1) is a
+spend decision for the user, not code.
