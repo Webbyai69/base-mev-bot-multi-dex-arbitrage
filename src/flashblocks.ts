@@ -26,7 +26,7 @@
  */
 import type { Chain } from "./rpc.js";
 import type { PoolRegistry } from "./pools.js";
-import type { Scanner } from "./scanner.js";
+import type { Scanner, Opportunity } from "./scanner.js";
 import type { PaperEngine } from "./paper.js";
 import type { GasQuote } from "./gas.js";
 import { log } from "./log.js";
@@ -51,6 +51,9 @@ export class FlashblockWatcher {
   idle: Promise<void> = Promise.resolve();
   stats = { ticks: 0, scans: 0, skippedUnchanged: 0, opps: 0, errors: 0, maxMs: 0 };
 
+  /** Optional live-send hook: evaluates the finds and sends one immediately (set by main in live mode). */
+  private liveSend?: (opps: Opportunity[], ethUsd: number, stage: "flashblock") => void;
+
   constructor(
     readonly chain: Chain,
     readonly registry: PoolRegistry,
@@ -58,6 +61,11 @@ export class FlashblockWatcher {
     readonly paper: PaperEngine,
     readonly opts: { pollMs: number; maxPools: number; minProfitUsd: number; memoryBlocks?: number },
   ) {}
+
+  /** React to pre-confirmed finds by sending live, not just recording them on paper. */
+  setLiveSend(fn: (opps: Opportunity[], ethUsd: number, stage: "flashblock") => void): void {
+    this.liveSend = fn;
+  }
 
   /** Called by the block handler after each confirmed block. */
   onConfirmedBlock(ctx: FlashblockContext, interestingPools: Iterable<string>): void {
@@ -123,6 +131,8 @@ export class FlashblockWatcher {
       if (this.paused || this.ctx !== ctx) return;
       this.stats.opps += opps.length;
       if (opps.length) this.paper.register(opps);
+      // Send the best eligible find now, 0.2s into the block instead of waiting for the full block.
+      if (opps.length && this.liveSend) this.liveSend(opps, ctx.ethUsd, "flashblock");
     } catch (err) {
       this.stats.errors++;
       if (this.stats.errors % 20 === 1) log.warn("flashblocks tick failed:", (err as Error).message.slice(0, 140));

@@ -109,7 +109,32 @@ export const routeExecutorIface = new Interface([
   "error BadCallback()",
   "error TransferFailed()",
   "error NotOwner()",
+  "error NotOperator()",
+  "function owner() view returns (address)",
+  "function operator() view returns (address)",
+  "function setOperator(address newOperator)",
+  "function withdraw(address token, uint256 amount)",
 ]);
+
+/** Our Aave V3 liquidation executor (contracts/LiquidationExecutor.sol). */
+export const liquidationExecutorIface = new Interface([
+  "function liquidate((address collateralAsset, address debtAsset, address user, uint256 debtToCover) liq, address[] swapTokens, (address pool, uint8 kind, uint32 feePpm)[] swapHops, uint256 minProfit, uint8 source)",
+  "function simulate((address collateralAsset, address debtAsset, address user, uint256 debtToCover) liq, address[] swapTokens, (address pool, uint8 kind, uint32 feePpm)[] swapHops, uint8 source)",
+  "error Simulated(uint256 profit)",
+  "error InsufficientProfit(uint256 got, uint256 want)",
+  "error BadCallback()",
+  "error BadRoute()",
+  "error TransferFailed()",
+  "error NotOwner()",
+  "error NotOperator()",
+  "function owner() view returns (address)",
+  "function operator() view returns (address)",
+  "function setOperator(address newOperator)",
+  "function withdraw(address token, uint256 amount)",
+]);
+
+/** Multicall3 extras used by the dashboard's balance reads. */
+export const multicallEthIface = new Interface(["function getEthBalance(address addr) view returns (uint256 balance)"]);
 
 /** Aave V3 Pool / data provider / oracle (liquidation monitor). */
 export const aavePoolIface = new Interface([
@@ -142,9 +167,16 @@ export const executorIface = new Interface([
   "function executeFlash(address buyPool, address sellPool, address tokenIn, uint256 amountIn, uint256 amountMid, uint256 amountOut, uint256 minProfit)",
   "function simulate(address buyPool, address sellPool, address tokenIn, uint256 amountIn, uint256 amountMid, uint256 amountOut, bool flash) returns (uint256 profit)",
   "function withdraw(address token, uint256 amount)",
+  "function withdrawETH()",
   "function owner() view returns (address)",
+  "function operator() view returns (address)",
+  "function setOperator(address newOperator)",
   "error Simulated(uint256 profit)",
   "error InsufficientProfit(uint256 got, uint256 want)",
+  "error BadCallback()",
+  "error TransferFailed()",
+  "error NotOwner()",
+  "error NotOperator()",
 ]);
 
 export const TOPIC_SWAP_V2 = univ2PairIface.getEvent("Swap")!.topicHash;

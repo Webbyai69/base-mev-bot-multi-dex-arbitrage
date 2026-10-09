@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.7.3;
+pragma solidity >=0.7.3 <0.9.0;
 
 // Minimal mocks for testing ArbExecutor in an in-process EVM. Faithful to the
 // parts of UniswapV2Pair / Aerodrome Pool that matter: optimistic transfer of

@@ -17,6 +17,208 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
               ──► every minute: reports/YYYY-MM-DD.html
 ```
 
+## What's new in 0.8: Aave liquidations go live
+
+The data made one thing clear (see [`docs/STRATEGY-0.8.md`](docs/STRATEGY-0.8.md)):
+the profitable arbs on Base are **same-block backruns** won on millisecond
+latency, which a home PC on a shared RPC cannot win. So 0.8 leans into the play
+that *does* suit a home setup — **Aave V3 liquidations**, where the window is
+seconds, not milliseconds, and it's permissionless (not front-running).
+
+The monitor was already watching borrowers on paper; now it can act. A new
+`contracts/LiquidationExecutor.sol` (you own it, the bot is only its operator)
+flash-loans the debt, calls `liquidationCall`, swaps the seized collateral back
+to the debt asset and keeps the bonus — all in one transaction, no capital, gas
+only. The whole thing reverts unless the debt-asset balance grew, so a stale
+opportunity or a leaked bot key costs gas, never principal (9 `forge` tests,
+incl. a leaked-operator drain attempt). Every liquidation is simulated on-chain
+before it's sent, and the usual rails apply (daily gas cap, STOP file, circuit
+breaker).
+
+It's **off by default.** To turn it on: deploy the LiquidationExecutor from the
+dashboard, authorise the bot, set `LIQ_EXECUTOR_ADDRESS` and
+`LIQUIDATIONS_LIVE=true` in `.env`, and restart. It only fires when a position
+actually goes underwater, so it earns in lumps on volatile days, not steadily.
+Honest expectation: this is a modest, real edge for a home PC — not the $3k/day
+of co-located professional operations.
+
+## What's new in 0.7: faster, and routes trade live
+
+- **Concentrated-liquidity and multi-hop routes go live.** They used to be
+  paper-only. Deploy the `RouteExecutor` from the dashboard (you own it, the
+  bot is only its operator), authorise the bot and set `ROUTE_EXECUTOR_ADDRESS`
+  in `.env`, and the bot sends verified CL and multi-hop routes through it with
+  a Morpho flash loan — no capital, gas only. Same safety as the two-pool
+  contract: every execution must end holding more of the start token or the
+  whole transaction reverts, so a stale route or a leaked bot key costs gas,
+  never principal (16 `forge` tests, including a leaked-operator drain attempt
+  through a fake pool and callback).
+- **It reacts on Flashblocks.** With `FLASHBLOCKS=true` the bot acts on Base's
+  ~200 ms pre-confirmed state instead of waiting ~2 s for the full block, and
+  now *sends* from that faster loop, not just records it on paper. The
+  Flashblocks poll runs against a free public endpoint by default
+  (`FLASHBLOCKS_RPC_URL`), so it doesn't spend your metered RPC plan.
+- **The expected-value gate and learned bids** (from 0.6) decide and price
+  these sends too; routes are only ever sent once the `RouteExecutor` setup
+  checks out, so turning the feature on can never send a route by accident.
+- Tune the route gas limit with `ROUTE_GAS_LIMIT` (default 600,000).
+
+## What's new in 0.6: it learns as it trades
+
+The bot now keeps a memory, `data/learned.json`, of everything it sees: which
+test runs passed or reverted, which finds were still there a block later or
+taken by another bot, what those bots paid in priority fee, and how its own
+live sends went. Old evidence counts for half after 3 days, so it keeps up as
+the market changes. On its first start it learns from the data files it
+already has. It uses that memory to decide (`src/learn.ts`):
+
+1. **Skip what keeps failing.** Tokens, pools and routes that keep reverting
+   in test runs are skipped before the test, which saves RPC calls. Each gets
+   one re-test every 6 hours in case it was fixed.
+2. **Know where it can't win.** Each route keeps its own record: still there
+   a block later, taken by another bot (and which one), or closed.
+3. **Send only when it's worth it.** Before a live send it works out the
+   expected value: the chance it lands times the profit, minus the chance it
+   fails times the gas a failed attempt burns. It sends only when that is
+   positive, and the log says why when it isn't.
+4. **Bid like the market.** The priority fee follows what other bots paid
+   for trades of that size, goes up on a route after a race it lost and down
+   after a win, and never costs more than 30% of the profit
+   (`LIVE_MAX_BID_SHARE`) or 2 gwei.
+5. **Stop watching dead pools.** Pools with no swaps, finds or rival trades
+   for 3 days of watching are dropped (time the PC is off doesn't count).
+6. **Suggest setting changes.** The dashboard's *What it has learned* panel
+   shows what it believes and why, and suggests changes the evidence supports
+   (block a token, raise the minimum profit, raise the bid cap), also from the
+   daily AI review. You press **Apply**; changes stay within fixed limits and
+   are saved in `data/tuning.json`. The mode, the daily gas limit and keys
+   stay in `.env`, which only you edit.
+
+Turn it off with `LEARNING=false`; the other settings are in `.env.example`.
+
+0.6.1 fixes how a failed test run is blamed. In 0.6.0 every token on the
+route was blamed, so a hub token like VIRTUAL, which sits on every route of
+the small tokens paired with it, was marked as failing for its partners'
+faults. Now a token is blamed only when it is the one plausible culprit: the
+route's only token other than WETH, USDC and the like, or the only one
+without a recent passing test run. The bot re-learns its memory from the data
+files with the new rule on the first start. Blocked tokens now have an
+**Unblock** button on the dashboard.
+
+## What's new in 0.5: going live safely
+
+Live mode now keeps your own wallet's key out of every file. Your wallet
+(Brave, MetaMask…) deploys and **owns** the trading contract from the
+dashboard and withdraws the profit. The bot gets its own wallet,
+`node dist/main.js new-wallet`, that holds only gas money and is authorised
+as the contract's **operator**: it can trade, never withdraw. The dashboard's
+*Live setup* list takes you through it, and the bot refuses to send anything
+until it has checked the contract's code, its own role and its gas. Step by
+step: [`docs/GO_LIVE.md`](docs/GO_LIVE.md).
+
+Also in 0.5:
+
+- **No more missed blocks.** When the websocket goes quiet (on 2026-10-08
+  Alchemy's did, without an error), the bot now notices within 10 s and
+  switches to polling. Polling itself no longer drifts, so it catches every
+  block at about 1.1 requests per block.
+- **Reverted trades are counted as reverted** (they were logged as "dropped"),
+  and their gas, including Base's L1 data fee, now counts toward
+  `MAX_DAILY_GAS_USD`.
+- Live mode sends the **best eligible** find, not only the top find, which
+  was often a paper-only route.
+- The ArbExecutor is compiled with solc 0.8.26 like the RouteExecutor
+  (`npm run build:bytecode`), with Foundry tests (`npm run test:contracts`)
+  and a live-path test on a real EVM (`ANVIL=… SOLC=… npm test`).
+
+## What's new in 0.4: the dashboard online
+
+The dashboard can now also live on Cloudflare (`cloud/`), at a private
+`workers.dev` address you can open from your phone. The bot stays on your PC
+and pushes a copy of its dashboard data out every few seconds. Nothing on
+Cloudflare can reach your PC or see a key. Cloudflare Access puts a login in
+front of it, and the Worker checks that login itself. The online page has the
+same wallet panel, and a remote **Stop sending** for live mode with no remote
+resume. It runs on the Workers Free plan and deploys straight from this
+repository with Cloudflare's Git integration. Setup, step by step:
+[`cloud/README.md`](cloud/README.md).
+
+Also in 0.4:
+
+- **Honest websocket cost.** The RPC figures now count the websocket block
+  feed. Alchemy bills it by size, about 2.6M CU a day, more than the free
+  plan's daily share on its own. The dashboard says so when `WS_URL` is set.
+- **No retries on 4xx answers.** Answers such as "block range too large" or
+  "bad API key" are no longer retried six times.
+- **Capped watch list.** The pools learned from rival trades stop growing at
+  `MAX_WATCHED_POOLS` (1,500).
+
+## What's new in 0.3: dashboard and Telegram alerts
+
+**Dashboard.** While the bot runs, open **http://localhost:8787** in a browser
+on the same PC. It shows:
+
+- **Simulated profit today**, kept apart from real money, next to a live
+  **block tape**: one bar per Base block, marking where your bot found an
+  opportunity, where another bot arbitraged, and where the bot fell behind.
+- **Bot health** (healthy, lagging, stalled, on backup RPC) and the RPC load.
+- **Opportunities.** Select one to see each hop with its amounts and fees, the
+  cost breakdown, the on-chain check result and what happened a block later.
+- **Why opportunities don't trade.** Where candidates drop out: gas ate the
+  spread, below `MIN_PROFIT_USD`, quoter disagreed, simulation reverted, and so on.
+- **Other bots**: who arbitraged today, how many of your finds they took, the
+  priority fees they pay, and whether their trades used pools your bot watches.
+- **Aave liquidations**, **safety** (what is allowed to send, and what's only
+  paper), **what's built and tested**, **pool-state drift checks**, and the
+  **latest AI review**.
+- **Wallet and contracts.** Connect MetaMask, Coinbase Wallet, Rabby or Brave
+  Wallet to see balances, deploy the RouteExecutor (you become its owner),
+  allow the bot's key to trade through it, withdraw profits to yourself, and
+  top up the bot's gas. Every transaction opens in your wallet for you to
+  approve.
+
+The dashboard listens on this computer only (127.0.0.1), rejects other sites
+that try to reach it, never shows `PRIVATE_KEY` or RPC keys, and can't edit
+`.env` or switch modes. Its only control over the bot is a **Stop sending**
+button in live mode. Resuming means deleting the `STOP` file yourself, on
+purpose. To browse saved results without running the bot:
+`node dist/main.js ui`.
+
+**Telegram alerts** for the bot starting, stopping or crashing, no new blocks
+for 3 minutes, an RPC failover, verified opportunities over
+`ALERT_MIN_PROFIT_USD`, liquidations over `ALERT_MIN_LIQ_PROFIT_USD`, every
+live transaction result, the circuit breaker, and a summary of each day.
+Messages are rate-limited and scrubbed of keys. Set up in two minutes:
+
+```powershell
+# 1. In Telegram, message @BotFather, send /newbot, put the token in .env as TELEGRAM_BOT_TOKEN
+# 2. Send your new bot any message, then:
+node dist/main.js telegram     # prints your TELEGRAM_CHAT_ID; add it to .env
+node dist/main.js telegram     # sends a test message
+```
+
+The daily digest also gains the "why opportunities don't trade" counts with
+stable codes (`NET_NEGATIVE_AFTER_GAS`, `NET_PROFIT_TOO_LOW`, `QUOTE_MISMATCH`,
+`SIMULATION_REVERT`, …) for the AI review to work from.
+
+Updating from 0.2: no new dependencies.
+
+```powershell
+cd C:\Users\joshu\source\base-arb-bot
+git pull
+npm run build
+npm test
+node dist/main.js run          # then open http://localhost:8787
+```
+
+Optional `.env` additions (all have defaults): `BOT_ADDRESS`, `UI_PORT`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ALERT_MIN_PROFIT_USD`,
+`ALERT_MIN_LIQ_PROFIT_USD`, `ALERT_MAX_PER_HOUR`. See `.env.example`.
+
+The RouteExecutor contract now separates its **owner** (your wallet: deploys,
+withdraws, chooses the operator) from its **operator** (the bot's hot key: may
+only trade through it). A leaked bot key can't drain the contract.
+
 ## What's new in 0.2
 
 All five upgrades run in **paper mode**. Multi-hop routes are never sent live
@@ -177,17 +379,29 @@ Leave it running for a few days. `data\opportunities.jsonl` and
 | `src/paper.ts` | paper engine with N+1/N+2 outcome tracking, summaries |
 | `src/classifier.ts` | MEV classifier (arbitrage + sandwich) from Swap logs, leaderboard, market summary |
 | `src/report.ts` | daily HTML report |
-| `src/executor.ts` | live sender (one tx in flight, STOP file, daily gas budget); classic routes only |
-| `contracts/ArbExecutor.sol` | on-chain executor: flash-swap or own-capital, min-profit check, `simulate()` |
+| `src/executor.ts` | live sender for both contracts: setup checks, one tx in flight, STOP file, daily gas budget, circuit breaker; two-pool via ArbExecutor, CL/multi-hop via RouteExecutor |
+| `src/wallet.ts` | `new-wallet`: the bot's own gas wallet, key written straight into `.env` |
+| `src/learn.ts` | learning engine: decayed records of test runs, outcomes, rival bids and live sends (`data/learned.json`); skips, P(land), expected value, bids, pool pruning; bounded dashboard tuning (`data/tuning.json`) |
+| `contracts/LiquidationExecutor.sol` | Aave V3 liquidation: flash-loan debt, `liquidationCall`, swap collateral back, keep the bonus; owner/operator split, `simulate()` |
+| `src/liquidate.ts` | liquidation planner: find the collateral→debt swap, simulate the liquidation on-chain, build the sendable plan |
+| `contracts/ArbExecutor.sol` | on-chain executor: flash-swap or own-capital, min-profit check, `simulate()`, owner/operator roles |
 | `src/clmath.ts` | exact concentrated-liquidity maths (tick maths, single-range swaps, tick bitmap) |
 | `src/routes.ts` | cycle search over the pool graph + exact route optimiser |
 | `src/flashblocks.ts` | pre-confirmed-state reaction loop |
 | `src/liquidations.ts` | Aave V3 liquidation monitor and summaries |
 | `src/digest.ts` | daily Markdown digest for the AI review |
 | `contracts/RouteExecutor.sol` | multi-hop executor: V2 / Aerodrome / CL hops, Morpho or Balancer flash loan, `simulate()` |
-| `src/simBytecodeRoute.ts` | compiled RouteExecutor runtime (solc 0.8.26) for state-override simulation |
-| `test/forge/` | EVM tests for RouteExecutor (`npm run test:contracts`, needs Foundry) |
-| `test/` | unit tests, a mock Base JSON-RPC chain for end-to-end tests, an in-EVM contract test |
+| `src/simBytecode.ts`, `src/simBytecodeRoute.ts` | compiled runtimes (solc 0.8.26) for state-override simulation and the live code check |
+| `src/deployBytecode.ts` | creation bytecode for the dashboard's Deploy buttons |
+| `scripts/build-bytecode.cjs` | rebuilds the three bytecode files from `contracts/` (`npm run build:bytecode`) |
+| `src/ui/server.ts` | local dashboard server: page, API, live event stream, balance reads (no keys, localhost only) |
+| `ui/dashboard.html` | the dashboard page (also works on its own with example data) |
+| `src/alerts.ts` | Telegram alerts, rate-limited and scrubbed of secrets; `telegram` setup command |
+| `src/cloud.ts` | pushes the dashboard's data to the online copy; picks up its stop request |
+| `cloud/` | the online dashboard: Cloudflare Worker + Durable Object, deployed by Git integration (see `cloud/README.md`) |
+| `test/forge/` | EVM tests for both contracts (`npm run test:contracts`, needs Foundry) |
+| `test/` | unit tests, a mock Base JSON-RPC chain for end-to-end tests, the live path on anvil |
+| `docs/GO_LIVE.md` | going live, step by step |
 
 ## How opportunities are verified
 
@@ -230,35 +444,36 @@ bot learns where the action is.
 
 ## Going live (phase 3)
 
-Only after paper mode shows consistent realistic profit.
+Best after paper mode shows consistent realistic profit. The full steps are in
+[`docs/GO_LIVE.md`](docs/GO_LIVE.md). In short:
 
-1. Compile and deploy `contracts/ArbExecutor.sol` from the wallet that will
-   run the bot. Easiest: https://remix.ethereum.org → paste the file →
-   compiler 0.8.24+ (EVM version *cancun*) → Deploy with MetaMask on Base.
-   The deployer becomes `owner`. Or with Foundry:
-   `forge create contracts/ArbExecutor.sol:ArbExecutor --rpc-url $RPC_URL --private-key $PK`
-2. Put `EXECUTOR_ADDRESS` in `.env` and keep running in paper mode for a
-   while: the scanner now verifies every opportunity with the contract's
-   `simulate()` (exact, includes any token transfer quirks) and the report's
-   "failed on-chain verification" count should stay at zero.
-3. Fund the wallet with a little ETH for gas (flash mode needs no trading
-   capital; `USE_FLASH=false` needs the executor to hold the input token).
-4. Set `MODE=live`, `PRIVATE_KEY`, `MAX_DAILY_GAS_USD` (default 20).
-   A file named `STOP` in the data folder halts sending instantly.
+1. `node dist/main.js new-wallet` gives the bot its own wallet (key straight
+   into `.env`, never shown). It only ever holds gas money.
+2. On the dashboard, with your own wallet connected: **Deploy the trading
+   contract** (you own it), **Authorise bot wallet**, and top the bot wallet up.
+3. In `.env`: `EXECUTOR_ADDRESS=` (the dashboard shows the line to copy),
+   `MODE=live`, `MAX_DAILY_GAS_USD=1`. Restart.
+
+The bot sends nothing until its own check passes: the exact ArbExecutor code at
+`EXECUTOR_ADDRESS`, the bot wallet authorised on it, and gas in the bot wallet.
+A file named `STOP` in the data folder halts sending instantly.
 
 The contract reverts with `InsufficientProfit` if the trade would return less
 than `minProfit`, so a stale quote costs a failed transaction's gas (cents on
-Base) and never principal. Never reuse a private key that has ever been in a
-source file or chat.
+Base) and never principal. Only your wallet can withdraw. Never put your own
+wallet's key in `.env`, and never reuse a key that has been in a source file
+or chat.
 
 ## Honest limitations
 
 * Concentrated-liquidity trades are limited to the current tick range (up to
   the next initialized tick). That is exact but conservative: a route that
   would profit from crossing several ticks is sized down, not skipped.
-* Multi-hop and CL routes are paper-only. RouteExecutor has EVM tests against
-  mocks, not yet against live Base pools. Watch the "failed on-chain
-  verification" count in the report before ever considering live use.
+* Multi-hop and CL routes trade live only once you deploy a RouteExecutor and
+  set `ROUTE_EXECUTOR_ADDRESS`; until then they stay paper-only. RouteExecutor
+  has EVM tests against mocks (`forge test`), including a leaked-operator drain
+  attempt, but has not been battle-tested against live Base pools — start small
+  and watch the "failed on-chain verification" count in the report.
 * Aerodrome stable pools and Uniswap V4 are not traded.
 * The Flashblocks loop depends on a Flashblocks-aware RPC answering
   `eth_call` at the `pending` tag. Base plans to deprecate Flashblocks in a
@@ -274,10 +489,10 @@ source file or chat.
 ## Tests
 
 ```powershell
-npm test                 # maths, CL maths, routing, mock-chain end-to-end
-npm run test:contracts   # RouteExecutor in an EVM (needs Foundry: https://getfoundry.sh)
+npm test                 # maths, CL maths, routing, mock-chain end-to-end, new-wallet, dashboard security, alerts, online copy
+npm run test:contracts   # both contracts in an EVM (needs Foundry: https://getfoundry.sh)
 ```
-Unit tests for the maths, an end-to-end run against a mock Base chain, and
-(when `SOLC_NODE_MODULES` points at a `node_modules` containing `solc` and
-`@nomicfoundation/ethereumjs-vm`, e.g. from any Hardhat project) an in-EVM
-test of the executor contract.
+Unit tests for the maths, an end-to-end run against a mock Base chain, and,
+when `ANVIL` and `SOLC` point at Foundry's anvil and a solc 0.8.26 binary, the
+live path on a real EVM: deploy from your wallet, authorise the bot wallet,
+the setup check, a real flash-swap trade, a stale resend, withdraw, revoke.

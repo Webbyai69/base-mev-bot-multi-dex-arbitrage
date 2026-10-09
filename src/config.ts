@@ -9,6 +9,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { Wallet } from "ethers";
 
 export const CHAIN_ID = 8453;
 
@@ -169,6 +170,8 @@ export interface Settings {
   minPoolLiquidityWeth: number;
   maxPools: number;
   arbGasLimit: number;
+  /** Gas limit for a live multi-hop / CL route through the RouteExecutor (bigger: more hops, flash-loan overhead). */
+  routeGasLimit: number;
   priorityFeeGwei: number;
   executorAddress: string | undefined;
   privateKey: string | undefined;
@@ -209,6 +212,11 @@ export interface Settings {
   liqLookbackBlocks: number;
   liqCheckEvery: number;
   liqSwapCostBps: number;
+  /** 0.8: actually send liquidations live (needs LIQ_EXECUTOR_ADDRESS). Off by default. */
+  liquidationsLive: boolean;
+  /** Deployed LiquidationExecutor (contracts/LiquidationExecutor.sol). */
+  liqExecutorAddress: string | undefined;
+  liqGasLimit: number;
   // --- risk ---
   tokenBlacklist: Set<string>;
   // --- low-RPC mode ---
@@ -220,6 +228,34 @@ export interface Settings {
   maxLogGap: number;
   /** Extra HTTP endpoints, used in order when the active one keeps failing. */
   rpcFallbackUrls: string[];
+  // --- dashboard & alerts ---
+  /** Serve the dashboard on http://localhost:<uiPort> while the bot runs. */
+  ui: boolean;
+  uiPort: number;
+  /** Public address of the bot's hot wallet (balances, gas top-up, RouteExecutor operator). Never a key. */
+  botAddress: string | undefined;
+  telegramBotToken: string | undefined;
+  telegramChatId: string | undefined;
+  alertMinProfitUsd: number;
+  alertMinLiqProfitUsd: number;
+  alertMaxPerHour: number;
+  // --- online copy of the dashboard (cloud/) ---
+  /** The Worker's address, e.g. https://base-arb-dashboard.<you>.workers.dev. Unset = off. */
+  cloudUrl: string | undefined;
+  /** Must equal the Worker's INGEST_TOKEN secret. */
+  cloudToken: string | undefined;
+  cloudAccessClientId: string | undefined;
+  cloudAccessClientSecret: string | undefined;
+  cloudPushMs: number;
+  /** Ceiling for the watch list, which grows as the bot learns pools other bots trade on. */
+  maxWatchedPools: number;
+  /** The learning engine (src/learn.ts). */
+  learning: boolean;
+  learnHalfLifeHours: number;
+  learnPruneDays: number;
+  /** Live: most of the expected profit it may bid as priority fee, and the smallest expected value worth a send. */
+  liveMaxBidShare: number;
+  liveMinEvUsd: number;
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -272,6 +308,7 @@ export function loadSettings(): Settings {
     minPoolLiquidityWeth: num("MIN_POOL_LIQUIDITY_WETH", 2),
     maxPools: num("MAX_POOLS", 400),
     arbGasLimit: num("ARB_GAS_LIMIT", 260_000),
+    routeGasLimit: num("ROUTE_GAS_LIMIT", 600_000),
     priorityFeeGwei: num("PRIORITY_FEE_GWEI", 0.005),
     executorAddress: str("EXECUTOR_ADDRESS"),
     privateKey: str("PRIVATE_KEY"),
@@ -307,6 +344,9 @@ export function loadSettings(): Settings {
     liqLookbackBlocks: num("LIQ_LOOKBACK_BLOCKS", 1800),
     liqCheckEvery: num("LIQ_CHECK_EVERY", 5),
     liqSwapCostBps: num("LIQ_SWAP_COST_BPS", 30),
+    liquidationsLive: bool("LIQUIDATIONS_LIVE", false),
+    liqExecutorAddress: str("LIQ_EXECUTOR_ADDRESS"),
+    liqGasLimit: num("LIQ_GAS_LIMIT", 900_000),
     refreshMode: (str("REFRESH_MODE", "events") as Settings["refreshMode"]),
     fullRefreshBlocks: num("FULL_REFRESH_BLOCKS", 150),
     maxLogGap: num("MAX_LOG_GAP", 30),
@@ -320,13 +360,66 @@ export function loadSettings(): Settings {
         .map((x) => x.trim().toLowerCase())
         .filter((x) => /^0x[0-9a-f]{40}$/.test(x)),
     ),
+    ui: bool("UI", true),
+    uiPort: num("UI_PORT", 8787),
+    botAddress: str("BOT_ADDRESS"),
+    telegramBotToken: str("TELEGRAM_BOT_TOKEN"),
+    telegramChatId: str("TELEGRAM_CHAT_ID"),
+    alertMinProfitUsd: num("ALERT_MIN_PROFIT_USD", 5),
+    alertMinLiqProfitUsd: num("ALERT_MIN_LIQ_PROFIT_USD", 25),
+    alertMaxPerHour: num("ALERT_MAX_PER_HOUR", 20),
+    cloudUrl: str("CLOUD_URL"),
+    cloudToken: str("CLOUD_TOKEN"),
+    cloudAccessClientId: str("CLOUD_ACCESS_CLIENT_ID"),
+    cloudAccessClientSecret: str("CLOUD_ACCESS_CLIENT_SECRET"),
+    cloudPushMs: Math.max(2000, num("CLOUD_PUSH_MS", 4000)),
+    maxWatchedPools: num("MAX_WATCHED_POOLS", 1500),
+    learning: bool("LEARNING", true),
+    learnHalfLifeHours: num("LEARN_HALF_LIFE_HOURS", 72),
+    learnPruneDays: num("LEARN_PRUNE_DAYS", 3),
+    liveMaxBidShare: num("LIVE_MAX_BID_SHARE", 0.3),
+    liveMinEvUsd: num("LIVE_MIN_EV_USD", 0.01),
   };
+  if (settings.cloudUrl) {
+    let u: URL;
+    try {
+      u = new URL(settings.cloudUrl);
+    } catch {
+      throw new Error("CLOUD_URL must be the Worker's address, e.g. https://base-arb-dashboard.you.workers.dev");
+    }
+    const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+    if (u.protocol !== "https:" && !(local && u.protocol === "http:")) throw new Error("CLOUD_URL must start with https://");
+    if (!settings.cloudToken || settings.cloudToken.length < 24) throw new Error("CLOUD_URL is set, so CLOUD_TOKEN must be set too (the Worker's INGEST_TOKEN secret, at least 24 characters)");
+  }
+  if (settings.botAddress && !/^0x[0-9a-fA-F]{40}$/.test(settings.botAddress)) {
+    throw new Error("BOT_ADDRESS must be a public 0x address (42 characters). Never put a private key there.");
+  }
+  if (!Number.isInteger(settings.uiPort) || settings.uiPort < 1 || settings.uiPort > 65535) throw new Error("UI_PORT must be a port number");
   if (!["morpho", "balancer", "capital"].includes(settings.flashSource)) throw new Error("FLASH_SOURCE must be morpho, balancer or capital");
   if (settings.refreshMode !== "events" && settings.refreshMode !== "full") throw new Error("REFRESH_MODE must be events or full");
   if (settings.discovery !== "activity" && settings.discovery !== "full") throw new Error("DISCOVERY must be activity or full");
+  if (!(settings.learnHalfLifeHours >= 1 && settings.learnHalfLifeHours <= 720)) throw new Error("LEARN_HALF_LIFE_HOURS must be between 1 and 720");
+  if (!(settings.learnPruneDays >= 0.5 && settings.learnPruneDays <= 60)) throw new Error("LEARN_PRUNE_DAYS must be between 0.5 and 60");
+  if (!(settings.liveMaxBidShare >= 0 && settings.liveMaxBidShare <= 0.5)) throw new Error("LIVE_MAX_BID_SHARE must be between 0 and 0.5");
+  if (!(settings.liveMinEvUsd >= 0 && settings.liveMinEvUsd <= 1)) throw new Error("LIVE_MIN_EV_USD must be between 0 and 1");
   if (settings.mode === "live") {
-    if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS");
-    if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY");
+    if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS (deploy the ArbExecutor from the dashboard, then copy its address into .env)");
+    if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY (run: node dist/main.js new-wallet)");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(settings.executorAddress)) throw new Error("EXECUTOR_ADDRESS must be an address (0x + 40 hex characters)");
+    if (settings.liquidationsLive && !settings.liqExecutorAddress) throw new Error("LIQUIDATIONS_LIVE=true requires LIQ_EXECUTOR_ADDRESS (deploy the LiquidationExecutor from the dashboard, then copy its address into .env)");
+  }
+  if (settings.liqExecutorAddress && !/^0x[0-9a-fA-F]{40}$/.test(settings.liqExecutorAddress)) throw new Error("LIQ_EXECUTOR_ADDRESS must be an address (0x + 40 hex characters)");
+  if (settings.privateKey && settings.botAddress) {
+    // A BOT_ADDRESS for another wallet would make the dashboard fund and authorise the wrong one.
+    let derived = "";
+    try {
+      derived = new Wallet(settings.privateKey).address;
+    } catch {
+      throw new Error("PRIVATE_KEY is not a valid private key");
+    }
+    if (derived.toLowerCase() !== settings.botAddress.toLowerCase()) {
+      throw new Error(`BOT_ADDRESS is not the address of PRIVATE_KEY (that is ${derived}). Remove the BOT_ADDRESS line or fix it.`);
+    }
   }
   return settings;
 }

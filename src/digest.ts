@@ -11,6 +11,8 @@
  * and competitors, and writes its recommendations to reports/ai-review-*.md.
  * It never edits .env or switches modes: you apply anything it suggests.
  */
+import type { LearningSummary, TuningView } from "./learn.js";
+import type { LiveDay } from "./executor.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DaySummary, OutcomeStats } from "./paper.js";
@@ -46,7 +48,33 @@ export interface DigestInput {
   flashblockStats?: { ticks: number; scans: number; skippedUnchanged: number; opps: number; errors: number; maxMs: number };
   rpc?: RpcUsage;
   refreshStats?: { checks: number; driftedPools: number };
+  /** Scanner funnel since start (where candidates drop out) and what the paper engine recorded. */
+  funnel?: Record<string, number>;
+  recorded?: { recorded: number; alreadyTracked: number } | undefined;
+  /** The learning engine's summary and the settings you changed on the dashboard. */
+  learning?: LearningSummary;
+  tuning?: TuningView;
+  /** Live sends per day (newest first) and, while the bot runs, its safety rails. */
+  live?: {
+    days: LiveDay[];
+    safety?: { blocked: string | null; stopFile: boolean; gasSpentTodayUsd: number; maxDailyGasUsd: number; consecutiveFailures: number; limit: number };
+  };
 }
+
+/** Rejection codes for the funnel stages, so the AI review and helper agents can refer to them. */
+export const FUNNEL_STAGES: Array<{ key: string; code: string; label: string }> = [
+  { key: "candidates", code: "CANDIDATE", label: "candidate route checks (positive spread after swap fees; one per route per block)" },
+  { key: "unpriced", code: "NO_USD_PRICE", label: "profit token has no USD price" },
+  { key: "gasAteIt", code: "NET_NEGATIVE_AFTER_GAS", label: "gas cost more than the spread" },
+  { key: "belowMin", code: "NET_PROFIT_TOO_LOW", label: "net positive but below MIN_PROFIT_USD" },
+  { key: "muted", code: "MUTED_AFTER_REVERT", label: "route reverted on-chain recently (muted 20 min)" },
+  { key: "learnedSkip", code: "LEARNED_UNRELIABLE", label: "skipped by the learning engine: the route, a token or a pool keeps failing test runs" },
+  { key: "overlapping", code: "OVERLAPS_BETTER_ROUTE", label: "shares a pool with a better route in the same block" },
+  { key: "reverted", code: "SIMULATION_REVERT", label: "on-chain simulation reverted" },
+  { key: "quoteMismatch", code: "QUOTE_MISMATCH", label: "DEX quoters disagreed with our maths" },
+  { key: "unverified", code: "NOT_VERIFIED", label: "no on-chain check possible (local maths only)" },
+  { key: "verified", code: "VERIFIED", label: "passed the on-chain check" },
+];
 
 export function renderDigest(d: DigestInput): string {
   const p = d.paperDays.find((x) => x.day === d.day);
@@ -77,6 +105,26 @@ export function renderDigest(d: DigestInput): string {
     ),
   );
 
+  if (s.mode === "live" || d.live?.days.length) {
+    const L = d.live;
+    const usd3 = (n: number): string => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(3);
+    out.push("## Live trading");
+    if (L?.safety) {
+      const f = L.safety;
+      const state = f.stopFile ? "**stopped** (STOP file present)" : f.blocked ? `**not sending**: ${f.blocked.slice(0, 200)}` : "enabled";
+      out.push(`Sending ${state}. Gas today ${usd3(f.gasSpentTodayUsd)} of the ${usd(f.maxDailyGasUsd)} daily limit; failed sends in a row ${f.consecutiveFailures} of ${f.limit}.\n`);
+    }
+    const rows = (L?.days ?? []).slice(0, 7);
+    out.push(
+      rows.length
+        ? md(
+            ["day", "sent", "landed", "reverted", "dropped", "gas paid", "expected net of landed (as modelled)", "avg bid gwei"],
+            rows.map((x) => [x.day, String(x.sent), String(x.landed), String(x.reverted), `${x.dropped}${x.pending ? ` (+${x.pending} pending)` : ""}`, usd3(x.gasUsd), usd3(x.expectedNetUsd), x.avgBidGwei === null ? "–" : x.avgBidGwei.toFixed(4)]),
+          )
+        : "_No live transactions sent yet._\n",
+    );
+  }
+
   out.push("## Paper trading — today");
   if (!p) out.push("_No opportunities recorded today._\n");
   else {
@@ -96,7 +144,8 @@ export function renderDigest(d: DigestInput): string {
     out.push("### Pairs");
     out.push(md(["pair / route", "found", "optimistic net"], p.byPair.slice(0, 10).map((r) => [r.pair, String(r.count), usd(r.netUsd)])));
     out.push("### Competitors who took our opportunities");
-    out.push(md(["bot", "times"], p.takers.map((t) => [t.bot, String(t.count)])));
+    const self = new Set([d.settings.executorAddress, d.settings.botAddress].filter((a): a is string => !!a).map((a) => a.toLowerCase()));
+    out.push(md(["bot", "times"], p.takers.map((t) => [self.has(String(t.bot).toLowerCase()) ? `${t.bot} (this bot's own live trade, not a competitor)` : t.bot, String(t.count)])));
   }
 
   out.push("## Paper trading — last 7 days");
@@ -120,6 +169,53 @@ export function renderDigest(d: DigestInput): string {
   }
   if (d.refreshStats) {
     out.push(`Event-driven refresh self-checks: ${d.refreshStats.checks}, pools that drifted from a full re-read: ${d.refreshStats.driftedPools}.\n`);
+  }
+
+  if (d.funnel && d.funnel.candidates) {
+    const f = d.funnel;
+    out.push("## Why opportunities don't trade (block scanner, since start)");
+    out.push(
+      md(
+        ["code", "stage", "count", "% of candidates"],
+        FUNNEL_STAGES.map((st) => [st.code, st.label, String(f[st.key] ?? 0), `${(((f[st.key] ?? 0) / f.candidates!) * 100).toFixed(st.key === "candidates" ? 0 : 3)}%`]),
+      ),
+    );
+    if (d.recorded) out.push(`Recorded as new paper opportunities: ${d.recorded.recorded}; skipped because the same route was already pending or just traded: ${d.recorded.alreadyTracked}.\n`);
+  }
+
+  if (d.learning) {
+    const L = d.learning;
+    out.push("## What the bot has learned");
+    out.push(
+      `Since ${L.since.slice(0, 10)}: ${L.counts.sims} test runs, ${L.counts.outcomes} outcomes, ${L.counts.rivalArbs} rival arbitrages, ${L.counts.liveSends} live sends; ${L.counts.routes} routes and ${L.counts.tokens} tokens tracked. Evidence halves every ${L.halfLifeHours} h. ` +
+        `Verified finds still there one block later: classic ${(L.landRate.classic * 100).toFixed(0)}%, multi-hop ${(L.landRate.route * 100).toFixed(0)}%. ` +
+        `Pools stopped watching (quiet for ${L.pools.pruneAfterDays} days or always failing): ${L.pools.prunedTotal}.\n`,
+    );
+    if (L.skipping.length) out.push(md(["token it skips", "failed", "test runs", "last failure"], L.skipping.map((t) => [t.sym, `${Math.round(t.p * 100)}%`, String(t.n), t.why.slice(0, 60)])));
+    if (L.routes.length)
+      out.push(
+        md(
+          ["route", "found", "test fail", "still there", "taken", "top rival", "live sent/landed", "bid x"],
+          L.routes.slice(0, 10).map((r) => [r.label, String(r.found), r.testFail === null ? "–" : `${Math.round(r.testFail * 100)}%`, r.stillThere === null ? "–" : `${Math.round(r.stillThere * 100)}%`, r.takenShare === null ? "–" : `${Math.round(r.takenShare * 100)}%`, r.topRival ?? "–", r.live ? `${r.live.sent}/${r.live.ok}` : "–", String(r.bidMult)]),
+        ),
+      );
+    out.push(md(["profit size", "rival bids seen", "p50 gwei", "p60 gwei", "p90 gwei"], L.bids.map((b) => [b.bucket, String(b.samples), String(b.p50 ?? "–"), String(b.p60 ?? "–"), String(b.p90 ?? "–")])));
+  }
+  if (d.tuning) {
+    const t = d.tuning;
+    const changed = Object.entries(t.overrides);
+    out.push("## Settings changed on the dashboard");
+    out.push(
+      changed.length || t.blockedTokens.length
+        ? `${changed.map(([k, v]) => `${k} = ${v} (.env: ${(t.fromEnv as Record<string, number>)[k]})`).join("; ")}${t.blockedTokens.length ? `${changed.length ? "; " : ""}blocked tokens: ${t.blockedTokens.map((b) => b.sym).join(", ")}` : ""}.\n`
+        : "_None: everything comes from .env._\n",
+    );
+    if (t.suggestions.length) out.push(`Waiting for approval on the dashboard: ${t.suggestions.map((x) => x.title).join("; ")}.\n`);
+    out.push(
+      "To suggest a setting change, end the review with a ```json block: " +
+        '{"suggestions": [{"key": "minProfitUsd" | "maxBidShare" | "evMinUsd", "value": number, "why": "…"}]}. ' +
+        `Limits: minProfitUsd ${t.limits.minProfitUsd.min}-${t.limits.minProfitUsd.max}, maxBidShare ${t.limits.maxBidShare.min}-${t.limits.maxBidShare.max}, evMinUsd ${t.limits.evMinUsd.min}-${t.limits.evMinUsd.max}. They show on the dashboard for approval.\n`,
+    );
   }
 
   if (d.flashblockStats) {

@@ -5,8 +5,12 @@ data/*.json
 !data/.gitkeep
 reports/*.html
 .env
+.env.*
+!.env.example
+*.bak
 *.log
 vendor/
 *.zip
 build/
 reports/*.md
+.wrangler/

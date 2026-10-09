@@ -66,6 +66,9 @@ export class PaperEngine {
    */
   private consumed = new Set<string>();
 
+  /** Called with every outcome (the learning engine listens). */
+  onOutcome?: (o: Opportunity, status: OutcomeRecord["status"], takenBy: string | undefined) => void;
+
   constructor(readonly store: Store, readonly registry: PoolRegistry) {}
 
   /** Called once per block AFTER reserves are refreshed and the classifier has run. */
@@ -109,11 +112,18 @@ export class PaperEngine {
    * happens on the very next confirmed block — exactly the block our
    * transaction would have landed in.
    */
+  /** Since start: opportunities recorded, and ones skipped because the same route was already pending or just traded. */
+  readonly stats = { recorded: 0, alreadyTracked: 0 };
+
   register(newOpps: Opportunity[]): void {
     const pendingRoutes = new Set([...this.pending.values()].map((p) => routeKey(p.opp)));
     for (const o of newOpps) {
       const r = routeKey(o);
-      if (pendingRoutes.has(r) || this.consumed.has(r)) continue;
+      if (pendingRoutes.has(r) || this.consumed.has(r)) {
+        this.stats.alreadyTracked++;
+        continue;
+      }
+      this.stats.recorded++;
       pendingRoutes.add(r);
       const rec: OpportunityRecord = { ...o, kind: "opportunity", mode: "paper" };
       this.store.append(OPPS_FILE, rec);
@@ -164,6 +174,11 @@ export class PaperEngine {
     };
     this.store.append(OPPS_FILE, rec);
     this.pending.delete(id);
+    try {
+      this.onOutcome?.(p.opp, status, p.takenBy);
+    } catch (err) {
+      log.warn("learning from an outcome failed:", (err as Error).message.slice(0, 120));
+    }
     if (status === "persisted") this.consumed.add(routeKey(p.opp));
     const who = p.takenBy ? ` by ${p.takenBy.slice(0, 10)}` : "";
     log.info(`paper: ${p.opp.pairSymbols} @${p.opp.block} -> ${status}${who}; realistic net $${realisticNetUsd.toFixed(3)}`);

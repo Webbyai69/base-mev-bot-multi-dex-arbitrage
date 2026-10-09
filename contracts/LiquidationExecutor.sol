@@ -2,41 +2,34 @@
 pragma solidity ^0.8.24;
 
 /**
- * RouteExecutor — atomic multi-hop arbitrage across Uniswap-V2-style pools,
- * Aerodrome volatile pools and concentrated-liquidity pools (Uniswap V3 and
- * Aerodrome Slipstream), funded by a free flash loan or the contract's own
- * balance.
+ * LiquidationExecutor — atomic Aave V3 liquidation funded by a free flash loan.
  *
- *   tokens[0] --hops[0]--> tokens[1] --hops[1]--> ... --> tokens[n] == tokens[0]
+ * When a borrower's Aave position is unhealthy (health factor < 1) anyone may
+ * repay part of their debt and seize the same value of collateral plus a bonus
+ * (typically 5-10%). This contract does it in one transaction with no capital:
  *
- * Funding (`source`):
- *   0  own capital: the contract already holds `amountIn` of tokens[0]
- *   1  Morpho Blue flash loan  (no fee; repaid by transferFrom, so we approve it)
- *   2  Balancer V2 flash loan  (fee set by Balancer governance; zero so far)
+ *   1. flash-loan `debtToCover` of the debt asset (Morpho or Balancer, free),
+ *   2. repay it into Aave via pool.liquidationCall(), receiving the seized
+ *      collateral (as the underlying token, not an aToken),
+ *   3. swap the seized collateral back to the debt asset through the given
+ *      hops (V2 / Aerodrome / concentrated-liquidity, exactly like
+ *      RouteExecutor),
+ *   4. repay the flash loan,
+ *   5. keep the remainder.
  *
- * Hop kinds:
- *   0  Uniswap V2 style pair, fee in ppm   (out computed here from reserves)
- *   1  Aerodrome volatile pool             (out from pool.getAmountOut, exact)
- *   2  Uniswap V3 / Slipstream CL pool     (pool.swap + uniswapV3SwapCallback)
- *   3  Uniswap V2 style pair, fee in bps   (forks whose maths rounds like Aerodrome)
+ * The whole transaction reverts with InsufficientProfit unless the debt asset
+ * balance grew by at least `minProfit`, so a stale opportunity, a bad swap or a
+ * leaked operator key costs gas, never principal. Collateral is swapped at the
+ * contract's *actual* received balance, so a liquidation that returns a little
+ * more or less than modelled stays exact.
  *
- * Each V2-style hop computes its output from the tokens actually received and
- * the pool's live reserves, so a route stays exact even if an earlier CL hop
- * returned a few wei more or less than the bot's model. The whole transaction
- * reverts with InsufficientProfit unless tokens[0] grew by at least
- * `minProfit`, so a stale route costs gas, never principal.
+ * Roles mirror ArbExecutor / RouteExecutor: the owner (your own wallet) deploys
+ * it, withdraws profits and sets the operator; the operator (the bot's hot key)
+ * can only run liquidations, never withdraw.
  *
- * `simulate` runs the full route and always reverts with Simulated(profit);
- * the bot calls it with eth_call (optionally with this bytecode injected by a
- * state override, so nothing needs deploying for paper trading).
- *
- * Roles: the owner (your own wallet, e.g. MetaMask) deploys it, withdraws
- * profits and sets the operator; the operator (the bot's hot key) can only
- * execute routes. A leaked bot key can therefore never withdraw anything.
- *
- * STATUS: written alongside the bot's paper-trading upgrade and not yet
- * compiled or tested in an EVM. Compile and run the simulation path for a
- * few days (paper mode with ROUTE_EXECUTOR_ADDRESS set) before any live use.
+ * `simulate` runs the whole thing and reverts with Simulated(profit); the bot
+ * calls it with eth_call (optionally with this bytecode injected by a state
+ * override) so nothing needs deploying to check a liquidation in paper mode.
  */
 
 interface IERC20 {
@@ -68,20 +61,32 @@ interface IBalancerVault {
     function flashLoan(address recipient, address[] calldata tokens, uint256[] calldata amounts, bytes calldata userData) external;
 }
 
-contract RouteExecutor {
+interface IAavePool {
+    function liquidationCall(address collateralAsset, address debtAsset, address user, uint256 debtToCover, bool receiveAToken) external;
+}
+
+contract LiquidationExecutor {
     struct Hop {
         address pool;
-        uint8 kind;
+        uint8 kind; // 0 V2 ppm fee, 1 Aerodrome getAmountOut, 2 CL (V3/Slipstream), 3 V2 bps fee
         uint32 feePpm;
+    }
+
+    struct Liq {
+        address collateralAsset;
+        address debtAsset;
+        address user;
+        uint256 debtToCover;
     }
 
     address public constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     address public constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+    address public constant AAVE_POOL = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
     uint160 internal constant MIN_SQRT_RATIO_PLUS_ONE = 4295128740;
     uint160 internal constant MAX_SQRT_RATIO_MINUS_ONE = 1461446703485210103287273052203988822378723970341;
 
     address public owner;
-    /// @notice The bot's hot key: may execute routes, nothing else.
+    /// @notice The bot's hot key: may run liquidations, nothing else.
     address public operator;
     /// @dev Set only while a flash loan or CL swap of ours is in progress; callbacks from anyone else revert.
     address private expectedCaller;
@@ -94,7 +99,7 @@ contract RouteExecutor {
     error BadRoute();
     error TransferFailed();
 
-    event RouteExecuted(address indexed token, uint256 amountIn, uint256 profit, uint8 hops, uint8 source);
+    event Liquidated(address indexed user, address indexed collateralAsset, address indexed debtAsset, uint256 debtToCover, uint256 profit, uint8 source);
     event OperatorSet(address indexed operator);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
@@ -110,6 +115,7 @@ contract RouteExecutor {
 
     constructor() {
         owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
     }
 
     receive() external payable {}
@@ -118,89 +124,120 @@ contract RouteExecutor {
     // Entry points
     // ---------------------------------------------------------------------
 
-    function execute(address[] calldata tokens, Hop[] calldata hops, uint256 amountIn, uint256 minProfit, uint8 source)
-        external
-        onlyOperator
-        returns (uint256 profit)
-    {
-        profit = _run(tokens, hops, amountIn, source);
+    /// @param swapTokens the swap path for the seized collateral: [collateralAsset, ..., debtAsset].
+    /// @param swapHops   one hop per step of swapTokens.
+    /// @param source     0 own capital, 1 Morpho flash loan, 2 Balancer flash loan (funds `debtToCover`).
+    function liquidate(
+        Liq calldata liq,
+        address[] calldata swapTokens,
+        Hop[] calldata swapHops,
+        uint256 minProfit,
+        uint8 source
+    ) external onlyOperator returns (uint256 profit) {
+        profit = _run(liq, swapTokens, swapHops, source);
         if (profit < minProfit) revert InsufficientProfit(profit, minProfit);
-        emit RouteExecuted(tokens[0], amountIn, profit, uint8(hops.length), source);
+        emit Liquidated(liq.user, liq.collateralAsset, liq.debtAsset, liq.debtToCover, profit, source);
     }
 
     /// @notice Dry run for eth_call: always reverts, with Simulated(profit) on success.
-    function simulate(address[] calldata tokens, Hop[] calldata hops, uint256 amountIn, uint8 source) external {
-        uint256 profit = _run(tokens, hops, amountIn, source);
+    function simulate(Liq calldata liq, address[] calldata swapTokens, Hop[] calldata swapHops, uint8 source) external {
+        uint256 profit = _run(liq, swapTokens, swapHops, source);
         revert Simulated(profit);
     }
 
     // ---------------------------------------------------------------------
-    // Funding
+    // Core
     // ---------------------------------------------------------------------
 
-    function _run(address[] calldata tokens, Hop[] calldata hops, uint256 amountIn, uint8 source) internal returns (uint256 profit) {
-        uint256 n = hops.length;
-        if (n == 0 || tokens.length != n + 1 || tokens[0] != tokens[n] || amountIn == 0) revert BadRoute();
-        address token = tokens[0];
-        uint256 before = IERC20(token).balanceOf(address(this));
-        bytes memory data = abi.encode(tokens, hops, amountIn);
-
+    function _run(Liq calldata liq, address[] calldata swapTokens, Hop[] calldata swapHops, uint8 source) internal returns (uint256 profit) {
+        _validate(liq, swapTokens, swapHops);
+        uint256 before = IERC20(liq.debtAsset).balanceOf(address(this));
         if (source == 0) {
-            _route(tokens, hops, amountIn);
+            _liquidateAndSwap(liq, swapTokens, swapHops, liq.debtToCover);
         } else if (source == 1) {
             expectedCaller = MORPHO;
-            IMorpho(MORPHO).flashLoan(token, amountIn, data);
+            IMorpho(MORPHO).flashLoan(liq.debtAsset, liq.debtToCover, abi.encode(liq, swapTokens, swapHops));
             expectedCaller = address(0);
         } else if (source == 2) {
-            address[] memory ts = new address[](1);
-            ts[0] = token;
-            uint256[] memory amts = new uint256[](1);
-            amts[0] = amountIn;
-            expectedCaller = BALANCER_VAULT;
-            IBalancerVault(BALANCER_VAULT).flashLoan(address(this), ts, amts, data);
-            expectedCaller = address(0);
+            _balancerFlash(liq, swapTokens, swapHops);
         } else {
             revert BadRoute();
         }
-
-        uint256 after_ = IERC20(token).balanceOf(address(this));
+        uint256 after_ = IERC20(liq.debtAsset).balanceOf(address(this));
         if (after_ <= before) revert InsufficientProfit(0, 1);
         profit = after_ - before;
+    }
+
+    /// The swap path must start at the collateral and end at the debt asset (what the flash loan is in).
+    function _validate(Liq calldata liq, address[] calldata swapTokens, Hop[] calldata swapHops) internal pure {
+        uint256 n = swapHops.length;
+        if (n == 0 || swapTokens.length != n + 1 || swapTokens[0] != liq.collateralAsset || swapTokens[n] != liq.debtAsset || liq.debtToCover == 0) {
+            revert BadRoute();
+        }
+    }
+
+    function _balancerFlash(Liq calldata liq, address[] calldata swapTokens, Hop[] calldata swapHops) internal {
+        address[] memory ts = new address[](1);
+        ts[0] = liq.debtAsset;
+        uint256[] memory amts = new uint256[](1);
+        amts[0] = liq.debtToCover;
+        expectedCaller = BALANCER_VAULT;
+        IBalancerVault(BALANCER_VAULT).flashLoan(address(this), ts, amts, abi.encode(liq, swapTokens, swapHops));
+        expectedCaller = address(0);
     }
 
     /// @dev Morpho Blue: funds are already here; Morpho pulls `assets` back after we return.
     function onMorphoFlashLoan(uint256 assets, bytes calldata data) external {
         if (msg.sender != MORPHO || expectedCaller != MORPHO) revert BadCallback();
-        (address[] memory tokens, Hop[] memory hops, ) = abi.decode(data, (address[], Hop[], uint256));
-        _routeMem(tokens, hops, assets);
-        _approve(tokens[0], MORPHO, assets);
+        (Liq memory liq, address[] memory swapTokens, Hop[] memory swapHops) = abi.decode(data, (Liq, address[], Hop[]));
+        _liquidateAndSwapMem(liq, swapTokens, swapHops, assets);
+        _approve(liq.debtAsset, MORPHO, assets);
     }
 
     /// @dev Balancer V2: repay amount + fee by transfer before returning.
     function receiveFlashLoan(address[] calldata, uint256[] calldata amounts, uint256[] calldata feeAmounts, bytes calldata userData) external {
         if (msg.sender != BALANCER_VAULT || expectedCaller != BALANCER_VAULT) revert BadCallback();
-        (address[] memory tokens, Hop[] memory hops, ) = abi.decode(userData, (address[], Hop[], uint256));
-        _routeMem(tokens, hops, amounts[0]);
-        _transfer(tokens[0], BALANCER_VAULT, amounts[0] + feeAmounts[0]);
+        (Liq memory liq, address[] memory swapTokens, Hop[] memory swapHops) = abi.decode(userData, (Liq, address[], Hop[]));
+        _liquidateAndSwapMem(liq, swapTokens, swapHops, amounts[0]);
+        _transfer(liq.debtAsset, BALANCER_VAULT, amounts[0] + feeAmounts[0]);
     }
 
-    // ---------------------------------------------------------------------
-    // Swaps
-    // ---------------------------------------------------------------------
-
-    function _route(address[] calldata tokens, Hop[] calldata hops, uint256 amountIn) internal {
-        uint256 amount = amountIn;
-        for (uint256 i = 0; i < hops.length; i++) {
-            amount = _hop(hops[i].pool, hops[i].kind, hops[i].feePpm, tokens[i], tokens[i + 1], amount);
+    function _liquidateAndSwap(Liq calldata liq, address[] calldata swapTokens, Hop[] calldata swapHops, uint256 debtToCover) internal {
+        uint256 seized = _doLiquidate(liq, debtToCover);
+        uint256 amount = seized;
+        for (uint256 i = 0; i < swapHops.length; i++) {
+            amount = _hop(swapHops[i].pool, swapHops[i].kind, swapHops[i].feePpm, swapTokens[i], swapTokens[i + 1], amount);
         }
     }
 
-    function _routeMem(address[] memory tokens, Hop[] memory hops, uint256 amountIn) internal {
-        uint256 amount = amountIn;
-        for (uint256 i = 0; i < hops.length; i++) {
-            amount = _hop(hops[i].pool, hops[i].kind, hops[i].feePpm, tokens[i], tokens[i + 1], amount);
+    function _liquidateAndSwapMem(Liq memory liq, address[] memory swapTokens, Hop[] memory swapHops, uint256 debtToCover) internal {
+        uint256 seized = _doLiquidateMem(liq, debtToCover);
+        uint256 amount = seized;
+        for (uint256 i = 0; i < swapHops.length; i++) {
+            amount = _hop(swapHops[i].pool, swapHops[i].kind, swapHops[i].feePpm, swapTokens[i], swapTokens[i + 1], amount);
         }
     }
+
+    /// @return seized the collateral actually received from Aave (measured, not modelled).
+    function _doLiquidate(Liq calldata liq, uint256 debtToCover) internal returns (uint256 seized) {
+        uint256 before = IERC20(liq.collateralAsset).balanceOf(address(this));
+        _approve(liq.debtAsset, AAVE_POOL, debtToCover);
+        IAavePool(AAVE_POOL).liquidationCall(liq.collateralAsset, liq.debtAsset, liq.user, debtToCover, false);
+        seized = IERC20(liq.collateralAsset).balanceOf(address(this)) - before;
+        if (seized == 0) revert BadRoute();
+    }
+
+    function _doLiquidateMem(Liq memory liq, uint256 debtToCover) internal returns (uint256 seized) {
+        uint256 before = IERC20(liq.collateralAsset).balanceOf(address(this));
+        _approve(liq.debtAsset, AAVE_POOL, debtToCover);
+        IAavePool(AAVE_POOL).liquidationCall(liq.collateralAsset, liq.debtAsset, liq.user, debtToCover, false);
+        seized = IERC20(liq.collateralAsset).balanceOf(address(this)) - before;
+        if (seized == 0) revert BadRoute();
+    }
+
+    // ---------------------------------------------------------------------
+    // Swaps (identical mechanics to RouteExecutor)
+    // ---------------------------------------------------------------------
 
     /// @return out amount of tokenOut actually received by this contract
     function _hop(address pool, uint8 kind, uint32 feePpm, address tokenIn, address tokenOut, uint256 amountIn) internal returns (uint256 out) {

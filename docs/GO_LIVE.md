@@ -1,0 +1,143 @@
+# Going live
+
+Live mode sends real transactions. Before you start, know what it can and
+can't do:
+
+- It sends **classic two-pool trades** (Uniswap V2 / SushiSwap / BaseSwap /
+  Aerodrome volatile pools) through the ArbExecutor, and — once you also deploy
+  a **RouteExecutor** and set `ROUTE_EXECUTOR_ADDRESS` — **concentrated-liquidity
+  and multi-hop routes** too. Everything is sent only after it passed the
+  on-chain test run at the same block. Without a RouteExecutor, CL and multi-hop
+  routes stay paper-only.
+- Every trade borrows what it needs with a flash swap, so it needs **no
+  trading capital**, only gas. A trade that would lose money reverts. You
+  pay its gas (about a cent on Base) but never lose principal.
+- Paper results tell you how often it will find anything. If the digest's
+  "classic V2 two-pool" line shows no verified finds, live mode will mostly
+  sit and wait.
+
+## Who holds what
+
+```
+your wallet (Brave, MetaMask…)          bot wallet (made by new-wallet)
+  deploys and OWNS the ArbExecutor        key in .env, never shown
+  withdraws the profit                    holds only gas money
+  authorises / revokes the bot            OPERATOR: can trade, can't withdraw
+            │                                       │
+            └──────────►  ArbExecutor  ◄────────────┘
+                          profit accumulates here
+```
+
+A leaked bot key can spend the gas money in the bot wallet and nothing else.
+Your own wallet's key never goes in a file.
+
+## Steps
+
+1. **Update and build** (stop the bot first):
+   `git pull`, `npm run build`, `npm test`.
+2. **Create the bot wallet** in PowerShell, in the bot's folder:
+   `node dist/main.js new-wallet`.
+   It writes `PRIVATE_KEY` into `.env` and prints only the address. It never
+   replaces an existing key.
+3. **Set the live limits** in `.env`:
+   - `MAX_DAILY_GAS_USD=1`: sending stops for the day once $1 of gas is spent.
+   - `MAX_CONSECUTIVE_FAILURES=5`: after 5 failed trades in a row the bot writes
+     the `STOP` file and stops sending until you delete it.
+   - Leave `WS_URL` empty. The websocket costs more Alchemy credit than polling
+     and can go quiet without warning.
+   - Keep `MULTI_HOP=true` and `CL_POOLS=true` if you want to trade CL and
+     multi-hop routes live (see "Trading CL and multi-hop routes" below); set
+     them to `false` for a leaner two-pool-only bot. `LIQUIDATIONS` is never
+     sent, only watched.
+4. **Restart the bot** (still `MODE=paper`). Open http://localhost:8787 and
+   connect your own wallet in **Wallet and contracts**. Make sure it's on Base.
+5. **Deploy the trading contract** with the button under *Trading contract
+   (ArbExecutor)*. Your wallet becomes its owner. Copy the
+   `EXECUTOR_ADDRESS=0x…` line it shows.
+6. **Authorise bot wallet**, with the button under the same contract.
+7. **Top up the bot wallet** with gas money under *Bot wallet*. The $5 / $10 /
+   $20 buttons fill in the ETH amount; your wallet shows the exact amount
+   before you approve.
+8. **Switch to live** in `.env`: paste the `EXECUTOR_ADDRESS=` line and set
+   `MODE=live`. Restart the bot.
+
+The bot checks the setup before it sends anything, and again every minute
+until it passes, then every 5 minutes:
+
+- the contract at `EXECUTOR_ADDRESS` is exactly this version's ArbExecutor;
+- the bot wallet is its owner or operator;
+- the bot wallet has gas money.
+
+The log says `LIVE: setup checks out … sending enabled`. The dashboard's
+*Live setup* list shows all seven steps green, and Telegram, if set up, says
+"Live trading enabled". Until then the dashboard says what's missing and
+nothing is sent.
+
+## Trading CL and multi-hop routes too
+
+Two-pool trades go through the ArbExecutor above. To also trade
+concentrated-liquidity (Uniswap V3 / Aerodrome Slipstream) and multi-hop
+routes live, deploy a second contract, the **RouteExecutor**:
+
+1. In *Wallet and contracts*, open **RouteExecutor** and press **Deploy**. Your
+   wallet becomes its owner, exactly like the ArbExecutor.
+2. Press **Authorise bot wallet** on it.
+3. Copy the `ROUTE_EXECUTOR_ADDRESS=0x…` line, paste it into `.env`, and
+   restart the bot.
+
+It uses the same bot wallet and gas money, and the same safety: a route borrows
+what it needs with a free Morpho flash loan (no capital), and the whole
+transaction reverts unless it ends holding more of the token it started with, so
+a stale route or a leaked bot key costs gas, never principal. The bot checks the
+RouteExecutor's code, role and gas just like the ArbExecutor, and the log says
+`LIVE: RouteExecutor setup checks out`. Routes are never sent until that passes,
+so you can deploy and authorise at your own pace. These routes are newer than the
+two-pool path and tested against mock pools rather than live Base liquidity, so
+start small and watch the first few in `data/live.jsonl`.
+
+## Running Aave liquidations (0.8)
+
+Arbitrage is a millisecond race a home PC loses to co-located bots. Liquidations
+are not — the window is seconds — so they're the better fit for this setup. To
+turn them on, deploy a third contract, the **LiquidationExecutor**:
+
+1. In *Wallet and contracts*, open **LiquidationExecutor** and press **Deploy**
+   (you become its owner).
+2. Press **Allow the bot key to run liquidations**.
+3. Copy the `LIQ_EXECUTOR_ADDRESS=0x…` line into `.env`, add `LIQUIDATIONS_LIVE=true`,
+   and restart.
+
+When a borrower's Aave position goes underwater, the bot flash-loans the debt,
+repays it via `liquidationCall`, swaps the seized collateral back to the debt
+asset and keeps the bonus — one transaction, no capital, gas only. Every one is
+simulated on-chain first, and the whole thing reverts unless it ends with more
+of the debt asset than it started, so a stale one or a leaked key costs gas, not
+principal. The log says `LIVE: LiquidationExecutor setup checks out`. It only
+fires when a position is actually liquidatable, which depends on the market —
+expect lumpy, occasional earnings on volatile days, not a steady stream, and
+watch the first few in `data/live.jsonl`.
+
+## While it runs
+
+- **Stop sending:** the button on the dashboard, or create a file named `STOP`
+  in the data folder. Delete it to resume.
+- **Take the profit:** *Withdraw all WETH / USDC / ETH* under *Trading
+  contract*, with the owner wallet connected.
+- **Take the bot's access away:** *Revoke the bot wallet*. The bot stops
+  sending at its next check, within 5 minutes; use Stop sending for an
+  immediate halt.
+- **Leftover gas money** stays in the bot wallet. To move it, import the bot
+  wallet's key into a wallet app (it's in `.env`), or simply leave it for later.
+- Every attempt is logged in `data/live.jsonl` and on the dashboard
+  (*Trades sent*), with its gas, including Base's L1 data fee.
+- **Why it did or didn't send:** with learning on (the default since 0.6) a
+  find is sent only when its expected value is positive. The log says
+  `live: sending … lands 50% of the time … bid 0.16 gwei (rivals' p60 …)` or
+  `live: not sending … expected value $-0.004`, and the dashboard's *What it
+  has learned* panel shows the record behind it. Suggested changes there take
+  effect when you press **Apply**; nothing changes the mode, the daily gas limit
+  or the keys but you, in `.env`.
+
+## Going back to paper
+
+Set `MODE=paper` and restart. The contract and the bot wallet stay as they are.

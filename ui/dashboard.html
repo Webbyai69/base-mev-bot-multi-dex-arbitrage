@@ -1,0 +1,2631 @@
+<title>Base Arb Bot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --page:#f3f5f9; --surface:#ffffff; --well:#e9edf4;
+  --ink:#0b1530; --ink-2:#4b556e; --muted:#636d87;
+  --line:#dde2ec; --line-strong:#c3cad8;
+  --accent:#0052ff; --accent-ink:#ffffff; --link:#0052ff; --accent-wash:#e3ecff;
+  --ours:#2a78d6; --rival:#eb6834; --quiet:#cdd3df; --drop:#9aa3b8; --seq-mid:#86b6ef;
+  --good:#0ca30c; --good-ink:#006300; --warn:#fab219; --warn-ink:#8a5a00; --bad:#d03b3b; --bad-ink:#b23a3a;
+  --tip-bg:#0b1530; --tip-ink:#eef2f9;
+  --sans:"Archivo", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page:#0a0f1c; --surface:#111829; --well:#182036;
+    --ink:#e6ebf5; --ink-2:#aeb7cb; --muted:#8892aa;
+    --line:#1e2740; --line-strong:#2e3954;
+    --accent:#2f6bff; --accent-ink:#ffffff; --link:#7aa2ff; --accent-wash:#14224a;
+    --ours:#3987e5; --rival:#d95926; --quiet:#2a3349; --drop:#4a5672; --seq-mid:#1c5cab;
+    --good:#0ca30c; --good-ink:#3cc23c; --warn:#fab219; --warn-ink:#fab219; --bad:#d03b3b; --bad-ink:#e66767;
+    --tip-bg:#e6ebf5; --tip-ink:#0b1530;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page:#0a0f1c; --surface:#111829; --well:#182036;
+  --ink:#e6ebf5; --ink-2:#aeb7cb; --muted:#8892aa;
+  --line:#1e2740; --line-strong:#2e3954;
+  --accent:#2f6bff; --accent-ink:#ffffff; --link:#7aa2ff; --accent-wash:#14224a;
+  --ours:#3987e5; --rival:#d95926; --quiet:#2a3349; --drop:#4a5672; --seq-mid:#1c5cab;
+  --good:#0ca30c; --good-ink:#3cc23c; --warn:#fab219; --warn-ink:#fab219; --bad:#d03b3b; --bad-ink:#e66767;
+  --tip-bg:#e6ebf5; --tip-ink:#0b1530;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--page); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.5; font-variation-settings: "wdth" 100; -webkit-font-smoothing: antialiased; }
+a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+code, .mono { font-family: var(--mono); font-size: .88em; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.skiplink { position: absolute; left: 16px; top: -40px; background: var(--accent); color: var(--accent-ink); padding: 6px 12px; border-radius: 6px; z-index: 30; }
+.skiplink:focus { top: 8px; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-inline: clamp(16px, 4vw, 40px); }
+
+/* Header */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--page); background: color-mix(in srgb, var(--page) 90%, transparent); backdrop-filter: saturate(1.4) blur(10px); -webkit-backdrop-filter: saturate(1.4) blur(10px); border-bottom: 1px solid var(--line); }
+.top-in { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding-block: 10px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; letter-spacing: -.005em; margin-right: 6px; white-space: nowrap; }
+.glyph { display: inline-flex; align-items: flex-end; gap: 2px; height: 18px; }
+.glyph i { display: block; width: 4px; border-radius: 1.5px 1.5px 0 0; }
+.glyph i:nth-child(1) { height: 6px; background: var(--quiet); }
+.glyph i:nth-child(2) { height: 11px; background: var(--rival); }
+.glyph i:nth-child(3) { height: 18px; background: var(--ours); }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 550; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--ink-2); background: var(--surface); white-space: nowrap; }
+.pill.live { color: var(--bad-ink); border-color: color-mix(in srgb, var(--bad) 50%, var(--line-strong)); }
+.status-line { display: inline-flex; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.status-line b { color: var(--ink-2); font-weight: 600; }
+.spacer { flex: 1 1 auto; }
+@media (max-width: 640px) { .top { position: static; } .status-line { order: 5; } }
+
+/* Buttons */
+.btn { font: inherit; font-size: 14px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); cursor: pointer; white-space: nowrap; }
+.btn:hover:not(:disabled) { border-color: var(--ink-2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--accent); }
+.btn.danger { color: var(--bad-ink); border-color: color-mix(in srgb, var(--bad) 45%, var(--line-strong)); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+.btn.ghost:hover:not(:disabled) { border-color: var(--line-strong); }
+.btn.small { min-height: 30px; padding: 0 11px; font-size: 13px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn img { width: 20px; height: 20px; border-radius: 4px; }
+.linkbtn { font: inherit; font-size: 13.5px; background: none; border: 0; padding: 0; color: var(--link); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+
+/* Banners */
+#banners { display: grid; gap: 10px; padding-top: 16px; }
+#banners:empty { padding-top: 0; }
+.banner { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 11px 16px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--surface); font-size: 14px; }
+.banner.warn { border-color: color-mix(in srgb, var(--warn) 65%, var(--line-strong)); }
+.banner.bad { border-color: color-mix(in srgb, var(--bad) 55%, var(--line-strong)); }
+.banner .grow { flex: 1 1 320px; min-width: 0; }
+
+/* Hero */
+.hero { display: grid; grid-template-columns: minmax(0, 360px) minmax(0, 1fr); gap: 28px 56px; align-items: end; padding-block: 40px 28px; }
+.hero h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink-2); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tag { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--well); color: var(--ink-2); white-space: nowrap; }
+.big { margin: 12px 0 0; font-size: clamp(64px, 9.5vw, 116px); line-height: .88; font-weight: 640; font-variation-settings: "wdth" 64; letter-spacing: -.02em; white-space: nowrap; }
+.big .cur { font-size: .5em; vertical-align: .64em; margin-right: .04em; font-weight: 560; color: var(--ink-2); }
+.hero-sub { margin: 16px 0 0; font-size: 15px; color: var(--ink-2); }
+.hero-note { margin: 6px 0 0; font-size: 13px; color: var(--muted); max-width: 44ch; }
+.tape-fig { margin: 0; min-width: 0; }
+.tape { position: relative; height: 128px; overflow: hidden; border-bottom: 1px solid var(--line-strong); touch-action: pan-y; }
+.tape-track { position: absolute; inset: 0; display: flex; justify-content: flex-end; align-items: flex-end; gap: 3px; }
+.bar { flex: 0 0 6px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; }
+.seg { display: block; width: 100%; border-radius: 2px 2px 0 0; }
+.seg.ours { background: var(--ours); }
+.seg.rival { background: var(--rival); }
+.seg.quiet { background: var(--quiet); }
+.k-ours .seg { height: 100%; }
+.k-rival .seg { height: 56%; }
+.k-quiet .seg { height: 14%; }
+.k-both .seg.rival { height: 24%; }
+.k-both .seg.ours { height: calc(76% - 2px); border-radius: 0; }
+.k-skip .seg { width: 4px; height: 4px; margin: 0 auto; border-radius: 50%; background: var(--muted); }
+.bar.hot .seg { filter: brightness(1.2) saturate(1.1); }
+.bar.hot.k-quiet .seg { background: var(--drop); }
+.bar.new { animation: grow .45s cubic-bezier(.2, .7, .2, 1) both; transform-origin: 50% 100%; }
+@keyframes grow { from { transform: scaleY(0); } }
+.tape-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; text-align: center; padding: 16px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; font-size: 13px; color: var(--ink-2); }
+.legend span { white-space: nowrap; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.sw.ours { background: var(--ours); } .sw.rival { background: var(--rival); } .sw.quiet { background: var(--quiet); }
+.sw.skip { width: 4px; height: 4px; border-radius: 50%; background: var(--muted); margin: 0 9px 0 3px; vertical-align: 1px; }
+.tape-meta { display: flex; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+@media (max-width: 860px) { .hero { grid-template-columns: minmax(0, 1fr); padding-top: 28px; } }
+
+/* Figures */
+.figures { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-block: 1px solid var(--line-strong); }
+.fig { padding: 14px 18px 16px; border-left: 1px solid var(--line); min-width: 0; }
+.fig:first-child { border-left: 0; padding-left: 0; }
+.fig-label { font-size: 13px; color: var(--ink-2); display: block; }
+.fig-value { display: block; font-size: 32px; line-height: 1.15; font-weight: 600; font-variation-settings: "wdth" 72; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fig-sub { display: flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); margin-top: 2px; min-width: 0; }
+.fig-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+  .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fig { border-left: 0; border-top: 1px solid var(--line); padding-left: 0; }
+  .fig:nth-child(-n+2) { border-top: 0; }
+  .fig:nth-child(2), .fig:nth-child(4) { padding-left: 18px; border-left: 1px solid var(--line); }
+  .fig:last-child { grid-column: 1 / -1; }
+}
+
+/* Panels */
+.grid { display: grid; gap: 52px 56px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); margin-top: 52px; align-items: start; }
+.panel { min-width: 0; }
+.full { margin-top: 56px; }
+.panel > header { display: flex; align-items: flex-end; justify-content: space-between; gap: 6px 16px; flex-wrap: wrap; padding-bottom: 10px; border-bottom: 1px solid var(--line-strong); margin-bottom: 4px; }
+.panel h2 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.005em; text-wrap: balance; }
+.sub { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+.panel h3 { margin: 26px 0 6px; font-size: 14.5px; font-weight: 650; }
+.lead { font-size: 14px; color: var(--ink-2); margin: 12px 0 4px; }
+.empty { padding: 22px 0; color: var(--muted); font-size: 14px; }
+
+/* Feed */
+.feed { max-height: 600px; overflow-y: auto; overscroll-behavior: contain; }
+.frow { border-bottom: 1px solid var(--line); }
+.frow-btn { all: unset; box-sizing: border-box; width: 100%; display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; grid-template-areas: "time pair net" "time route out"; gap: 2px 12px; padding: 11px 2px 11px 0; cursor: pointer; }
+.frow-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.frow-btn:hover .f-pair { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.f-time { grid-area: time; font-size: 13px; color: var(--muted); padding-top: 2px; }
+.f-pair { grid-area: pair; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.f-net { grid-area: net; text-align: right; font-weight: 650; }
+.f-route { grid-area: route; font-size: 13px; color: var(--muted); min-width: 0; display: flex; gap: 6px; align-items: center; overflow: hidden; white-space: nowrap; }
+.f-route > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.f-out { grid-area: out; justify-self: end; }
+.frow.fresh { animation: fresh 2.2s ease-out; }
+@keyframes fresh { from { background: var(--accent-wash); } }
+.minitag { font-size: 11.5px; font-weight: 600; color: var(--ink-2); background: var(--well); padding: 0 6px; border-radius: 4px; line-height: 18px; flex: none; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+.chip svg, .row svg { flex: none; }
+.kv .chip, .status .chip, .legend .chip, td .chip { white-space: normal; align-items: flex-start; }
+.kv .chip svg, td .chip svg { margin-top: 2px; }
+.detail { padding: 2px 0 20px 74px; display: grid; gap: 16px; font-size: 14px; }
+.detail h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.legs { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; counter-reset: leg; }
+.legs li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; }
+.legs li::before { counter-increment: leg; content: counter(leg); width: 22px; height: 22px; border-radius: 50%; background: var(--well); display: grid; place-items: center; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.leg-dex { font-weight: 600; }
+.costs { display: grid; grid-template-columns: auto auto; justify-content: start; gap: 2px 28px; }
+.costs .num { text-align: right; }
+.costs .total { font-weight: 650; border-top: 1px solid var(--line-strong); padding-top: 4px; }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.steps li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start; }
+.steps li svg { margin-top: 3px; }
+@media (max-width: 560px) {
+  .detail { padding-left: 0; }
+  .frow-btn { grid-template-columns: 54px minmax(0, 1fr) auto; grid-template-areas: "time pair net" "time route route" "time out out"; }
+  .f-out { justify-self: start; }
+}
+
+/* Charts and tables */
+.chart { position: relative; min-height: 200px; margin-top: 10px; }
+.chart svg { display: block; overflow: visible; }
+.axis text, .axis-x { fill: var(--muted); font-size: 11.5px; font-family: var(--sans); }
+.grid-line { stroke: var(--line); stroke-width: 1; }
+.base-line { stroke: var(--line-strong); stroke-width: 1; }
+.hit { fill: transparent; cursor: default; }
+.m-ours { fill: var(--ours); background: var(--ours); }
+.m-rival { fill: var(--rival); background: var(--rival); }
+.m-drop { background: var(--drop); }
+.m-bad { background: var(--bad); }
+.m-cov-all { background: var(--ours); }
+.m-cov-some { background: var(--seq-mid); }
+.m-cov-none { background: var(--quiet); }
+.bar-m.hot { filter: brightness(1.18); }
+.chart-tools { display: flex; gap: 12px; align-items: center; }
+table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
+.t th { text-align: left; font-weight: 550; color: var(--muted); font-size: 12.5px; padding: 8px 12px 6px 0; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
+.t td { padding: 8px 12px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.t .r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.t td .mono, .t td a.mono { white-space: nowrap; }
+.t th.r { text-align: right; }
+.scroll-x { overflow-x: auto; }
+.marker { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 8px; vertical-align: 1px; }
+
+/* Bar tables (strategies, funnel) */
+.srow { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(56px, 1fr) 46px 58px 74px; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.srow.head { color: var(--muted); font-size: 12.5px; padding: 8px 0 6px; border-bottom-color: var(--line-strong); }
+.srow .r { text-align: right; font-variant-numeric: tabular-nums; }
+.track { height: 8px; background: var(--well); border-radius: 0 4px 4px 0; overflow: hidden; }
+.track > i { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+@media (max-width: 520px) { .srow { grid-template-columns: minmax(0, 1fr) 46px 58px 74px; } .srow > .track, .srow > .h-track { display: none; } }
+#funnel { max-width: 940px; }
+.fr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(70px, 30%) 96px; gap: 14px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.fr .count { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; line-height: 1.25; }
+.fr .share { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+.sugs { display: grid; gap: 10px; margin: 16px 0 4px; }
+.sug { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--well); }
+.sug p { margin: 2px 0 0; color: var(--ink-2); font-size: 13.5px; }
+.blocked { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.blocked > span { display: inline-flex; align-items: center; gap: 6px; }
+.sug .row { gap: 8px; }
+@media (max-width: 560px) { .sug { grid-template-columns: minmax(0, 1fr); } }
+.fr-group { font-size: 12.5px; font-weight: 600; color: var(--ink-2); padding: 18px 0 6px; border-bottom: 1px solid var(--line-strong); }
+@media (max-width: 520px) { .fr { grid-template-columns: minmax(0, 1fr) 90px; } .fr > .track { display: none; } }
+.cov { display: flex; height: 12px; gap: 2px; margin: 12px 0 8px; }
+.cov i { display: block; height: 100%; border-radius: 2px; }
+.legend.small { font-size: 12.5px; margin-top: 0; }
+
+/* Wallet and contracts */
+.vault { margin-top: 60px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: clamp(18px, 3vw, 28px); }
+.vault > header { display: flex; justify-content: space-between; align-items: flex-end; gap: 6px 16px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+.vault h2 { margin: 0; font-size: 18px; font-weight: 650; }
+.vgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 30px 40px; margin-top: 20px; }
+.vcol { display: grid; grid-template-columns: minmax(0, 1fr); gap: 30px; align-content: start; min-width: 0; }
+.ready { margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); display: grid; gap: 12px; }
+.ready h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.ready .checklist { grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 14px 24px; }
+.vblock { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-content: start; }
+.vblock h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.vblock .sub { margin: 0; }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 16px; margin: 0; font-size: 14px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.bal { display: flex; gap: 24px; flex-wrap: wrap; }
+.bal > div { display: grid; }
+.bal b { font-size: 21px; font-weight: 620; font-variation-settings: "wdth" 80; line-height: 1.2; }
+.bal span { font-size: 12.5px; color: var(--muted); }
+.wallets { display: flex; gap: 8px; flex-wrap: wrap; }
+.field { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.field input { font: inherit; font-size: 14px; width: 130px; min-height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--page); color: var(--ink); }
+.confirm { border: 1px solid var(--line-strong); border-radius: 10px; padding: 12px 14px; background: var(--page); display: grid; gap: 10px; font-size: 14px; }
+.confirm p { margin: 0; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.action { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; justify-items: start; }
+.status { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; color: var(--ink-2); }
+.status svg { margin-top: 3px; flex: none; }
+details.optional > summary { cursor: pointer; color: var(--muted); font-size: 13.5px; padding: 4px 0; }
+details.optional[open] > summary { margin-bottom: 8px; }
+.envline { display: flex; gap: 8px; align-items: center; justify-content: space-between; background: var(--well); border-radius: 8px; padding: 6px 6px 6px 10px; font-family: var(--mono); font-size: 12.5px; }
+.envline span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; user-select: all; }
+.vgrid > * { min-width: 0; }
+.checklist { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; font-size: 14px; }
+.checklist li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; }
+.checklist li svg { margin-top: 3px; }
+.checklist .why { display: block; color: var(--muted); font-size: 12.5px; }
+
+/* Safety and system */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 26px 44px; margin-top: 16px; }
+.safety-grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 26px 56px; margin-top: 16px; align-items: start; }
+@media (max-width: 960px) { .safety-grid { grid-template-columns: minmax(0, 1fr); } }
+.safety-grid h3 { margin: 0 0 8px; }
+.cols .kv { font-size: 13.5px; }
+.cols h3 { margin: 0 0 8px; }
+.caps td:first-child { min-width: 220px; }
+.caps td:nth-child(2), .caps td:nth-child(4), .caps td:nth-child(5), .caps td .chip { white-space: nowrap; }
+.yes { color: var(--good-ink); font-weight: 600; }
+.no { color: var(--muted); }
+.methods { list-style: none; padding: 0; margin: 6px 0 0; font-size: 13px; color: var(--ink-2); display: grid; gap: 2px; }
+.methods li { display: flex; justify-content: space-between; gap: 12px; }
+
+/* AI review */
+.review { position: relative; max-height: 24em; overflow: hidden; margin-top: 8px; }
+.review.open { max-height: none; }
+.review:not(.open)::after { content: ""; position: absolute; inset: auto 0 0 0; height: 5em; background: linear-gradient(transparent, var(--page)); }
+.md { font-size: 14.5px; line-height: 1.6; max-width: 78ch; }
+.md h3, .md h4, .md h5, .md h6 { font-size: 15px; margin: 18px 0 6px; font-weight: 650; }
+.md h3 { font-size: 17px; }
+.md p { margin: 8px 0; }
+.md ul, .md ol { margin: 6px 0; padding-left: 22px; }
+.md code { background: var(--well); padding: 1px 5px; border-radius: 4px; }
+.md pre { background: var(--well); padding: 12px; border-radius: 8px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md table { border-collapse: collapse; margin: 10px 0; font-size: 13.5px; display: block; overflow-x: auto; }
+.md th, .md td { border-bottom: 1px solid var(--line); padding: 5px 14px 5px 0; text-align: left; }
+.md blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--line-strong); color: var(--ink-2); }
+
+/* Tooltip, footer */
+.tip { position: fixed; z-index: 50; pointer-events: none; background: var(--tip-bg); color: var(--tip-ink); font-size: 13px; line-height: 1.45; padding: 8px 11px; border-radius: 8px; max-width: 290px; box-shadow: 0 6px 24px rgba(0, 0, 0, .22); display: grid; gap: 3px; }
+.tip b { font-weight: 650; }
+.tip .row { flex-wrap: nowrap; }
+.tip .dim { opacity: .75; }
+.foot { margin-top: 64px; padding-block: 20px 40px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); display: flex; gap: 6px 24px; flex-wrap: wrap; }
+.i-good { fill: var(--good); } .i-bad { fill: var(--bad); } .i-warn { fill: var(--warn); } .i-ours { fill: var(--ours); } .i-rival { fill: var(--rival); }
+.i-ring { fill: none; stroke: var(--muted); } .i-skip { stroke: var(--muted); } .i-off { fill: none; stroke: var(--line-strong); }
+@media (prefers-reduced-motion: reduce) { .bar.new, .frow.fresh { animation: none; } }
+</style>
+
+<a class="skiplink" href="#main">Skip to the dashboard</a>
+<header class="top">
+  <div class="wrap top-in">
+    <div class="brand"><span class="glyph" aria-hidden="true"><i></i><i></i><i></i></span>Base arb bot</div>
+    <span class="pill" id="health-pill">Connecting…</span>
+    <span class="pill" id="mode-pill">…</span>
+    <span class="status-line"><span id="block-label"></span><span id="age-label"></span></span>
+    <span class="spacer"></span>
+    <button class="btn ghost small" id="theme-btn" type="button">Dark theme</button>
+    <button class="btn primary small" id="wallet-btn" type="button">Connect wallet</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="banners" aria-live="polite"></div>
+  <main id="main">
+    <h1 class="sr">Base arb bot dashboard</h1>
+
+    <section class="hero" aria-labelledby="hero-h">
+      <div>
+        <h2 id="hero-h">Simulated profit today <span class="tag" id="hero-tag">Paper trading, not real money</span></h2>
+        <p class="big" id="hero-profit">–</p>
+        <p class="hero-sub" id="hero-sub">If every find had landed: –</p>
+        <p class="hero-note">Counts only opportunities that were still there one block later, after gas. Today starts at 00:00 UTC.</p>
+      </div>
+      <figure class="tape-fig">
+        <div class="tape" id="tape" role="img" aria-label="Recent Base blocks">
+          <div class="tape-track" id="tape-track"></div>
+          <div class="tape-empty" id="tape-empty">Waiting for blocks…</div>
+        </div>
+        <figcaption>
+          <div class="legend">
+            <span><i class="sw ours"></i>Your bot found an opportunity</span>
+            <span><i class="sw rival"></i>Another bot arbitraged</span>
+            <span><i class="sw quiet"></i>Quiet</span>
+            <span><i class="sw skip"></i>Skipped while busy</span>
+          </div>
+          <div class="tape-meta"><span>One bar per Base block, newest on the right</span><span id="tape-stats"></span></div>
+        </figcaption>
+      </figure>
+    </section>
+
+    <section class="figures" aria-label="Today at a glance">
+      <div class="fig" id="fig-found"><span class="fig-label">Found today</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
+      <div class="fig" id="fig-landed"><span class="fig-label">Still there next block</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
+      <div class="fig" id="fig-taken"><span class="fig-label">Taken by other bots</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
+      <div class="fig" id="fig-win"><span class="fig-label">Win rate</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
+      <div class="fig" id="fig-rpc"><span class="fig-label">RPC load</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
+    </section>
+
+    <div class="grid">
+      <section class="panel" aria-labelledby="opps-h">
+        <header><div><h2 id="opps-h">Opportunities</h2><p class="sub">Newest first. Select one to see its route, costs and what happened next.</p></div></header>
+        <div class="feed" id="feed" role="list"></div>
+      </section>
+      <section class="panel" aria-labelledby="days-h">
+        <header>
+          <div><h2 id="days-h">Simulated profit by day</h2><p class="sub">Last 14 days, UTC</p></div>
+          <button class="linkbtn" type="button" id="days-toggle">Show as table</button>
+        </header>
+        <div class="chart" id="chart-days"></div>
+        <h3>Win rate by strategy today</h3>
+        <div id="strategies"></div>
+        <div id="routes"></div>
+      </section>
+    </div>
+
+    <section class="panel full" aria-labelledby="funnel-h">
+      <header><div><h2 id="funnel-h">Why opportunities don't trade</h2><p class="sub">Where candidate routes drop out, counted since the bot started</p></div></header>
+      <div id="funnel"></div>
+    </section>
+
+    <section class="panel full" aria-labelledby="learn-h">
+      <header><div><h2 id="learn-h">What it has learned</h2><p class="sub">What keeps failing, where other bots win and what they pay, kept across restarts. It decides what gets tested, sent and bid.</p></div></header>
+      <div id="learning"></div>
+    </section>
+
+    <div class="grid">
+      <section class="panel" aria-labelledby="rivals-h">
+        <header><div><h2 id="rivals-h">Other bots today</h2><p class="sub">Arbitrage transactions on Base by other searchers</p></div></header>
+        <div id="rivals"></div>
+        <h3>When they trade</h3>
+        <div class="chart-tools"><p class="sub">MEV transactions per hour, UTC</p><button class="linkbtn" type="button" id="hourly-toggle">Show as table</button></div>
+        <div class="chart" id="chart-hourly"></div>
+      </section>
+      <section class="panel" aria-labelledby="liq-h">
+        <header><div><h2 id="liq-h">Aave liquidations</h2><p class="sub">Monitor only: profit here is an estimate, not a simulation</p></div></header>
+        <div id="liq"></div>
+      </section>
+    </div>
+
+    <section class="vault" id="wallet" aria-labelledby="wallet-h">
+      <header><div><h2 id="wallet-h">Wallet and contracts</h2><p class="sub">Every transaction opens in your wallet for you to approve. This page never sees a private key and can't change .env.</p></div></header>
+      <div id="vault-body"></div>
+    </section>
+
+    <section class="panel full" aria-labelledby="safety-h">
+      <header><div><h2 id="safety-h">Safety</h2><p class="sub">What the bot is allowed to do right now, and how far each part has been proven</p></div></header>
+      <div class="safety-grid">
+        <div id="safety"></div>
+        <div><h3>Built, tested, paper-enabled and live-allowed are separate steps</h3><div id="caps" class="scroll-x"></div></div>
+      </div>
+    </section>
+
+    <section class="panel full" aria-labelledby="system-h">
+      <header><div><h2 id="system-h">System</h2><p class="sub">RPC use, pool state and the settings in force</p></div></header>
+      <div id="system"></div>
+    </section>
+
+    <section class="panel full" aria-labelledby="review-h">
+      <header><div><h2 id="review-h">Latest AI review</h2><p class="sub">Written each morning by the scheduled Opus review. Advice only: it never changes the bot.</p></div></header>
+      <div id="review"></div>
+    </section>
+  </main>
+  <footer class="foot" id="foot"></footer>
+</div>
+<div class="tip" id="tip" role="tooltip" hidden></div>
+
+<script>
+(() => {
+  "use strict";
+  const BOOT = window.__BOT__ || null;
+  // Three ways this page runs: served by the bot on your PC (a per-run token),
+  // as the online copy on Cloudflare (signed in through Cloudflare Access),
+  // or as a preview with example data.
+  const CLOUD = !!(BOOT && BOOT.mode === "cloud");
+  const TOKEN = BOOT && typeof BOOT.token === "string" && BOOT.token.length > 10 ? BOOT.token : "";
+  const LIVE = CLOUD || !!TOKEN;
+  const EXPLORER = "https://basescan.org";
+  const BASE_CHAIN = "0x2105";
+  const TAPE_MAX = 90;
+  const BAR_STEP = 9; // 6px bar + 3px gap
+  const WETH = "0x4200000000000000000000000000000000000006";
+  const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+  const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const $ = (id) => document.getElementById(id);
+
+  // ---------------------------------------------------------------- DOM helpers
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "class") el.className = v;
+        else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+        else el.setAttribute(k, v === true ? "" : String(v));
+      }
+    }
+    append(el, kids);
+    return el;
+  }
+  function append(el, kids) {
+    for (const kid of kids.flat(Infinity)) {
+      if (kid === null || kid === undefined || kid === false || kid === "") continue;
+      el.append(kid instanceof Node ? kid : String(kid));
+    }
+    return el;
+  }
+  const SVGNS = "http://www.w3.org/2000/svg";
+  function sv(tag, attrs, ...kids) {
+    const el = document.createElementNS(SVGNS, tag);
+    if (attrs) for (const [k, v] of Object.entries(attrs)) if (v !== null && v !== undefined) el.setAttribute(k, String(v));
+    for (const kid of kids.flat()) if (kid !== null && kid !== undefined) el.append(kid instanceof Node ? kid : String(kid));
+    return el;
+  }
+  function clear(el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+    return el;
+  }
+  const empty = (...text) => h("div", { class: "empty" }, ...text);
+
+  // ---------------------------------------------------------------- formatting
+  const isAddr = (a) => typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a);
+  const isHash = (x) => typeof x === "string" && /^0x[0-9a-fA-F]{64}$/.test(x);
+  const fin = (x) => typeof x === "number" && isFinite(x);
+  function usd(x, dp) {
+    if (!fin(x)) return "–";
+    const a = Math.abs(x);
+    const d = dp !== undefined ? dp : a >= 100 ? 0 : 2;
+    return (x < 0 ? "−$" : "$") + a.toLocaleString("en-GB", { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  const usdFine = (x) => usd(x, fin(x) && Math.abs(x) < 0.1 ? 4 : 2);
+  const int = (x) => (fin(x) ? Math.round(x).toLocaleString("en-GB") : "–");
+  const pct = (x) => (fin(x) ? `${Math.round(x * 100)}%` : "–");
+  function share(n, total) {
+    if (!total) return "–";
+    const p = (n / total) * 100;
+    if (n === 0) return "0%";
+    if (p >= 10) return `${Math.round(p)}%`;
+    if (p >= 1) return `${p.toFixed(1)}%`;
+    if (p >= 0.01) return `${p.toFixed(2)}%`;
+    return "<0.01%";
+  }
+  const shortAddr = (a) => (isAddr(a) ? `${a.slice(0, 6)}…${a.slice(-4)}` : a ? String(a).slice(0, 12) : "–");
+  const plural = (n, one, many) => (n === 1 ? one : many);
+  function dur(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s} s`;
+    const m = Math.round(s / 60);
+    if (m < 90) return `${m} min`;
+    const hr = Math.floor(m / 60);
+    return hr < 48 ? `${hr} h ${m % 60} min` : `${Math.round(hr / 24)} days`;
+  }
+  const ago = (ms) => (ms < 4000 ? "just now" : `${dur(ms)} ago`);
+  const clock = (iso) => {
+    const d = new Date(iso);
+    return isNaN(d) ? "–" : d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  };
+  const dateTime = (iso) => {
+    const d = new Date(iso);
+    return isNaN(d) ? "–" : d.toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  };
+  const utcDay = (t) => new Date(t).toISOString().slice(0, 10);
+  const dayLabel = (day) => new Date(day + "T00:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+  function fmtUnits(v, dec) {
+    if (v === null || v === undefined) return "–";
+    let x;
+    try {
+      x = BigInt(v);
+    } catch {
+      return "–";
+    }
+    const neg = x < 0n;
+    if (neg) x = -x;
+    const base = 10n ** BigInt(dec);
+    const whole = x / base;
+    let frac = (x % base).toString().padStart(dec, "0");
+    let digits = whole >= 1000n ? 2 : whole >= 1n ? 4 : 6;
+    if (whole === 0n) {
+      const lead = frac.search(/[1-9]/);
+      if (lead >= 0) digits = Math.min(dec, Math.max(digits, lead + 3));
+    }
+    frac = frac.slice(0, digits).replace(/0+$/, "");
+    return (neg ? "−" : "") + whole.toLocaleString("en-GB") + (frac ? "." + frac : "");
+  }
+  const feeText = (ppm) => `${+(ppm / 10000).toPrecision(3)}%`;
+  const DEX = { "uniswap-v2": "Uniswap V2", "uniswap-v3": "Uniswap V3", "sushiswap-v2": "SushiSwap", baseswap: "BaseSwap", aerodrome: "Aerodrome", slipstream: "Slipstream", "slipstream-gc": "Slipstream", "slipstream-v3": "Slipstream" };
+  const dexName = (id) => DEX[id] || String(id || "?");
+  const KIND = { "classic V2 two-pool": "Two pools, V2-style", "concentrated-liquidity two-pool": "Two pools, concentrated liquidity", "triangular / multi-hop": "Triangular (three pools)" };
+  const hostOf = (u) => {
+    try {
+      return new URL(u).host;
+    } catch {
+      return String(u || "");
+    }
+  };
+  function addrLink(a, label) {
+    if (!isAddr(a)) return h("span", { class: "mono" }, label || "–");
+    return h("a", { href: `${EXPLORER}/address/${a}`, target: "_blank", rel: "noopener noreferrer", class: "mono" }, label || shortAddr(a));
+  }
+  function txLink(x, label) {
+    if (!isHash(x)) return h("span", null, label || "");
+    return h("a", { href: `${EXPLORER}/tx/${x}`, target: "_blank", rel: "noopener noreferrer" }, label || `${x.slice(0, 10)}…`);
+  }
+  /** The bot's own wallet or trading contract: a trade by either is yours, not another bot's. */
+  function isOurs(a) {
+    const ad = S.state?.addresses || {};
+    return isAddr(a) && [ad.bot, ad.executor].some((y) => isAddr(y) && y.toLowerCase() === a.toLowerCase());
+  }
+
+  // ---------------------------------------------------------------- icons
+  function icon(kind) {
+    const s = sv("svg", { width: 14, height: 14, viewBox: "0 0 14 14", "aria-hidden": "true" });
+    if (kind === "good") s.append(sv("circle", { cx: 7, cy: 7, r: 7, class: "i-good" }), sv("path", { d: "M3.8 7.3l2.1 2.1 4.3-4.6", fill: "none", stroke: "#fff", "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+    else if (kind === "bad") s.append(sv("circle", { cx: 7, cy: 7, r: 7, class: "i-bad" }), sv("path", { d: "M4.6 4.6l4.8 4.8M9.4 4.6l-4.8 4.8", stroke: "#fff", "stroke-width": 1.8, "stroke-linecap": "round" }));
+    else if (kind === "warn") s.append(sv("path", { d: "M7 .8l6.6 12H.4z", class: "i-warn" }), sv("path", { d: "M7 5v3.6", stroke: "#3a2600", "stroke-width": 1.7, "stroke-linecap": "round" }), sv("circle", { cx: 7, cy: 10.7, r: 0.95, fill: "#3a2600" }));
+    else if (kind === "ours") s.append(sv("circle", { cx: 7, cy: 7, r: 5, class: "i-ours" }));
+    else if (kind === "rival") s.append(sv("circle", { cx: 7, cy: 7, r: 5, class: "i-rival" }));
+    else if (kind === "wait") s.append(sv("circle", { cx: 7, cy: 7, r: 5.2, class: "i-ring", "stroke-width": 1.6, "stroke-dasharray": "2.4 2" }));
+    else if (kind === "off") s.append(sv("circle", { cx: 7, cy: 7, r: 5.2, class: "i-off", "stroke-width": 1.6 }));
+    else s.append(sv("path", { d: "M3 7h8", class: "i-skip", "stroke-width": 1.8, "stroke-linecap": "round" }));
+    return s;
+  }
+  const chip = (kind, text) => h("span", { class: "chip" }, icon(kind), text);
+  const statusLine = (kind, ...text) => h("div", { class: "status", role: kind === "bad" ? "alert" : null }, icon(kind), h("span", null, ...text));
+
+  // ---------------------------------------------------------------- state
+  const S = {
+    state: null, summary: null, recent: null, contracts: null, wallet: null, review: null,
+    blocks: [], feed: [], open: new Set(), lastBlockSeen: 0, sse: "connecting", stale: false,
+    stopConfirm: false, stopError: null, tables: {}, reviewOpen: false,
+    mirror: null, stopRequest: null, waiting: false, connLost: false, skew: 0,
+  };
+  const W = { providers: new Map(), detail: null, provider: null, account: null, chainId: null, error: null, actions: {}, topUp: "0.002", deployed: null, deployedArb: null, deployedLiq: null };
+  try {
+    const d = JSON.parse(localStorage.getItem("bab.deployed") || "null");
+    if (d && isAddr(d.address)) W.deployed = d.address;
+    const a = JSON.parse(localStorage.getItem("bab.deployedArb") || "null");
+    if (a && isAddr(a.address)) W.deployedArb = a.address;
+    const q = JSON.parse(localStorage.getItem("bab.deployedLiq") || "null");
+    if (q && isAddr(q.address)) W.deployedLiq = q.address;
+  } catch {
+    /* storage unavailable */
+  }
+
+  function todayRow() {
+    const sm = S.summary;
+    if (!sm) return null;
+    return sm.days.find((d) => d.day === sm.day) || null;
+  }
+  function ensureToday() {
+    const sm = S.summary;
+    if (!sm || sm.day !== utcDay(Date.now())) return null;
+    let t = sm.days.find((d) => d.day === sm.day);
+    if (!t) {
+      t = { day: sm.day, found: 0, persisted: 0, taken: 0, closed: 0, pending: 0, simMismatches: 0, realisticNetUsd: 0, optimisticNetUsd: 0 };
+      sm.days.unshift(t);
+    }
+    return t;
+  }
+  const verified = (sim) => sim === "executor-ok" || sim === "quoter-ok";
+
+  // ---------------------------------------------------------------- API
+  async function api(path, method, body) {
+    const headers = {};
+    if (TOKEN) headers["x-bot-token"] = TOKEN;
+    if (method === "POST") headers["x-dashboard"] = "1";
+    if (body !== undefined) headers["content-type"] = "application/json";
+    const res = await fetch(path, { method: method || "GET", headers, cache: "no-store", credentials: "same-origin", ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    if (res.status === 401 && TOKEN) {
+      markStale();
+      throw new Error("session ended");
+    }
+    if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+    if (!(res.headers.get("content-type") || "").includes("application/json")) throw new Error("not signed in");
+    return res.json();
+  }
+  /** /api/state, which the online copy answers with { waiting } until your PC's first push. */
+  function loadState(full) {
+    return api("/api/state").then((st) => {
+      S.mirror = st.mirror || null;
+      S.stopRequest = st.stopRequest || null;
+      if (st.waiting) {
+        S.waiting = true;
+        renderHeader();
+        renderBanners();
+        tapeMeta();
+        return;
+      }
+      const wasWaiting = S.waiting;
+      const first = wasWaiting || !S.state;
+      S.waiting = false;
+      applyState(st, full || first);
+      if (wasWaiting) {
+        // The online copy just got its first data from your PC: load the rest too.
+        loadRecent();
+        loadSummary();
+        loadContracts();
+        loadReview();
+        refreshWalletData();
+      }
+    });
+  }
+  function markStale() {
+    if (S.stale) return;
+    S.stale = true;
+    renderBanners();
+    renderHeader();
+  }
+  const loadSummary = () => api("/api/summary").then((x) => { S.summary = x; renderSummaryParts(); }).catch(() => {});
+  const loadRecent = () => api("/api/recent").then((x) => { S.recent = x; S.feed = x.opps || []; renderFeed(); renderRivals(); renderLiq(); }).catch(() => {});
+  const loadContracts = () => api("/api/contracts").then((x) => { S.contracts = x; renderWallet(); }).catch(() => {});
+  const loadReview = () => api("/api/review").then((x) => { S.review = x; renderReview(); }).catch(() => {});
+
+  function connectEvents() {
+    const es = new EventSource(`/api/events?t=${encodeURIComponent(TOKEN)}`);
+    const on = (type, fn) => es.addEventListener(type, (e) => {
+      try {
+        fn(JSON.parse(e.data));
+      } catch (err) {
+        console.warn("bad event", type, err);
+      }
+    });
+    on("hello", (st) => {
+      S.sse = "up";
+      applyState(st, true);
+      loadRecent(); // rebuild the feed after a reconnect so nothing is doubled or missed
+    });
+    on("block", onBlock);
+    on("opp", onOpp);
+    on("outcome", onOutcome);
+    on("liq", onLiq);
+    on("liq-outcome", onLiqOutcome);
+    on("stop", onStop);
+    es.onerror = () => {
+      S.sse = "down";
+      renderHeader();
+      api("/api/state").then((st) => applyState(st, false)).catch(() => {});
+    };
+  }
+
+  /** The online copy has no event stream: poll for what happened since the last poll. */
+  function startPolling() {
+    let since = 0;
+    let fails = 0;
+    const loop = async () => {
+      if (!document.hidden && !S.stale) {
+        try {
+          const r = await api(`/api/live?since=${since}`);
+          fails = 0;
+          S.connLost = false;
+          S.sse = "up";
+          S.skew = Date.parse(r.now) - Date.now() || 0;
+          S.mirror = r.mirror;
+          S.stopRequest = r.stopRequest;
+          if (r.stop && S.state) S.state.stop = r.stop;
+          if (r.reset) {
+            loadState(true).catch(() => {});
+            loadRecent();
+          } else if (since > 0) {
+            for (const e of r.events) applyEvent(e);
+          }
+          since = r.seq;
+          if (S.waiting && r.mirror && r.mirror.lastPushAt) loadState(true).catch(() => {});
+        } catch {
+          fails++;
+          S.sse = "down";
+          if (fails >= 3) S.connLost = true;
+        }
+        renderHeader();
+        renderBanners();
+      }
+      setTimeout(loop, 3000);
+    };
+    loop();
+  }
+  function applyEvent(e) {
+    if (e.type === "block") onBlock(e.data);
+    else if (e.type === "opp") onOpp(e.data);
+    else if (e.type === "outcome") onOutcome(e.data);
+    else if (e.type === "liq") onLiq(e.data);
+    else if (e.type === "liq-outcome") onLiqOutcome(e.data);
+    else if (e.type === "stop") onStop(e.data);
+    else if (e.type === "live-status") loadState(false).catch(() => {});
+  }
+
+  // ---------------------------------------------------------------- live events
+  function onLiq(l) {
+    if (!S.recent) return;
+    S.recent.liq = [{ ...l, outcome: null }, ...(S.recent.liq || [])].slice(0, 20);
+    renderLiq();
+  }
+  function onLiqOutcome(o) {
+    const l = S.recent?.liq?.find((x) => x.id === o.id);
+    if (!l) return;
+    l.outcome = o.status;
+    l.takenBy = o.takenBy;
+    renderLiq();
+  }
+  function onStop(st) {
+    if (!S.state) return;
+    S.state.stop = st;
+    renderBanners();
+    renderSafety();
+    renderWallet();
+  }
+  function onBlock(b) {
+    const last = S.blocks[S.blocks.length - 1];
+    if (last && b.n <= last.n) return;
+    S.blocks.push(b);
+    if (S.blocks.length > TAPE_MAX) S.blocks.splice(0, S.blocks.length - TAPE_MAX);
+    S.lastBlockSeen = Date.now();
+    tapePush(b, last);
+    renderHeader();
+  }
+  function onOpp(o) {
+    if (S.feed.some((x) => x.id === o.id)) return;
+    S.feed.unshift(o);
+    if (S.feed.length > 40) S.feed.length = 40;
+    const box = $("feed");
+    if (box.querySelector(".empty")) clear(box);
+    box.prepend(feedRow(o, true));
+    while (box.children.length > 40) box.removeChild(box.lastChild);
+    const t = ensureToday();
+    if (t) {
+      t.found++;
+      t.pending++;
+      t.optimisticNetUsd += o.netUsd || 0;
+      renderHero();
+      renderFigures();
+    }
+  }
+  function onOutcome(out) {
+    const o = S.feed.find((x) => x.id === out.id);
+    if (o && o.outcome) return;
+    if (o) {
+      o.outcome = out;
+      updateRow(o);
+    }
+    const t = ensureToday();
+    if (t) {
+      t.pending = Math.max(0, t.pending - 1);
+      if (t[out.status] !== undefined) t[out.status]++;
+      if (o && verified(o.sim)) t.realisticNetUsd += out.realisticNetUsd || 0;
+      renderHero();
+      renderFigures();
+    }
+  }
+
+  function applyState(st, full) {
+    S.state = st;
+    if (st.mirror) S.mirror = st.mirror;
+    if (st.stopRequest !== undefined) S.stopRequest = st.stopRequest;
+    if (full || !S.blocks.length) {
+      S.blocks = (st.blocks || []).slice(-TAPE_MAX);
+      const last = S.blocks[S.blocks.length - 1];
+      if (last) S.lastBlockSeen = Date.now() - Math.max(0, Date.parse(st.now) - last.at);
+      renderTape();
+    }
+    renderHeader();
+    renderBanners();
+    renderFigures();
+    renderFunnel();
+    renderLearning();
+    renderSafety();
+    renderSystem();
+    renderCaps();
+    renderLiq();
+    renderWallet();
+    renderFooter();
+  }
+
+  // ---------------------------------------------------------------- header, banners
+  function countSkipped(blocks) {
+    let n = 0;
+    for (let i = 1; i < blocks.length; i++) n += Math.max(0, blocks[i].n - blocks[i - 1].n - 1);
+    return n;
+  }
+  /** How long since your PC last pushed to the online copy (corrected for clock differences). */
+  const pushAge = () => (S.mirror && S.mirror.lastPushAt ? Date.now() + S.skew - Date.parse(S.mirror.lastPushAt) : Infinity);
+  function health() {
+    const st = S.state;
+    if (!LIVE) return { icon: "good", label: "Example data" };
+    if (S.stale) return { icon: "bad", label: "Reload needed" };
+    if (CLOUD && S.connLost) return { icon: "bad", label: "Connection lost" };
+    if (CLOUD && S.waiting) return { icon: "wait", label: "Waiting for your PC" };
+    if (!st) return { icon: "wait", label: "Connecting…" };
+    if (CLOUD && pushAge() > 30000) return { icon: "bad", label: `PC offline for ${dur(pushAge())}`, detail: "No update from your PC. The bot may have stopped, or the PC is asleep or offline." };
+    if (!st.running) return { icon: "off", label: CLOUD ? "Bot stopped on your PC" : "Bot not running here" };
+    if (S.sse === "down") return { icon: "warn", label: "Reconnecting…" };
+    if (!S.blocks.length) return { icon: "wait", label: "Waiting for the first block" };
+    const age = Date.now() - S.lastBlockSeen;
+    if (age > 60000) return { icon: "bad", label: `Stalled: no block for ${dur(age)}`, detail: "The RPC may be down or rate-limiting the bot. It keeps retrying." };
+    const recent = S.blocks.slice(-30);
+    const skipped = countSkipped(recent);
+    const slow = recent.filter((b) => b.ms > 2000).length;
+    if (age > 12000 || skipped > 5 || slow > 10) return { icon: "warn", label: "Lagging", detail: `${skipped} blocks skipped and ${slow} slower than 2 s, out of the last 30` };
+    if (st.rpc && st.rpc.onPrimary === false) return { icon: "warn", label: "On backup RPC", detail: "The main RPC kept failing; the bot tries it again after 5 minutes" };
+    return { icon: "good", label: "Healthy", detail: `Last block ${ago(age)}. ${skipped} skipped out of the last 30.` };
+  }
+  function renderHeader() {
+    const hs = health();
+    const hp = clear($("health-pill"));
+    append(hp, [icon(hs.icon), hs.label]);
+    hp.title = hs.detail || "";
+    const st = S.state;
+    const mp = clear($("mode-pill"));
+    if (!st) mp.append("…");
+    else if (st.mode === "live" && st.safety?.live?.blocked) {
+      mp.className = "pill";
+      append(mp, [icon("warn"), "Live: waiting for setup"]);
+    } else if (st.mode === "live") {
+      mp.className = "pill live";
+      append(mp, [icon("bad"), "Live: real transactions"]);
+    } else {
+      mp.className = "pill";
+      append(mp, [icon("ours"), "Paper mode"]);
+    }
+    const last = S.blocks[S.blocks.length - 1];
+    clear($("block-label"));
+    if (last) append($("block-label"), ["Block ", h("b", { class: "num" }, int(last.n))]);
+    $("age-label").textContent = last && S.lastBlockSeen && (!LIVE || st?.running) ? ago(Date.now() - S.lastBlockSeen) : "";
+    $("wallet-btn").textContent = W.account ? shortAddr(W.account) : "Connect wallet";
+  }
+  function banner(kind, body, ...actions) {
+    return h("div", { class: `banner ${kind}` }, h("div", { class: "grow" }, ...body), ...actions);
+  }
+  function renderBanners() {
+    const box = clear($("banners"));
+    const st = S.state;
+    if (!LIVE) box.append(banner("", [h("b", null, "Example data. "), "This preview isn't connected to a bot. While your bot runs, its own dashboard is at ", h("code", null, "http://localhost:8787"), " on your PC, with your real numbers and your wallet."]));
+    if (S.stale) box.append(banner("bad", [h("b", null, "The bot restarted, "), "so this page's session ended."], h("button", { class: "btn small", type: "button", onclick: () => location.reload() }, "Reload")));
+    if (CLOUD && S.connLost) box.append(banner("bad", [h("b", null, "Lost the connection to this dashboard. "), "If your Cloudflare sign-in expired, reloading signs you in again."], h("button", { class: "btn small", type: "button", onclick: () => location.reload() }, "Reload")));
+    if (CLOUD && S.waiting) box.append(banner("", [h("b", null, "Waiting for your PC's first update. "), "Add CLOUD_URL and CLOUD_TOKEN to the bot's .env and restart it. The steps are in cloud/README.md."]));
+    if (CLOUD && st && !S.waiting && pushAge() > 30000) box.append(banner("warn", [h("b", null, `No update from your PC for ${dur(pushAge())}. `), "The bot may have stopped, or the PC is asleep or offline. What you see is from ", S.mirror?.lastPushAt ? clock(S.mirror.lastPushAt) : "earlier", "."]));
+    if (LIVE && st && !st.running) box.append(banner("", CLOUD ? ["The bot on your PC has stopped. These are its last numbers."] : ["The bot loop isn't running in this window, so there are no live blocks. Showing saved results. Start the bot with ", h("code", null, "node dist/main.js run"), "."]));
+    if (CLOUD && S.stopRequest && !st?.stop?.present) box.append(banner("warn", [h("b", null, `Stop requested at ${clock(S.stopRequest.requestedAt)}. `), pushAge() > 30000 ? "Your PC will stop sending as soon as it's back online." : "Your PC stops sending on its next update, normally within a few seconds."]));
+    if (st?.stop?.present) box.append(banner("bad", [h("b", null, "Sending is stopped. "), st.stop.reason ? `${st.stop.reason}. ` : "", "To resume, find out why, then delete the STOP file in the data folder yourself."]));
+    const waitingLive = st?.mode === "live" && st.safety?.live?.blocked;
+    if (waitingLive && !st.stop?.present) box.append(banner("warn", [h("b", null, "Live mode is waiting, nothing is being sent. "), st.safety.live.blocked, " The bot re-checks every minute; see Live setup below."]));
+    if (st?.mode === "live" && !waitingLive && !st.stop?.present && !S.stopRequest) box.append(banner("warn", [h("b", null, "Live mode: "), "the bot sends real transactions with real money."], stopControl()));
+  }
+  function stopControl() {
+    if (!S.stopConfirm) return h("button", { class: "btn danger small", type: "button", onclick: () => { S.stopConfirm = true; renderBanners(); renderSafety(); } }, "Stop sending");
+    return h("div", { class: "row" },
+      h("span", null, "Stop all new transactions? Ones already sent still finish."),
+      h("button", { class: "btn danger small", type: "button", onclick: doStop }, "Yes, stop sending"),
+      h("button", { class: "btn ghost small", type: "button", onclick: () => { S.stopConfirm = false; renderBanners(); renderSafety(); } }, "Cancel"),
+      S.stopError ? statusLine("bad", S.stopError) : null);
+  }
+  async function doStop() {
+    try {
+      const r = await api("/api/stop", "POST");
+      S.stopConfirm = false;
+      S.stopError = null;
+      if (r.queued) S.stopRequest = r.stopRequest; // online copy: your PC picks it up on its next push
+      else if (S.state) S.state.stop = r;
+    } catch (e) {
+      S.stopError = `Couldn't stop from here (${e.message}). Create a file named STOP in the bot's data folder instead.`;
+    }
+    renderBanners();
+    renderSafety();
+    renderWallet();
+  }
+
+  // ---------------------------------------------------------------- hero, figures
+  function setMoney(el, x) {
+    clear(el);
+    if (!fin(x)) {
+      el.append("–");
+      return;
+    }
+    if (x < 0) el.append("−");
+    append(el, [h("span", { class: "cur" }, "$"), Math.abs(x).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })]);
+  }
+  function renderHero() {
+    if (!LIVE) $("hero-tag").textContent = "Example numbers, not your bot";
+    const t = todayRow();
+    const zero = S.summary && !t;
+    setMoney($("hero-profit"), t ? t.realisticNetUsd : zero ? 0 : null);
+    $("hero-sub").textContent = `If every find had landed: ${t ? usd(t.optimisticNetUsd) : zero ? usd(0) : "–"}`;
+  }
+  function fig(id, value, ...sub) {
+    const el = $(id);
+    el.querySelector(".fig-value").textContent = value;
+    append(clear(el.querySelector(".fig-sub")), sub);
+  }
+  function renderFigures() {
+    const t = todayRow() || (S.summary ? { found: 0, persisted: 0, taken: 0, closed: 0, pending: 0 } : null);
+    const st = S.state;
+    const decided = t ? t.persisted + t.taken + t.closed : 0;
+    fig("fig-found", t ? int(t.found) : "–", h("span", null, t && t.pending ? `${int(t.pending)} still being re-checked` : `each over ${usd(st?.settings?.minProfitUsd ?? 0.25)} after gas`));
+    fig("fig-landed", t ? int(t.persisted) : "–", h("span", null, decided ? `of ${int(decided)} re-checked` : "none re-checked yet"));
+    const top = S.summary?.today?.takers?.[0];
+    fig("fig-taken", t ? int(t.taken) : "–", h("span", null, top ? `most often ${shortAddr(top.bot)}` : "a block after we found it"));
+    fig("fig-win", decided ? pct(t.persisted / decided) : "–", h("span", null, "still there, of all re-checked"));
+    const u = st?.rpc;
+    if (!u) {
+      fig("fig-rpc", "–", h("span", null, st && !st.running ? "bot not running here" : ""));
+    } else {
+      const mins = Math.max(1, (Date.parse(st.now) - Date.parse(u.since)) / 60000);
+      const host = hostOf(u.activeEndpoint);
+      const cuDay = u.alchemyCuPerDay / 1e6;
+      const onAlchemy = /alchemy/i.test(host);
+      const over = onAlchemy && u.alchemyCuPerDay > 1e6;
+      const limited = u.rateLimited > 0;
+      fig(
+        "fig-rpc",
+        `${int(u.requests / mins)}/min`,
+        over || limited ? icon("warn") : onAlchemy ? icon("good") : null,
+        h("span", { title: host }, limited ? `${int(u.rateLimited)} rate-limited ${plural(u.rateLimited, "answer", "answers")}` : onAlchemy ? `≈${cuDay.toFixed(1)}M CU a day ${over ? "(free plan ≈1M)" : "(inside the free plan)"}` : `≈${cuDay.toFixed(1)}M CU a day if on Alchemy`),
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------- block tape
+  function itemKind(it) {
+    if (it.skip) return "skip";
+    if (it.opps > 0) return it.arbs > 0 ? "both" : "ours";
+    return it.arbs > 0 ? "rival" : "quiet";
+  }
+  function barEl(it, animate) {
+    const k = itemKind(it);
+    const el = h("div", { class: `bar k-${k}${animate && !reduceMotion ? " new" : ""}` });
+    if (k === "both") append(el, [h("i", { class: "seg rival" }), h("i", { class: "seg ours" })]);
+    else el.append(h("i", { class: `seg ${k}` }));
+    el._item = it;
+    return el;
+  }
+  function skips(prev, b) {
+    const out = [];
+    if (!prev) return out;
+    const gap = b.n - prev.n - 1;
+    for (let k = 0; k < Math.min(gap, 6); k++) out.push({ skip: true, n: prev.n + 1 + k, gap });
+    return out;
+  }
+  function renderTape() {
+    const track = clear($("tape-track"));
+    const items = [];
+    S.blocks.forEach((b, i) => items.push(...skips(S.blocks[i - 1], b), b));
+    for (const it of items.slice(-TAPE_MAX)) track.append(barEl(it, false));
+    tapeMeta();
+  }
+  function tapePush(b, prev) {
+    const track = $("tape-track");
+    for (const it of [...skips(prev, b), b]) track.append(barEl(it, true));
+    while (track.children.length > TAPE_MAX) track.removeChild(track.firstChild);
+    tapeMeta();
+  }
+  function tapeMeta() {
+    const items = [...$("tape-track").children].map((el) => el._item);
+    const blocks = items.filter((x) => !x.skip);
+    const ours = blocks.filter((b) => b.opps > 0).length;
+    const rival = blocks.filter((b) => b.arbs > 0).length;
+    const skipped = items.length - blocks.length;
+    const emptyEl = $("tape-empty");
+    emptyEl.hidden = items.length > 0;
+    if (!items.length) emptyEl.textContent = CLOUD && S.waiting ? "Waiting for your PC…" : LIVE && S.state && !S.state.running ? (CLOUD ? "The bot on your PC has stopped." : "The bot loop isn't running in this window.") : "Waiting for blocks…";
+    const text = items.length ? `${ours} with your finds, ${rival} with rival arbitrage${skipped ? `, ${skipped} skipped` : ""}` : "";
+    $("tape-stats").textContent = text;
+    $("tape").setAttribute("aria-label", items.length ? `Last ${blocks.length} Base blocks: ${text}.` : "No blocks yet");
+  }
+  let hotBar = null;
+  function markTape(el) {
+    if (hotBar && hotBar !== el) hotBar.classList.remove("hot");
+    hotBar = el;
+    if (el) el.classList.add("hot");
+  }
+  function tapeTip(it) {
+    if (it.skip) return [h("b", null, `Block ${int(it.n)}`), h("div", null, "Skipped: the bot was still busy with the block before")];
+    return [
+      h("b", null, `Block ${int(it.n)}`),
+      h("div", { class: "row" }, icon("ours"), it.opps ? `${it.opps} ${plural(it.opps, "opportunity", "opportunities")}, best ${usd(it.bestNetUsd)}` : "Nothing for your bot"),
+      h("div", { class: "row" }, icon("rival"), it.arbs ? `${it.arbs} ${plural(it.arbs, "arbitrage", "arbitrages")} by other bots` : "No arbitrage by other bots"),
+      h("div", { class: "dim" }, `Processed in ${int(it.ms)} ms, gas about ${usdFine(it.gasUsd)} a trade`),
+    ];
+  }
+  function onTapePointer(ev) {
+    const track = $("tape-track");
+    const n = track.children.length;
+    if (!n) return;
+    const r = track.getBoundingClientRect();
+    const fromRight = Math.floor((r.right - ev.clientX) / BAR_STEP);
+    const el = fromRight >= 0 ? track.children[n - 1 - fromRight] : null;
+    if (!el) {
+      hideTip();
+      markTape(null);
+      return;
+    }
+    markTape(el);
+    showTip(ev.clientX, r.top + 8, tapeTip(el._item));
+  }
+
+  // ---------------------------------------------------------------- tooltip
+  function showTip(x, y, content) {
+    const tip = $("tip");
+    append(clear(tip), [content]);
+    tip.hidden = false;
+    const w = tip.offsetWidth;
+    const hh = tip.offsetHeight;
+    const left = Math.min(Math.max(8, x - w / 2), window.innerWidth - w - 8);
+    let top = y - hh - 12;
+    if (top < 8) top = y + 20;
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+  function hideTip() {
+    $("tip").hidden = true;
+  }
+
+  // ---------------------------------------------------------------- opportunities
+  function outcomeChip(o) {
+    const out = o.outcome;
+    if (!out) return chip("wait", "Re-checking next block");
+    if (out.status === "persisted") return chip("good", `Still there, ${usd(out.realisticNetUsd)}`);
+    if (out.status === "taken") return isOurs(out.takenBy) ? chip("ours", "Your bot traded it") : chip("rival", `Taken by ${shortAddr(out.takenBy)}`);
+    return chip("skip", "Closed by normal trading");
+  }
+  function feedRow(o, fresh) {
+    const open = S.open.has(o.id);
+    const row = h("div", { class: `frow${fresh && !reduceMotion ? " fresh" : ""}`, role: "listitem", "data-id": o.id });
+    row.append(
+      h("button", { class: "frow-btn", type: "button", "aria-expanded": String(open), onclick: () => toggleRow(o) },
+        h("span", { class: "f-time num" }, clock(o.foundAt)),
+        h("span", { class: "f-pair" }, o.pair || "?"),
+        h("span", { class: "f-net num" }, usd(o.netUsd)),
+        h("span", { class: "f-route" }, h("span", null, (o.via || []).map(dexName).join(" › ")), o.stage === "flashblock" ? h("span", { class: "minitag" }, "Flashblock") : null, o.hops >= 3 ? h("span", { class: "minitag" }, `${o.hops} hops`) : null),
+        h("span", { class: "f-out" }, outcomeChip(o)),
+      ),
+    );
+    if (open) row.append(detailView(o));
+    return row;
+  }
+  function toggleRow(o) {
+    if (S.open.has(o.id)) S.open.delete(o.id);
+    else S.open.add(o.id);
+    updateRow(o, true);
+  }
+  function updateRow(o, focus) {
+    const old = $("feed").querySelector(`[data-id="${CSS.escape(o.id)}"]`);
+    if (!old) return;
+    const row = feedRow(o, false);
+    old.replaceWith(row);
+    if (focus) row.querySelector(".frow-btn").focus({ preventScroll: true });
+  }
+  function history(o) {
+    const steps = [];
+    const fb = o.stage === "flashblock";
+    steps.push(["good", `Found on block ${int(o.block)}${fb ? `, from a Flashblock${fin(o.msIntoBlock) ? ` ${int(o.msIntoBlock)} ms after the block` : ""}` : ""}`]);
+    steps.push(["good", `Priced: ${usd(o.profitUsd)} after swap fees, minus ${usdFine(o.gasUsd)} gas, leaves ${usd(o.netUsd)}`]);
+    const simText = {
+      "executor-ok": ["good", "On-chain check passed: simulated through the contract at that block"],
+      "quoter-ok": ["good", "On-chain check passed: every DEX's quoter agreed with the bot's maths"],
+      "executor-revert": ["bad", "On-chain check failed: the simulation reverted"],
+      "quoter-mismatch": ["bad", "On-chain check failed: a DEX quoter disagreed with the bot's maths"],
+      local: ["skip", "Not checked on-chain: local maths only"],
+    }[o.sim] || ["skip", `On-chain check: ${o.sim}`];
+    steps.push([simText[0], simText[1] + (o.simDetail ? ` (${o.simDetail})` : "")]);
+    const out = o.outcome;
+    if (!out) steps.push(["wait", "Re-checking on the next block…"]);
+    else if (out.status === "persisted") steps.push(["good", `Still there one block later, so a transaction would very likely have landed: about ${usd(out.realisticNetUsd)} after gas`]);
+    else if (out.status === "taken" && isOurs(out.takenBy)) steps.push(["ours", h("span", null, "Your bot traded it", out.takenTx ? [" in ", txLink(out.takenTx, "this transaction")] : null)]);
+    else if (out.status === "taken") steps.push(["rival", h("span", null, "Taken by another bot, ", addrLink(out.takenBy), out.takenTx ? [" in ", txLink(out.takenTx, "this transaction")] : null)]);
+    else steps.push(["skip", "Gone a block later: ordinary trading closed the gap"]);
+    return steps;
+  }
+  function detailView(o) {
+    const d = h("div", { class: "detail" });
+    if (o.legs && o.legs.length) {
+      d.append(h("div", null, h("h4", null, "Route"), h("ol", { class: "legs" },
+        o.legs.map((l) => h("li", null, h("div", null,
+          h("span", { class: "leg-dex" }, dexName(l.dex)), l.feePpm !== null && l.feePpm !== undefined ? ` (fee ${feeText(l.feePpm)}) ` : " ", addrLink(l.pool),
+          h("div", { class: "num" }, `${fmtUnits(l.amountIn, l.from.decimals)} ${l.from.symbol} → ${fmtUnits(l.amountOut, l.to.decimals)} ${l.to.symbol}`),
+        ))),
+      )));
+    }
+    const flash = S.state?.settings?.flashSource;
+    const costs = h("div", { class: "costs" },
+      h("span", null, "Profit after swap fees"), h("span", { class: "num" }, usd(o.profitUsd)),
+      h("span", null, "Gas, L2 execution and L1 data"), h("span", { class: "num" }, `−${usdFine(o.gasUsd).replace("−", "")}`),
+      o.kind !== "classic" && flash && flash !== "capital" ? [h("span", null, `Flash-loan fee (${flash === "morpho" ? "Morpho Blue" : "Balancer"})`), h("span", { class: "num" }, "$0.00")] : null,
+      h("span", { class: "total" }, "Net"), h("span", { class: "num total" }, usd(o.netUsd)),
+    );
+    d.append(h("div", null, h("h4", null, "Costs"), costs));
+    d.append(h("div", null, h("h4", null, "What happened"), h("ol", { class: "steps" }, history(o).map(([k, text]) => h("li", null, icon(k), h("span", null, text))))));
+    return d;
+  }
+  function renderFeed() {
+    const box = clear($("feed"));
+    if (!S.feed.length) {
+      box.append(empty(`No opportunities yet. The bot records one when a route clears ${usd(S.state?.settings?.minProfitUsd ?? 0.25)} after gas.`));
+      return;
+    }
+    for (const o of S.feed) box.append(feedRow(o, false));
+  }
+
+  // ---------------------------------------------------------------- charts
+  function niceStep(max, count) {
+    const raw = max / count;
+    const p = 10 ** Math.floor(Math.log10(raw));
+    const n = raw / p;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
+  }
+  function roundTop(x, y, w, hh, r) {
+    r = Math.min(r, hh, w / 2);
+    return `M${x},${y + hh}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + hh}Z`;
+  }
+  function barChart(el, cfg) {
+    clear(el);
+    const W = Math.max(260, Math.round(el.clientWidth || 600));
+    const H = cfg.height || 200;
+    const m = { t: 10, r: 4, b: 24, l: cfg.left || 48 };
+    const iw = W - m.l - m.r;
+    const ih = H - m.t - m.b;
+    const vals = cfg.data.map(cfg.value);
+    const maxV = Math.max(0, ...vals);
+    const step = niceStep(maxV > 0 ? maxV : cfg.minTop || 1, 4);
+    const top = Math.max(step, Math.ceil(maxV / step - 1e-9) * step);
+    const y = (v) => m.t + ih - (v / top) * ih;
+    const band = iw / cfg.data.length;
+    const bw = Math.max(2, Math.min(30, band * 0.62));
+    const every = band >= 40 ? 1 : band >= 24 ? 2 : band >= 14 ? 3 : 4;
+    const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": cfg.aria });
+    const g = sv("g", { class: "axis" });
+    for (let v = 0; v <= top + step / 1e6; v += step) {
+      const yy = Math.round(y(v)) + 0.5;
+      g.append(sv("line", { x1: m.l, x2: W - m.r, y1: yy, y2: yy, class: v === 0 ? "base-line" : "grid-line" }));
+      g.append(sv("text", { x: m.l - 8, y: yy + 4, "text-anchor": "end" }, cfg.yFmt(v, step)));
+    }
+    svg.append(g);
+    const marks = [];
+    cfg.data.forEach((d, i) => {
+      const v = vals[i];
+      const cx = m.l + band * i + band / 2;
+      if (v > 0) {
+        const yy = y(v);
+        const p = sv("path", { d: roundTop(cx - bw / 2, yy, bw, y(0) - yy, 3), class: `bar-m ${cfg.cls}` });
+        marks[i] = p;
+        svg.append(p);
+      }
+      if ((cfg.data.length - 1 - i) % every === 0) svg.append(sv("text", { x: cx, y: H - 6, "text-anchor": "middle", class: "axis-x" }, cfg.label(d)));
+    });
+    cfg.data.forEach((d, i) => {
+      const hit = sv("rect", { x: m.l + band * i, y: m.t, width: band, height: ih, class: "hit" });
+      const show = (ev) => {
+        marks.forEach((mk, j) => mk && mk.classList.toggle("hot", j === i));
+        showTip(ev.clientX, ev.clientY, cfg.tip(d));
+      };
+      hit.addEventListener("pointermove", show);
+      hit.addEventListener("pointerdown", show);
+      hit.addEventListener("pointerleave", () => {
+        hideTip();
+        marks.forEach((mk) => mk && mk.classList.remove("hot"));
+      });
+      svg.append(hit);
+    });
+    el.append(svg);
+  }
+  function table(headers, rows, rightCols) {
+    return h("div", { class: "scroll-x" }, h("table", { class: "t" },
+      h("thead", null, h("tr", null, headers.map((x, i) => h("th", { class: rightCols[i] ? "r" : null }, x)))),
+      h("tbody", null, rows.map((r) => h("tr", null, r.map((c, i) => h("td", { class: rightCols[i] ? "r" : null }, c))))),
+    ));
+  }
+  const usdAxis = (v, step) => (v === 0 ? "$0" : v >= 1000 ? `$${(v / 1000).toFixed(step >= 1000 ? 0 : 1)}k` : `$${v.toFixed(step >= 1 ? 0 : step >= 0.1 ? 1 : 2)}`);
+  function last14() {
+    const byDay = new Map((S.summary?.days || []).map((d) => [d.day, d]));
+    const out = [];
+    for (let i = 13; i >= 0; i--) {
+      const day = utcDay(Date.now() - i * 86400000);
+      out.push(byDay.get(day) || { day, found: 0, persisted: 0, taken: 0, closed: 0, realisticNetUsd: 0, optimisticNetUsd: 0 });
+    }
+    return out;
+  }
+  function renderDays() {
+    const el = $("chart-days");
+    $("days-toggle").textContent = S.tables.days ? "Show as chart" : "Show as table";
+    if (!S.summary) {
+      append(clear(el), [empty("Loading…")]);
+      return;
+    }
+    const days = last14();
+    if (S.tables.days) {
+      append(clear(el), [table(["Day", "Simulated profit", "If every find landed", "Found", "Still there"], days.slice().reverse().map((d) => [dayLabel(d.day), usd(d.realisticNetUsd), usd(d.optimisticNetUsd), int(d.found), int(d.persisted)]), [false, true, true, true, true])]);
+      return;
+    }
+    barChart(el, {
+      data: days,
+      value: (d) => d.realisticNetUsd,
+      label: (d) => dayLabel(d.day),
+      cls: "m-ours",
+      minTop: 1,
+      yFmt: usdAxis,
+      aria: `Simulated profit per day for the last 14 days. Total ${usd(days.reduce((a, d) => a + d.realisticNetUsd, 0))}.`,
+      tip: (d) => [h("b", null, dayLabel(d.day)), h("div", { class: "row" }, icon("ours"), `Simulated profit ${usd(d.realisticNetUsd)}`), h("div", { class: "dim" }, `If every find had landed ${usd(d.optimisticNetUsd)}`), h("div", { class: "dim" }, `${int(d.found)} found, ${int(d.persisted)} still there next block`)],
+    });
+  }
+  function renderStrategies() {
+    const box = clear($("strategies"));
+    const rows = S.summary?.today?.byKind || [];
+    if (!rows.length) {
+      box.append(empty("Nothing re-checked yet today."));
+      clear($("routes"));
+      return;
+    }
+    box.append(h("div", { class: "srow head" }, h("span", null, "Strategy"), h("span", { class: "h-track" }, "Still there next block"), h("span", { class: "r" }, ""), h("span", { class: "r" }, "Found"), h("span", { class: "r" }, "Simulated")));
+    const add = (label, r) => box.append(h("div", { class: "srow" },
+      h("span", null, label),
+      h("span", { class: "track", role: "presentation" }, h("i", { class: "m-ours", style: `width:${r.winRate === null ? 0 : Math.max(1, r.winRate * 100)}%` })),
+      h("span", { class: "r" }, pct(r.winRate)),
+      h("span", { class: "r" }, int(r.found)),
+      h("span", { class: "r" }, usd(r.realisticNetUsd))));
+    for (const r of rows) add(KIND[r.key] || r.key, r);
+    const fb = (S.summary.today.byStage || []).find((x) => x.key === "flashblock");
+    if (fb) add("Any strategy, found on a Flashblock", fb);
+    const scores = S.summary.today.scores || [];
+    const routes = clear($("routes"));
+    if (scores.length) {
+      const pretty = (key) => {
+        const m = /^(.*) \[(.*)\]$/.exec(key);
+        return m ? h("span", null, m[1], h("br"), h("span", { class: "muted" }, m[2].split(">").map(dexName).join(" › "))) : key;
+      };
+      routes.append(h("h3", null, "Best routes today"), table(["Route", "Found", "Still there", "Simulated"], scores.slice(0, 6).map((r) => [pretty(r.key), int(r.found), pct(r.winRate), usd(r.realisticNetUsd)]), [false, true, true, true]));
+    }
+  }
+
+  // ---------------------------------------------------------------- funnel
+  function renderFunnel() {
+    const box = clear($("funnel"));
+    const st = S.state;
+    const f = st?.funnel;
+    if (!f || !f.candidates) {
+      box.append(empty(st && !st.running ? "These counts are kept while the bot runs, so they show up on the dashboard of a running bot." : "Nothing counted yet: the first blocks are still coming in."));
+      return;
+    }
+    const total = f.candidates;
+    const since = st.rpc?.since || st.startedAt;
+    box.append(h("p", { class: "lead" }, h("b", { class: "num" }, int(total)), ` route checks in the ${dur(Date.parse(st.now) - Date.parse(since))} since the bot started. Each is one route with a positive spread after swap fees, in one block, so a spread that stays open for 30 blocks counts 30 times.`));
+    const group = (title) => box.append(h("div", { class: "fr-group" }, title));
+    const row = (label, n, cls) => box.append(h("div", { class: "fr" },
+      h("span", null, label),
+      h("span", { class: "track", role: "presentation" }, h("i", { class: cls, style: `width:${n ? Math.max(0.5, (n / total) * 100) : 0}%` })),
+      h("span", { class: "count" }, int(n), h("span", { class: "share" }, share(n, total)))));
+    group("Dropped before the on-chain check");
+    row("Gas would cost more than the spread", f.gasAteIt || 0, "m-drop");
+    row(`Profit after gas below your ${usd(st.settings.minProfitUsd)} minimum`, f.belowMin || 0, "m-drop");
+    row("No USD price for the profit token", f.unpriced || 0, "m-drop");
+    row("Muted for 20 minutes after an on-chain revert", f.muted || 0, "m-drop");
+    row("Skipped by what it has learned (keeps failing test runs)", f.learnedSkip || 0, "m-drop");
+    row("Needed a pool that a better route was already using", f.overlapping || 0, "m-drop");
+    group("On-chain check");
+    row("Passed", f.verified || 0, "m-ours");
+    row("Failed: a DEX quoter disagreed with the bot's maths", f.quoteMismatch || 0, "m-bad");
+    row("Failed: the simulation reverted", f.reverted || 0, "m-bad");
+    row("Couldn't be checked on-chain (kept, marked unverified)", f.unverified || 0, "m-drop");
+    const p = st.paper;
+    if (p) {
+      group("Recorded");
+      row("New paper opportunities", p.recorded || 0, "m-ours");
+      row("Skipped: the same route was already being tracked", p.alreadyTracked || 0, "m-drop");
+    }
+  }
+
+  // ---------------------------------------------------------------- rivals
+  function renderRivals() {
+    const box = clear($("rivals"));
+    const m = S.summary?.market;
+    const cov = S.recent?.coverage;
+    if (cov && cov.sample && (cov.allWatched || cov.someWatched || cov.noneWatched)) {
+      const parts = [["allWatched", "used only pools your bot watches", "m-cov-all"], ["someWatched", "used some pools it doesn't watch", "m-cov-some"], ["noneWatched", "used none of its pools", "m-cov-none"]];
+      box.append(h("h3", null, "Could your bot see these trades?"), h("p", { class: "sub" }, `The last ${int(cov.sample)} rival arbitrages, by the pools they used. A trade on pools your bot doesn't watch is a coverage gap, not a lost race.`));
+      const bar = h("div", { class: "cov", role: "img", "aria-label": parts.map(([k, label]) => `${share(cov[k], cov.sample)} ${label}`).join("; ") });
+      for (const [k, , cls] of parts) if (cov[k]) bar.append(h("i", { class: cls, style: `flex:${cov[k]}` }));
+      box.append(bar, h("div", { class: "legend small" }, parts.map(([k, label, cls]) => h("span", null, h("i", { class: `sw ${cls}` }), `${share(cov[k], cov.sample)} ${label}`))));
+    }
+    box.append(h("h3", null, "Most active"));
+    if (!m || !m.bots || !m.bots.length) {
+      box.append(empty(S.state?.settings && S.state.settings.mevFeed === false ? "The MEV feed is off (MEV_FEED=false)." : "No arbitrage by other bots recorded today yet."));
+    } else {
+      const took = new Map((S.summary.today?.takers || []).map((t) => [String(t.bot).toLowerCase(), t.count]));
+      box.append(table(["Bot", "Arbitrages", "Their profit", "Gas paid", "Took yours"], m.bots.slice(0, 8).map((b) => [isOurs(b.bot) ? h("span", null, h("i", { class: "marker m-ours" }), addrLink(b.bot), " (your bot)") : h("span", null, h("i", { class: "marker m-rival" }), addrLink(b.bot)), int(b.arbitrage), usd(b.profitUsd), usdFine(b.costUsd), int(took.get(String(b.bot).toLowerCase()) || 0)]), [false, true, true, true, true]));
+      box.append(h("p", { class: "sub" }, `${int(m.arbitrageTxs)} arbitrages today worth ${usd(m.arbitrageProfitUsd)} in total${m.sandwichTxs ? `, plus ${int(m.sandwichTxs)} sandwiches` : ""}.`));
+    }
+    const pr = m?.arbPriority;
+    if (pr && pr.samples) {
+      const ours = S.state?.settings?.priorityFeeGwei;
+      const below = fin(ours) && fin(pr.medianGwei) && ours < pr.medianGwei;
+      box.append(h("h3", null, "Priority fees they pay"), statusLine(below ? "warn" : "good",
+        `Median ${pr.medianGwei.toFixed(4)} gwei, top 10% pay ${pr.p90Gwei.toFixed(4)} gwei or more (${int(pr.samples)} receipts). You bid ${fin(ours) ? ours : "?"} gwei. `,
+        below ? "That's below the median; Base orders transactions in each Flashblock by priority fee." : "That's at or above the median."));
+    }
+    renderHourly();
+  }
+  function renderHourly() {
+    const el = $("chart-hourly");
+    $("hourly-toggle").textContent = S.tables.hourly ? "Show as chart" : "Show as table";
+    const m = S.summary?.market;
+    if (!m) {
+      append(clear(el), [empty(S.summary ? "No MEV transactions recorded today yet." : "Loading…")]);
+      return;
+    }
+    const by = new Map((m.hourly || []).map((x) => [x.hour, x]));
+    const hours = Array.from({ length: 24 }, (_, i) => {
+      const hr = `${String(i).padStart(2, "0")}:00`;
+      return { hour: hr, txs: by.get(hr)?.txs || 0, profitUsd: by.get(hr)?.profitUsd || 0 };
+    });
+    if (S.tables.hourly) {
+      append(clear(el), [table(["Hour (UTC)", "MEV transactions", "Their profit"], hours.filter((x) => x.txs).map((x) => [x.hour, int(x.txs), usd(x.profitUsd)]), [false, true, true])]);
+      return;
+    }
+    barChart(el, {
+      data: hours,
+      value: (d) => d.txs,
+      label: (d) => d.hour.slice(0, 2),
+      cls: "m-rival",
+      height: 170,
+      left: 40,
+      minTop: 4,
+      yFmt: (v) => int(v),
+      aria: `MEV transactions by other bots per hour today, ${int(hours.reduce((a, x) => a + x.txs, 0))} in total.`,
+      tip: (d) => [h("b", null, `${d.hour}–${String((+d.hour.slice(0, 2) + 1) % 24).padStart(2, "0")}:00 UTC`), h("div", { class: "row" }, icon("rival"), `${int(d.txs)} MEV ${plural(d.txs, "transaction", "transactions")}`), h("div", { class: "dim" }, `Their profit ${usd(d.profitUsd)}`)],
+    });
+  }
+
+  // ---------------------------------------------------------------- liquidations
+  function renderLiq() {
+    const box = clear($("liq"));
+    const st = S.state;
+    if (st?.settings && !st.settings.liquidations) {
+      box.append(empty("The liquidation monitor is off (LIQUIDATIONS=false)."));
+      return;
+    }
+    const l = S.summary?.liq;
+    const watched = st?.liquidations?.watched;
+    box.append(h("p", { class: "lead" }, fin(watched) ? `Watching ${int(watched)} Aave V3 borrowers on Base. ` : "", "A position counts once its health factor is below 1 at the state the bot read."));
+    box.append(h("div", { class: "kv-wrap" }, h("dl", { class: "kv" },
+      h("dt", null, "Liquidatable at observed state"), h("dd", { class: "num" }, int(l?.found ?? 0)),
+      h("dt", null, "Another liquidator executed"), h("dd", { class: "num" }, int(l?.taken ?? 0)),
+      h("dt", null, "Recovered before anyone acted"), h("dd", { class: "num" }, int(l?.recovered ?? 0)),
+      h("dt", null, "Still open after 5 blocks"), h("dd", { class: "num" }, int(l?.open ?? 0)),
+      h("dt", null, "Estimated profit on the open ones"), h("dd", { class: "num" }, usd(l?.realisticProfitUsd ?? 0)),
+    )));
+    const recent = S.recent?.liq || [];
+    box.append(h("h3", null, "Latest"));
+    if (!recent.length) {
+      box.append(empty("No liquidatable positions seen yet."));
+      return;
+    }
+    const outcome = (x) => (x.outcome === "taken" ? chip("rival", `Another liquidator executed${x.takenBy ? ` (${shortAddr(x.takenBy)})` : ""}`) : x.outcome === "recovered" ? chip("skip", "Recovered") : x.outcome === "open" ? chip("good", "Still open after 5 blocks") : chip("wait", "Watching"));
+    box.append(table(["Position", "Health", "Est. profit", "Outcome"], recent.slice(0, 8).map((x) => [
+      h("span", null, `Repay ${usd(x.repayUsd, 0)} of ${x.debtSymbol}, seize ${x.collateralSymbol} (+${fin(x.bonusPct) ? x.bonusPct.toFixed(1) : "?"}%)`, h("br"), addrLink(x.user)),
+      fin(x.healthFactor) ? x.healthFactor.toFixed(3) : "–",
+      usd(x.estProfitUsd),
+      outcome(x),
+    ]), [false, true, true, false]));
+  }
+
+  // ---------------------------------------------------------------- safety, capabilities, system
+  function kv(pairs) {
+    return h("dl", { class: "kv" }, pairs.filter(Boolean).map(([k, v]) => [h("dt", null, k), h("dd", null, v)]));
+  }
+  // ---------------------------------------------------------------- learning
+  async function tune(action, id) {
+    S.tuneBusy = id || action;
+    S.tuneError = null;
+    renderLearning();
+    try {
+      const r = await api("/api/tuning", "POST", { action, id });
+      if (r && r.tuning && S.state) S.state.tuning = r.tuning;
+      if (r && r.ok === false) S.tuneError = r.error || "That didn't work.";
+    } catch (e) {
+      S.tuneError = `Couldn't change it from here (${e.message}).`;
+    }
+    S.tuneBusy = null;
+    renderLearning();
+    loadState(false).catch(() => {});
+  }
+  function renderLearning() {
+    const box = $("learning");
+    if (!box) return;
+    clear(box);
+    const L = S.state?.learning;
+    const T = S.state?.tuning;
+    if (!L) {
+      box.append(empty(!S.state ? "Loading…" : S.state.running === false ? "The learning engine runs with the bot loop, so it shows up on the dashboard of a running bot." : "Learning is off (LEARNING=false in .env)."));
+      return;
+    }
+    const pct = (x) => (x === null || x === undefined ? "–" : `${Math.round(x * 100)}%`);
+    const canTune = LIVE && !CLOUD;
+    box.append(h("p", { class: "lead" },
+      "Learning since ", new Date(L.since).toLocaleDateString(undefined, { day: "numeric", month: "short" }), " from ",
+      h("b", { class: "num" }, int(L.counts.sims)), " test runs, ", h("b", { class: "num" }, int(L.counts.outcomes)), " outcomes, ",
+      h("b", { class: "num" }, int(L.counts.rivalArbs)), " rival trades and ", h("b", { class: "num" }, int(L.counts.liveSends)), ` of its own live sends. Evidence counts for half after ${L.halfLifeHours >= 48 ? `${Math.round(L.halfLifeHours / 24)} days` : `${L.halfLifeHours} hours`}, so it keeps up as the market changes.`));
+
+    const sug = T?.suggestions || [];
+    if (sug.length) {
+      box.append(h("h3", null, "Suggested changes"));
+      const list = h("div", { class: "sugs" });
+      for (const x of sug) {
+        const busy = S.tuneBusy === x.id;
+        list.append(h("div", { class: "sug" },
+          h("div", null, h("b", null, x.title), x.source === "ai-review" ? h("span", { class: "muted" }, " · from the AI review") : null, h("p", null, x.why)),
+          canTune
+            ? h("div", { class: "row" },
+              h("button", { class: "btn primary small", type: "button", disabled: !!S.tuneBusy, onclick: () => tune("apply", x.id) }, busy ? "Applying…" : "Apply"),
+              h("button", { class: "btn ghost small", type: "button", disabled: !!S.tuneBusy, onclick: () => tune("dismiss", x.id) }, "Dismiss"))
+            : h("span", { class: "muted" }, LIVE ? "Apply it on your PC's dashboard" : "")));
+      }
+      box.append(list);
+    }
+    if (S.tuneError) box.append(statusLine("bad", S.tuneError));
+
+    const cols = h("div", { class: "cols" });
+    const lr = L.landRate || {};
+    const lv = L.live || {};
+    cols.append(h("div", null, h("h3", null, "Decisions it makes now"), kv([
+      ["Skips before testing", L.skipping.length ? `${L.skipping.length} ${plural(L.skipping.length, "token", "tokens")} that keep failing (each re-tested every 6 hours)` : "Nothing yet"],
+      ["Still there a block later", `${pct(lr.classic)} of verified two-pool finds, ${pct(lr.route)} of multi-hop`],
+      ["Live sends", lv.sent ? `${int(lv.sent)} sent, ${int(lv.ok)} landed, ${int(lv.racesLost)} races lost to faster bots` : "None yet"],
+      ["Pools", `${int(L.pools.tracked)} watched; ${int(L.pools.prunedTotal)} dropped so far (quiet for ${L.pools.pruneAfterDays} days or always failing)`],
+    ]), (S.state.learning.recentSkips || []).length ? h("p", { class: "sub" }, "Latest skip: ", S.state.learning.recentSkips[0].label, ", ", S.state.learning.recentSkips[0].why, ".") : null));
+
+    const bids = h("table", { class: "t" },
+      h("thead", null, h("tr", null, ["Trade size", "Typical", "60th pct", "Top 10%", "Seen"].map((x) => h("th", null, x)))),
+      h("tbody", null, (L.bids || []).map((b) => h("tr", null, h("td", null, b.bucket), ...[b.p50, b.p60, b.p90].map((v) => h("td", { class: "num" }, v === null ? "–" : String(v))), h("td", { class: "num muted" }, int(b.samples))))));
+    cols.append(h("div", null, h("h3", null, "What other bots pay to win"), h("div", { class: "scroll-x" }, bids), h("p", { class: "sub" }, "Priority fees in gwei on rival arbitrage, by profit. It bids near the 60th percentile, more on routes where it lost races, never over your bid cap.")));
+
+    if (T) {
+      const e = T.effective;
+      const from = T.fromEnv;
+      const mark = (k, text) => (T.overrides && k in T.overrides ? h("span", null, text, " ", chip("warn", "changed"), h("span", { class: "muted" }, ` .env: ${k === "minProfitUsd" ? usd(from[k]) : k === "maxBidShare" ? `${Math.round(from[k] * 100)}%` : usd(from[k])}`)) : text);
+      cols.append(h("div", null, h("h3", null, "Settings in force"), kv([
+        ["Minimum profit", mark("minProfitUsd", `${usd(e.minProfitUsd)} after gas`)],
+        ["Bid cap", mark("maxBidShare", `${Math.round(e.maxBidShare * 100)}% of the expected profit`)],
+        ["Smallest worthwhile send", mark("evMinUsd", `${usd(e.evMinUsd)} expected value`)],
+        ["Blocked tokens", T.blockedTokens.length
+          ? (canTune
+            ? h("span", { class: "blocked" }, T.blockedTokens.map((b) => h("span", null, b.sym, " ",
+              h("button", { class: "btn ghost small", type: "button", disabled: !!S.tuneBusy, "aria-label": `Unblock ${b.sym}`, onclick: () => tune("unblock", b.token) }, S.tuneBusy === b.token ? "Unblocking…" : "Unblock"))))
+            : T.blockedTokens.map((b) => b.sym).join(", "))
+          : "None"],
+      ]), canTune && (Object.keys(T.overrides || {}).length || T.blockedTokens.length)
+        ? h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn ghost small", type: "button", disabled: !!S.tuneBusy, onclick: () => tune("reset") }, "Back to the .env settings"))
+        : null,
+      h("p", { class: "sub" }, "Changes you apply here are saved in data/tuning.json. Mode, the daily gas limit and keys stay in .env, which only you edit.")));
+    }
+    box.append(cols);
+
+    if (L.skipping.length) {
+      box.append(h("h3", { style: "margin-top:22px" }, "Tokens it skips"));
+      box.append(h("div", { class: "scroll-x" }, h("table", { class: "t" },
+        h("thead", null, h("tr", null, ["Token", "Failed", "Test runs", "Last failure"].map((x) => h("th", null, x)))),
+        h("tbody", null, L.skipping.map((t) => h("tr", null, h("td", null, t.sym, t.blocked ? h("span", null, " ", chip("skip", "blocked")) : null), h("td", { class: "num" }, pct(t.p)), h("td", { class: "num" }, String(Math.round(t.n))), h("td", { class: "muted" }, (t.why || "").slice(0, 70))))))));
+    }
+    if (L.routes.length) {
+      box.append(h("h3", { style: "margin-top:22px" }, "Routes it knows best"));
+      box.append(h("div", { class: "scroll-x" }, h("table", { class: "t" },
+        h("thead", null, h("tr", null, ["Route", "Found", "Failed test", "Still there", "Taken", "Usually by", "Live", "Bid ×"].map((x) => h("th", null, x)))),
+        h("tbody", null, L.routes.map((r) => h("tr", null,
+          h("td", null, r.label),
+          h("td", { class: "num" }, String(Math.round(r.found))),
+          h("td", { class: "num" }, pct(r.testFail)),
+          h("td", { class: "num" }, pct(r.stillThere)),
+          h("td", { class: "num" }, pct(r.takenShare)),
+          h("td", null, r.topRival ? addrLink(r.topRival) : "–"),
+          h("td", { class: "num" }, r.live ? `${r.live.ok}/${r.live.sent}` : "–"),
+          h("td", { class: "num" }, String(r.bidMult))))))));
+    }
+  }
+  function renderSafety() {
+    const box = clear($("safety"));
+    const st = S.state;
+    if (!st) return;
+    const sf = st.safety || {};
+    const live = st.mode === "live";
+    const stopped = !!st.stop?.present;
+    const tripped = stopped && /in a row|circuit/i.test(st.stop?.reason || "");
+    const lv = sf.live;
+    box.append(kv([
+      ["Mode", live ? chip("bad", "Live: sends real transactions") : chip("ours", "Paper: finds and simulates, never sends")],
+      ["Bot wallet", st.settings?.hasBotKey ? h("span", null, addrLink(st.addresses?.bot), " (its key is in .env, never shown)") : "Not created yet"],
+      ["Sending", !live ? "Off in paper mode" : stopped ? chip("bad", "Stopped (STOP file)") : lv?.blocked ? chip("warn", "Waiting for the live setup") : chip("warn", "On")],
+      live && lv ? ["Live check", lv.blocked ? h("span", null, lv.blocked) : chip("good", `Passed${lv.check?.checkedAt ? ` at ${clock(lv.check.checkedAt)}` : ""}`)] : null,
+      live && lv?.check ? ["Bot wallet gas", `${lv.check.botBalanceEth.toFixed(5)} ETH`] : null,
+      live && lv ? ["Trades sent", `${int(lv.sent ?? 0)} sent, ${int(lv.succeeded ?? 0)} succeeded`] : null,
+      ["Circuit breaker", !live ? "Not needed in paper mode" : tripped ? chip("bad", "Tripped") : `Armed: stops after ${sf.maxConsecutiveFailures ?? 5} failed transactions in a row (now ${sf.live?.consecutiveFailures ?? 0})`],
+      live && sf.live ? ["Gas budget today", `${usd(sf.live.gasSpentTodayUsd)} of ${usd(sf.live.maxDailyGasUsd)}`] : null,
+      ["Multi-hop and CL routes", !live
+        ? "Paper only in paper mode"
+        : lv?.routeBlocked === undefined
+          ? "Paper only until a RouteExecutor is deployed and set in .env"
+          : lv.routeBlocked
+            ? h("span", null, chip("warn", "Waiting for the RouteExecutor setup"), " ", h("span", { class: "muted" }, String(lv.routeBlocked).slice(0, 160)))
+            : chip("good", "Live: sent through your RouteExecutor")],
+      ["Liquidations", !live
+        ? "Watched and estimated in paper mode"
+        : lv?.liqBlocked === undefined
+          ? "Watched only; deploy a LiquidationExecutor and set LIQUIDATIONS_LIVE=true to send them"
+          : lv.liqBlocked
+            ? h("span", null, chip("warn", "Waiting for the LiquidationExecutor setup"), " ", h("span", { class: "muted" }, String(lv.liqBlocked).slice(0, 160)))
+            : chip("good", "Live: sent through your LiquidationExecutor")],
+    ]));
+    if (live && !stopped) box.append(h("div", { class: "row", style: "margin-top:14px" }, stopControl()));
+  }
+  function renderCaps() {
+    const box = clear($("caps"));
+    const caps = S.state?.capabilities;
+    if (!caps) return;
+    const built = (b) => (b === "yes" ? h("span", { class: "yes" }, "Yes") : b === "partly" ? h("span", null, "Partly") : h("span", { class: "no" }, "Not yet"));
+    const paper = (p) => (p === "on" ? chip("good", "On") : p === "off" ? chip("off", "Off") : h("span", { class: "no" }, "–"));
+    const live = (l) => (l === "allowed" ? chip("warn", "Allowed") : l === "blocked" ? chip("skip", "Blocked in code") : h("span", { class: "no" }, "–"));
+    box.append(h("table", { class: "t caps" },
+      h("thead", null, h("tr", null, ["Capability", "Built", "How it's tested", "Paper", "Live"].map((x) => h("th", null, x)))),
+      h("tbody", null, caps.map((c) => h("tr", null, h("td", null, c.name), h("td", null, built(c.built)), h("td", { class: "muted" }, c.tested), h("td", null, paper(c.paper)), h("td", null, live(c.live))))),
+    ));
+  }
+  function renderSystem() {
+    const box = clear($("system"));
+    const st = S.state;
+    if (!st) return;
+    const cols = h("div", { class: "cols" });
+    const u = st.rpc;
+    if (u) {
+      const methods = Object.entries(u.byMethod || {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      cols.append(h("div", null, h("h3", null, "RPC"), kv([
+        ["Endpoint", h("span", null, hostOf(u.activeEndpoint), " ", u.onPrimary === false ? chip("warn", "backup") : null)],
+        ["Requests", `${int(u.requests)} since ${clock(u.since)}`],
+        ["Rate-limited", int(u.rateLimited ?? 0)],
+        ["Other transient errors", int(Math.max(0, (u.transientErrors ?? 0) - (u.rateLimited ?? 0)))],
+        ["Switched endpoint", `${int(u.failovers)} ${plural(u.failovers, "time", "times")}`],
+        ["If on Alchemy", `≈${(u.alchemyCuPerDay / 1e6).toFixed(1)}M CU a day`],
+      ]), h("ul", { class: "methods" }, methods.map(([k, n]) => h("li", null, h("span", { class: "mono" }, k), h("span", { class: "num" }, int(n))))),
+      (u.byMethod || {}).ws_newHeads ? h("p", { class: "sub" }, `The websocket block feed (WS_URL) alone is about ${((u.byMethod.ws_newHeads * 60 * 86400000) / Math.max(60000, Date.parse(st.now) - Date.parse(u.since)) / 1e6).toFixed(1)}M Alchemy CU a day. Without WS_URL the bot polls for new blocks instead, at roughly a fifth of that.`) : null));
+    }
+    const r = st.refresh;
+    cols.append(h("div", null, h("h3", null, "Pool state"), kv([
+      ["Watched", `${int(st.pools?.total)} pools, ${int(st.pools?.cl)} concentrated-liquidity, ${int(st.pools?.pairs)} pairs`],
+      ["Refresh", st.settings.refreshMode === "events" ? `From each block's events, full re-read every ${int(st.settings.fullRefreshBlocks)} blocks` : "Full re-read every block"],
+      r ? ["Drift checks", `${int(r.checks)} done${r.lastCheckBlock ? `, last at block ${int(r.lastCheckBlock)}` : ""}`] : null,
+      r ? ["Pools that drifted", r.driftedPools ? chip("warn", `${int(r.driftedPools)} in total (corrected)`) : chip("good", "None")] : null,
+    ]), r && r.lastDrift && r.lastDrift.length ? h("ul", { class: "methods" }, r.lastDrift.slice(0, 5).map((d) => h("li", null, h("span", null, dexName(d.dex), " ", addrLink(d.pool)), h("span", { class: "num muted" }, `#${int(d.block)}`)))) : null,
+    h("p", { class: "sub" }, "Concentrated-liquidity pools follow each Swap event for price, tick and liquidity. Adding or removing liquidity, or moving into a tick range the bot hasn't loaded, triggers a fresh read. The drift check compares everything against a full re-read.")));
+    const s = st.settings;
+    cols.append(h("div", null, h("h3", null, "Settings in force"), kv([
+      ["Minimum profit", `${usd(s.minProfitUsd)} after gas`],
+      ["Pools", `up to ${int(s.maxPools)}, at least ${s.minPoolLiquidityWeth} WETH deep`],
+      ["Routes", `${s.clPools ? "CL pools on" : "CL pools off"}, ${s.multiHop ? `up to ${s.maxHops} hops` : "two pools only"}`],
+      ["Flash loans", s.flashSource === "morpho" ? "Morpho Blue (free)" : s.flashSource === "balancer" ? "Balancer" : "Own capital"],
+      ["Priority fee", `${s.priorityFeeGwei} gwei`],
+      ["Flashblocks", s.flashblocks ? `On${st.flashblocks ? `: ${int(st.flashblocks.scans)} scans, ${int(st.flashblocks.opps)} finds` : ""}` : "Off"],
+      ["Backup RPCs", int(s.rpcFallbacks)],
+      ["Telegram alerts", st.telegram ? chip("good", "On") : h("span", null, "Off. Set up with ", h("code", null, "node dist/main.js telegram"))],
+      ["Online dashboard", CLOUD ? `This is it: last update from your PC ${S.mirror?.lastPushAt ? ago(pushAge()) : "not yet"}` : st.cloud ? (st.cloud.lastError ? chip("warn", `Failing: ${st.cloud.lastError}`) : chip("good", `On, last update sent ${st.cloud.lastOkAt ? ago(Date.parse(st.now) - st.cloud.lastOkAt) : "not yet"}`)) : h("span", null, "Off. See ", h("code", null, "cloud/README.md"))],
+    ])));
+    box.append(cols);
+  }
+  function renderFooter() {
+    const st = S.state;
+    const foot = clear($("foot"));
+    append(foot, [
+      h("span", null, `Base arb bot ${st?.version ? `v${st.version}` : ""}`),
+      st?.code?.commit ? h("span", null, `Code ${st.code.commit}${st.code.branch ? ` on ${st.code.branch}` : ""}`) : null,
+      st?.startedAt && st.running ? h("span", null, `Running for ${dur(Date.parse(st.now) - Date.parse(st.startedAt))}`) : null,
+      h("span", null, CLOUD ? "Online copy of the dashboard on your PC. Your keys never leave your PC." : LIVE ? "This dashboard runs on your computer only and never sees a private key." : "Example data for a preview."),
+    ]);
+  }
+
+  // ---------------------------------------------------------------- AI review (untrusted text: rendered as text, never as HTML)
+  function inline(text) {
+    const out = [];
+    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\((https?:\/\/[^)\s]+)\))|(\*[^*\s][^*]*\*)/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      if (m[1]) out.push(h("code", null, m[1].slice(1, -1)));
+      else if (m[2]) out.push(h("strong", null, m[2].slice(2, -2)));
+      else if (m[3]) out.push(h("a", { href: m[4], target: "_blank", rel: "noopener noreferrer" }, m[3].slice(1, m[3].indexOf("]"))));
+      else if (m[5]) out.push(h("em", null, m[5].slice(1, -1)));
+      last = re.lastIndex;
+    }
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+  }
+  const cells = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+  function markdown(md) {
+    const root = h("div", { class: "md" });
+    const lines = String(md || "").replace(/\r\n?/g, "\n").split("\n");
+    let para = [];
+    const flush = () => {
+      if (para.length) root.append(h("p", null, inline(para.join(" "))));
+      para = [];
+    };
+    for (let i = 0; i < lines.length; ) {
+      const line = lines[i];
+      if (/^```/.test(line)) {
+        flush();
+        const buf = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+        i++;
+        root.append(h("pre", null, h("code", null, buf.join("\n"))));
+        continue;
+      }
+      const hm = /^(#{1,4})\s+(.*)$/.exec(line);
+      if (hm) {
+        flush();
+        root.append(h(`h${hm[1].length + 2}`, null, inline(hm[2])));
+        i++;
+        continue;
+      }
+      if (/^\s*[-*]\s+/.test(line)) {
+        flush();
+        const ul = h("ul");
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) ul.append(h("li", null, inline(lines[i++].replace(/^\s*[-*]\s+/, ""))));
+        root.append(ul);
+        continue;
+      }
+      if (/^\s*\d+[.)]\s+/.test(line)) {
+        flush();
+        const ol = h("ol");
+        while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) ol.append(h("li", null, inline(lines[i++].replace(/^\s*\d+[.)]\s+/, ""))));
+        root.append(ol);
+        continue;
+      }
+      if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+        flush();
+        const head = cells(line);
+        i += 2;
+        const body = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) body.push(cells(lines[i++]));
+        root.append(h("table", null, h("thead", null, h("tr", null, head.map((c) => h("th", null, inline(c))))), h("tbody", null, body.map((r) => h("tr", null, r.map((c) => h("td", null, inline(c))))))));
+        continue;
+      }
+      if (/^\s*>\s?/.test(line)) {
+        flush();
+        const buf = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ""));
+        root.append(h("blockquote", null, inline(buf.join(" "))));
+        continue;
+      }
+      if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
+        flush();
+        root.append(h("hr"));
+        i++;
+        continue;
+      }
+      if (!line.trim()) {
+        flush();
+        i++;
+        continue;
+      }
+      para.push(line.trim());
+      i++;
+    }
+    flush();
+    return root;
+  }
+  function renderReview() {
+    const box = clear($("review"));
+    const r = S.review;
+    if (!r || !r.file) {
+      box.append(empty("No review yet. The daily review writes reports/ai-review-YYYY-MM-DD.md each morning, and the newest one shows up here."));
+      return;
+    }
+    box.append(h("p", { class: "sub" }, `${r.file}, written ${dateTime(r.modified)}`));
+    box.append(h("div", { class: `review${S.reviewOpen ? " open" : ""}` }, markdown(r.text)));
+    box.append(h("button", { class: "linkbtn", type: "button", onclick: () => { S.reviewOpen = !S.reviewOpen; renderReview(); } }, S.reviewOpen ? "Show less" : "Show the whole review"));
+  }
+
+  // ---------------------------------------------------------------- wallet
+  const SEL = { setOperator: "0xb3ab15fb", withdraw: "0xf3fef3a3", withdrawETH: "0xe086e5ec" };
+  const word = (hex) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+  const encAddr = (a) => word(a);
+  const encUint = (n) => word(BigInt(n).toString(16));
+  function parseEth(text) {
+    const t = String(text || "").trim();
+    if (!/^\d{0,6}(\.\d{0,18})?$/.test(t) || t === "" || t === ".") return null;
+    const [w, f = ""] = t.split(".");
+    const wei = BigInt(w || "0") * 10n ** 18n + BigInt((f + "0".repeat(18)).slice(0, 18));
+    return wei > 0n ? wei : null;
+  }
+  function walletError(e) {
+    const code = e && (e.code ?? e.data?.originalError?.code);
+    const msg = String((e && (e.shortMessage || e.message)) || e || "");
+    if (code === 4001 || /user rejected|user denied|rejected the request/i.test(msg)) return "You declined it in your wallet. Nothing was sent.";
+    if (code === -32002) return "Your wallet already has a request waiting. Open the wallet and finish or cancel it.";
+    return msg.slice(0, 220) || "The wallet returned an error.";
+  }
+  const validIcon = (i) => typeof i === "string" && /^data:image\/(png|svg\+xml|webp|jpeg|gif);/i.test(i);
+  function initWallets() {
+    window.addEventListener("eip6963:announceProvider", (ev) => {
+      const d = ev.detail;
+      if (!d || !d.info || !d.provider) return;
+      W.providers.set(d.info.uuid || d.info.name, d);
+      renderWallet();
+      tryReconnect();
+    });
+    window.dispatchEvent(new Event("eip6963:requestProvider"));
+    setTimeout(() => {
+      if (W.providers.size === 0 && window.ethereum) {
+        W.providers.set("injected", { info: { uuid: "injected", name: "Browser wallet", icon: "", rdns: "injected" }, provider: window.ethereum });
+        tryReconnect();
+      }
+      renderWallet();
+    }, 600);
+  }
+  async function tryReconnect() {
+    if (W.account) return;
+    let saved = null;
+    try {
+      saved = localStorage.getItem("bab.wallet");
+    } catch {
+      return;
+    }
+    if (!saved) return;
+    for (const d of W.providers.values()) {
+      if ((d.info.rdns || d.info.name) !== saved) continue;
+      try {
+        const acc = await d.provider.request({ method: "eth_accounts" });
+        if (acc && acc[0]) await attach(d, acc[0]);
+      } catch {
+        /* stay disconnected */
+      }
+      return;
+    }
+  }
+  async function connect(d) {
+    W.error = null;
+    try {
+      const acc = await d.provider.request({ method: "eth_requestAccounts" });
+      if (acc && acc[0]) {
+        await attach(d, acc[0]);
+        try {
+          localStorage.setItem("bab.wallet", d.info.rdns || d.info.name);
+        } catch {
+          /* fine */
+        }
+      }
+    } catch (e) {
+      W.error = walletError(e);
+      renderWallet();
+    }
+  }
+  const onAccounts = (a) => {
+    if (!a || !a.length) disconnect();
+    else {
+      W.account = a[0];
+      W.actions = {};
+      renderWallet();
+      renderHeader();
+      refreshWalletData();
+    }
+  };
+  const onChain = (c) => {
+    W.chainId = c;
+    renderWallet();
+  };
+  async function attach(d, account) {
+    if (W.provider && W.provider !== d.provider && W.provider.removeListener) {
+      W.provider.removeListener("accountsChanged", onAccounts);
+      W.provider.removeListener("chainChanged", onChain);
+    }
+    W.detail = d;
+    W.provider = d.provider;
+    W.account = account;
+    W.chainId = await d.provider.request({ method: "eth_chainId" }).catch(() => null);
+    if (d.provider.on) {
+      d.provider.on("accountsChanged", onAccounts);
+      d.provider.on("chainChanged", onChain);
+    }
+    W.error = null;
+    renderWallet();
+    renderHeader();
+    refreshWalletData();
+  }
+  function disconnect() {
+    if (W.provider && W.provider.removeListener) {
+      W.provider.removeListener("accountsChanged", onAccounts);
+      W.provider.removeListener("chainChanged", onChain);
+    }
+    W.detail = W.provider = W.account = W.chainId = null;
+    W.actions = {};
+    try {
+      localStorage.removeItem("bab.wallet");
+    } catch {
+      /* fine */
+    }
+    renderWallet();
+    renderHeader();
+  }
+  async function ensureBase() {
+    const id = await W.provider.request({ method: "eth_chainId" });
+    if (id === BASE_CHAIN) return;
+    try {
+      await W.provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BASE_CHAIN }] });
+    } catch (e) {
+      const code = e && (e.code ?? e.data?.originalError?.code);
+      if (code !== 4902) throw e;
+      await W.provider.request({ method: "wallet_addEthereumChain", params: [{ chainId: BASE_CHAIN, chainName: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: ["https://mainnet.base.org"], blockExplorerUrls: [EXPLORER] }] });
+    }
+    W.chainId = await W.provider.request({ method: "eth_chainId" });
+    if (W.chainId !== BASE_CHAIN) throw new Error("Your wallet is still on another network. Switch it to Base and try again.");
+  }
+  // Some wallets (Brave Wallet among them) can't work out the gas limit for a contract
+  // deployment and leave Confirm disabled ("Missing gas limit"). So every transaction states its
+  // gas limit: the wallet's estimate plus 25% when it can make one, else a measured figure for
+  // that deployment. Only the gas actually used is paid for.
+  async function withGasLimit(tx, fallback) {
+    if (tx.to && !tx.data) return { ...tx, gas: "0x5208" }; // plain ETH to a wallet: always 21,000
+    let est = 0n;
+    try {
+      est = BigInt(await W.provider.request({ method: "eth_estimateGas", params: [{ from: W.account, ...tx }] }));
+    } catch (e) {
+      if (tx.to) throw e; // a call the wallet can't estimate would fail on-chain: show why instead of sending it
+    }
+    const gas = est >= 21000n ? est + est / 4n : fallback;
+    return { ...tx, gas: "0x" + gas.toString(16) };
+  }
+  async function sendTx(tx, fallbackGas) {
+    await ensureBase();
+    const full = await withGasLimit({ value: "0x0", ...tx }, fallbackGas ?? 200000n);
+    return W.provider.request({ method: "eth_sendTransaction", params: [{ from: W.account, ...full }] });
+  }
+  // Gas a deployment uses (measured: ArbExecutor 1,014,110, RouteExecutor 1,764,006), with headroom.
+  const DEPLOY_GAS = { arb: 1300000n, route: 2200000n, liq: 2600000n };
+  async function waitReceipt(hash, timeoutMs) {
+    const until = Date.now() + (timeoutMs || 180000);
+    while (Date.now() < until) {
+      const r = await W.provider.request({ method: "eth_getTransactionReceipt", params: [hash] }).catch(() => null);
+      if (r && r.blockNumber) return r;
+      await new Promise((res) => setTimeout(res, 2000));
+    }
+    throw new Error("Still not confirmed after a few minutes. Check the transaction on Basescan.");
+  }
+  function refreshWalletData(fresh) {
+    if (!LIVE) return;
+    const params = new URLSearchParams();
+    if (fresh) params.set("fresh", "1");
+    if (W.account) params.set("addresses", W.account);
+    if (W.deployed && !S.state?.addresses?.routeExecutor) params.set("route", W.deployed);
+    if (W.deployedArb && !S.state?.addresses?.executor) params.set("arb", W.deployedArb);
+    if (W.deployedLiq && !S.state?.addresses?.liqExecutor) params.set("liq", W.deployedLiq);
+    api(`/api/wallet?${params}`).then((x) => {
+      if (!x.error) {
+        S.wallet = x;
+        renderWallet();
+      }
+    }).catch(() => {});
+  }
+  function saveDeployed() {
+    try {
+      localStorage.setItem("bab.deployed", JSON.stringify({ address: W.deployed, at: new Date().toISOString() }));
+    } catch {
+      /* the page also shows the address to copy */
+    }
+  }
+  function saveDeployedLiq() {
+    try {
+      localStorage.setItem("bab.deployedLiq", JSON.stringify({ address: W.deployedLiq, at: new Date().toISOString() }));
+    } catch {
+      /* the page also shows the address to copy */
+    }
+  }
+  function copyBtn(text) {
+    const b = h("button", { class: "btn ghost small", type: "button" }, "Copy");
+    b.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        b.textContent = "Copied";
+      } catch {
+        b.textContent = "Select and copy it";
+      }
+      setTimeout(() => (b.textContent = "Copy"), 1600);
+    });
+    return b;
+  }
+  function setAction(id, st) {
+    W.actions[id] = st;
+    renderWallet();
+  }
+  function action(id, def) {
+    const st = W.actions[id] || { phase: "idle" };
+    const wrap = h("div", { class: "action" });
+    if (st.phase === "confirm") {
+      wrap.append(h("div", { class: "confirm" }, h("p", null, def.confirm()), h("div", { class: "row" },
+        h("button", { class: "btn primary small", type: "button", onclick: () => runAction(id, def) }, "Open in my wallet"),
+        h("button", { class: "btn ghost small", type: "button", onclick: () => setAction(id, { phase: "idle" }) }, "Cancel"))));
+      return wrap;
+    }
+    if (st.phase === "wallet") return append(wrap, [statusLine("wait", "Waiting for you to approve it in your wallet…")]);
+    if (st.phase === "pending") return append(wrap, [statusLine("wait", "Sent. Waiting for it to be included in a block… ", txLink(st.hash, "View on Basescan"))]);
+    const blocked = !LIVE || !W.account || def.disabled;
+    wrap.append(h("button", {
+      class: `btn small ${def.kind || ""}`,
+      type: "button",
+      disabled: blocked,
+      onclick: () => {
+        const problem = def.validate ? def.validate() : null;
+        setAction(id, problem ? { phase: "error", msg: problem } : { phase: "confirm" });
+      },
+    }, def.label));
+    if (st.phase === "done") wrap.append(statusLine("good", st.msg, " ", txLink(st.hash, "View on Basescan")));
+    if (st.phase === "error") wrap.append(statusLine("bad", st.msg));
+    return wrap;
+  }
+  async function runAction(id, def) {
+    setAction(id, { phase: "wallet" });
+    try {
+      const out = await def.run((hash) => setAction(id, { phase: "pending", hash }));
+      setAction(id, { phase: "done", msg: out.msg, hash: out.hash });
+      // Re-read balances and roles straight away, and once more in case the node lagged.
+      setTimeout(() => refreshWalletData(true), 1500);
+      setTimeout(() => refreshWalletData(true), 6000);
+    } catch (e) {
+      setAction(id, { phase: "error", msg: walletError(e) });
+    }
+  }
+  const txRun = (to, data, done) => async (sent) => {
+    const hash = await sendTx({ to, data });
+    sent(hash);
+    const r = await waitReceipt(hash);
+    if (r.status !== "0x1") throw new Error("The transaction reverted on-chain. Nothing changed.");
+    return { msg: `${done} in block ${int(parseInt(r.blockNumber, 16))}.`, hash };
+  };
+  function balances(bal) {
+    return h("div", { class: "bal" },
+      h("div", null, h("b", { class: "num" }, bal ? fmtUnits(bal.eth, 18) : "–"), h("span", null, "ETH")),
+      h("div", null, h("b", { class: "num" }, bal ? fmtUnits(bal.weth, 18) : "–"), h("span", null, "WETH")),
+      h("div", null, h("b", { class: "num" }, bal ? fmtUnits(bal.usdc, 6) : "–"), h("span", null, "USDC")));
+  }
+  function accountBlock() {
+    const b = h("div", { class: "vblock" }, h("h3", null, "Your wallet"));
+    if (!LIVE) {
+      append(b, [h("p", { class: "sub" }, "Wallet actions work on the dashboard your bot serves on your PC. This preview can't reach a wallet."), h("div", null, h("button", { class: "btn small", type: "button", disabled: true }, "Connect wallet"))]);
+      return b;
+    }
+    if (!W.account) {
+      b.append(h("p", { class: "sub" }, "Connect to see your balances on Base and manage the bot's contracts."));
+      if (W.providers.size) b.append(h("div", { class: "wallets" }, [...W.providers.values()].map((d) => h("button", { class: "btn small", type: "button", onclick: () => connect(d) }, validIcon(d.info.icon) ? h("img", { src: d.info.icon, alt: "" }) : null, d.info.name || "Wallet"))));
+      else b.append(h("p", { class: "sub" }, "No wallet found in this browser. Install MetaMask, Coinbase Wallet or Rabby, or turn on Brave Wallet, then reload this page."));
+      if (W.error) b.append(statusLine("bad", W.error));
+      return b;
+    }
+    const bal = S.wallet?.accounts?.[W.account.toLowerCase()];
+    b.append(kv([
+      ["Address", h("span", null, addrLink(W.account), " ", copyBtn(W.account))],
+      ["Wallet", W.detail?.info?.name || "Browser wallet"],
+      ["Network", W.chainId === BASE_CHAIN ? chip("good", "Base") : h("span", null, chip("warn", "Not on Base"), " ", h("button", { class: "linkbtn", type: "button", onclick: () => ensureBase().then(renderWallet).catch((e) => { W.error = walletError(e); renderWallet(); }) }, "Switch to Base"))],
+    ]), balances(bal), h("div", null, h("button", { class: "linkbtn", type: "button", onclick: disconnect }, "Disconnect")));
+    if (W.error) b.append(statusLine("bad", W.error));
+    return b;
+  }
+  function botBlock() {
+    const b = h("div", { class: "vblock" }, h("h3", null, "Bot wallet"));
+    const bot = S.state?.addresses?.bot;
+    if (!bot) {
+      b.append(h("p", { class: "sub" }, "Not created yet. In PowerShell, in the bot's folder, run ", h("code", null, "node dist/main.js new-wallet"), ". It gives the bot its own wallet and saves the key in .env without ever showing it. Then restart the bot."));
+      return b;
+    }
+    const bal = S.wallet?.accounts?.[bot.toLowerCase()];
+    const eth = bal && bal.eth !== null ? BigInt(bal.eth) : null;
+    b.append(kv([
+      ["Address", h("span", null, addrLink(bot), " ", copyBtn(bot))],
+      ["Gas", h("span", null, eth === null ? "–" : `${fmtUnits(bal.eth, 18)} ETH`, " ", eth !== null && eth < 2000000000000000n ? chip("warn", "Low") : null)],
+    ]));
+    b.append(h("p", { class: "sub" }, "Holds only gas money: each attempt costs about a cent, so a few dollars covers hundreds. Profits go to the trading contract, which you own."));
+    if (!LIVE) return b;
+    const price = S.state?.ethUsd;
+    const inUsd = () => {
+      const w = parseEth(W.topUp);
+      return w && price ? `≈ ${usd((Number(w) / 1e18) * price)}` : "";
+    };
+    const usdLabel = h("span", { class: "muted" }, "ETH ", inUsd());
+    const input = h("input", { id: "topup-amount", type: "text", inputmode: "decimal", autocomplete: "off", value: W.topUp, "aria-label": "Amount of ETH to send to the bot wallet" });
+    input.addEventListener("input", () => {
+      W.topUp = input.value;
+      usdLabel.textContent = `ETH ${inUsd()}`;
+    });
+    b.append(h("div", { class: "field" }, input, usdLabel));
+    if (price) {
+      b.append(h("div", { class: "row presets" }, [5, 10, 20].map((d) => h("button", { class: "btn ghost small", type: "button", onclick: () => {
+        W.topUp = (d / price).toFixed(5);
+        renderWallet();
+      } }, `$${d}`))));
+    }
+    b.append(action("topup", {
+      label: "Send to the bot wallet",
+      validate: () => {
+        const w = parseEth(W.topUp);
+        if (!w) return "Enter an amount like 0.003.";
+        if (w > 10n ** 18n) return "Top-ups over 1 ETH are blocked here. Send it from your wallet directly if you really mean it.";
+        return null;
+      },
+      confirm: () => `Send ${W.topUp} ETH from ${shortAddr(W.account)} to the bot wallet ${shortAddr(bot)}? Your wallet shows the exact amount and fee before you approve.`,
+      run: async (sent) => {
+        const w = parseEth(W.topUp);
+        const hash = await sendTx({ to: bot, value: `0x${w.toString(16)}` });
+        sent(hash);
+        const r = await waitReceipt(hash);
+        if (r.status !== "0x1") throw new Error("The transfer failed on-chain.");
+        return { msg: `Sent in block ${int(parseInt(r.blockNumber, 16))}.`, hash };
+      },
+    }));
+    return b;
+  }
+  function contractRows(addr, info, withOperator, isOwner) {
+    const bot = S.state?.addresses?.bot;
+    const opIsBot = bot && info?.operator && info.operator.toLowerCase() === bot.toLowerCase();
+    const zero = (a) => !a || /^0x0{40}$/i.test(a);
+    return kv([
+      ["Address", h("span", null, addrLink(addr), " ", copyBtn(addr))],
+      ["Owner", !info ? "…" : !info.deployed ? chip("warn", "No contract at this address") : isOwner ? chip("good", "You") : addrLink(info.owner)],
+      withOperator && info?.deployed ? ["Bot key allowed", opIsBot ? chip("good", "Yes") : zero(info.operator) ? chip("skip", "Not yet") : h("span", null, chip("warn", "A different address"), " ", addrLink(info.operator))] : null,
+      ["Holds", info?.deployed ? `${fmtUnits(info.weth, 18)} WETH, ${fmtUnits(info.usdc, 6)} USDC, ${fmtUnits(info.eth, 18)} ETH` : "–"],
+    ]);
+  }
+  function withdrawActions(prefix, addr, info) {
+    const out = [];
+    for (const [sym, token, dec, field] of [["WETH", WETH, 18, "weth"], ["USDC", USDC, 6, "usdc"]]) {
+      if (info[field] && BigInt(info[field]) > 0n) {
+        out.push(action(`${prefix}-wd-${sym}`, { label: `Withdraw all ${sym}`, confirm: () => `Withdraw ${fmtUnits(info[field], dec)} ${sym} from the contract to your wallet ${shortAddr(W.account)}?`, run: txRun(addr, SEL.withdraw + encAddr(token) + encUint(0), "Withdrawn") }));
+      }
+    }
+    if (info.eth && BigInt(info.eth) > 0n) out.push(action(`${prefix}-wd-ETH`, { label: "Withdraw all ETH", confirm: () => `Withdraw ${fmtUnits(info.eth, 18)} ETH from the contract to your wallet ${shortAddr(W.account)}?`, run: txRun(addr, SEL.withdrawETH, "Withdrawn") }));
+    return out;
+  }
+  function routeBlock() {
+    const b = h("div", { class: "vblock" }, h("h3", null, "RouteExecutor"), h("p", { class: "sub" }, "For concentrated-liquidity and multi-hop routes. Deploy it, authorise the bot and add its address to .env to trade those live too (two-pool trades go through the ArbExecutor above). You own it; the bot's key can trade through it but never withdraw."));
+    const envAddr = S.state?.addresses?.routeExecutor;
+    const addr = envAddr || W.deployed;
+    if (!addr) {
+      const cb = S.contracts?.routeExecutor;
+      b.append(action("deploy", {
+        label: "Deploy RouteExecutor",
+        disabled: !cb || !cb.creationBytecode,
+        confirm: () => `Deploy the RouteExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
+        run: async (sent) => {
+          const hash = await sendTx({ data: cb.creationBytecode }, DEPLOY_GAS[cb === S.contracts?.arbExecutor ? "arb" : "route"]);
+          sent(hash);
+          const r = await waitReceipt(hash, 300000);
+          if (r.status !== "0x1" || !isAddr(r.contractAddress)) throw new Error("The deployment failed on-chain.");
+          W.deployed = r.contractAddress;
+          saveDeployed();
+          return { msg: `Deployed at ${r.contractAddress}.`, hash };
+        },
+      }));
+      if (LIVE && !W.account) b.append(h("p", { class: "sub" }, "Connect your wallet first."));
+      return b;
+    }
+    const info = S.wallet?.contracts?.routeExecutor;
+    const isOwner = !!(W.account && info?.owner && info.owner.toLowerCase() === W.account.toLowerCase());
+    b.append(contractRows(addr, info, true, isOwner));
+    if (W.deployed && !envAddr) {
+      const line = `ROUTE_EXECUTOR_ADDRESS=${W.deployed}`;
+      b.append(h("p", { class: "sub" }, "Authorise the bot wallet below, then add this line to .env and restart the bot to send CL and multi-hop routes live. The dashboard can't edit .env."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
+    }
+    if (info?.deployed && W.account && !isOwner) b.append(h("p", { class: "sub" }, "Only the owner can change it or withdraw. Connect the wallet that deployed it."));
+    if (isOwner) {
+      const bot = S.state?.addresses?.bot;
+      const opIsBot = bot && info.operator && info.operator.toLowerCase() === bot.toLowerCase();
+      if (bot && !opIsBot) b.append(action("operator", { label: "Allow the bot key to trade", confirm: () => `Let the bot wallet ${shortAddr(bot)} trade through this contract? It still can't withdraw; only you can.`, run: txRun(addr, SEL.setOperator + encAddr(bot), "Done") }));
+      if (!bot) b.append(h("p", { class: "sub" }, "Set BOT_ADDRESS in .env to allow the bot's key here."));
+      b.append(...withdrawActions("route", addr, info));
+    }
+    return b;
+  }
+  function liqBlock() {
+    const b = h("div", { class: "vblock" }, h("h3", null, "LiquidationExecutor"), h("p", { class: "sub" }, "For Aave V3 liquidations — the latency-tolerant play that suits a home PC. Deploy it, authorise the bot, add its address to .env and set LIQUIDATIONS_LIVE=true. It flash-loans the debt, liquidates, swaps the seized collateral back and keeps the bonus; you own it, the bot's key can run liquidations but never withdraw."));
+    const envAddr = S.state?.addresses?.liqExecutor;
+    const addr = envAddr || W.deployedLiq;
+    if (!addr) {
+      const cb = S.contracts?.liqExecutor;
+      b.append(action("deploy-liq", {
+        label: "Deploy LiquidationExecutor",
+        disabled: !cb || !cb.creationBytecode,
+        confirm: () => `Deploy the LiquidationExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
+        run: async (sent) => {
+          const hash = await sendTx({ data: cb.creationBytecode }, DEPLOY_GAS.liq);
+          sent(hash);
+          const r = await waitReceipt(hash, 300000);
+          if (r.status !== "0x1" || !isAddr(r.contractAddress)) throw new Error("The deployment failed on-chain.");
+          W.deployedLiq = r.contractAddress;
+          saveDeployedLiq();
+          return { msg: `Deployed at ${r.contractAddress}.`, hash };
+        },
+      }));
+      if (LIVE && !W.account) b.append(h("p", { class: "sub" }, "Connect your wallet first."));
+      return b;
+    }
+    const info = S.wallet?.contracts?.liqExecutor;
+    const isOwner = !!(W.account && info?.owner && info.owner.toLowerCase() === W.account.toLowerCase());
+    b.append(contractRows(addr, info, true, isOwner));
+    if (W.deployedLiq && !envAddr) {
+      const line = `LIQ_EXECUTOR_ADDRESS=${W.deployedLiq}`;
+      b.append(h("p", { class: "sub" }, "Authorise the bot wallet below, then add this line to .env, set LIQUIDATIONS_LIVE=true and restart the bot. The dashboard can't edit .env."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
+    }
+    if (info?.deployed && W.account && !isOwner) b.append(h("p", { class: "sub" }, "Only the owner can change it or withdraw. Connect the wallet that deployed it."));
+    if (isOwner) {
+      const bot = S.state?.addresses?.bot;
+      const opIsBot = bot && info.operator && info.operator.toLowerCase() === bot.toLowerCase();
+      if (bot && !opIsBot) b.append(action("operator-liq", { label: "Allow the bot key to run liquidations", confirm: () => `Let the bot wallet ${shortAddr(bot)} run liquidations through this contract? It still can't withdraw; only you can.`, run: txRun(addr, SEL.setOperator + encAddr(bot), "Done") }));
+      if (!bot) b.append(h("p", { class: "sub" }, "Set BOT_ADDRESS in .env to allow the bot's key here."));
+      b.append(...withdrawActions("liq", addr, info));
+    }
+    return b;
+  }
+  function saveDeployedArb() {
+    try {
+      localStorage.setItem("bab.deployedArb", JSON.stringify({ address: W.deployedArb, at: new Date().toISOString() }));
+    } catch {
+      /* the page also shows the address to copy */
+    }
+  }
+  function arbBlock() {
+    const b = h("div", { class: "vblock" }, h("h3", null, "Trading contract (ArbExecutor)"), h("p", { class: "sub" }, "Live mode trades through this. You own it: profits stay in it until you withdraw them to your wallet. The bot wallet can only trade through it, never withdraw."));
+    const envAddr = S.state?.addresses?.executor;
+    const addr = envAddr || W.deployedArb;
+    if (!addr) {
+      const cb = S.contracts?.arbExecutor;
+      b.append(action("arb-deploy", {
+        label: "Deploy the trading contract",
+        kind: "primary",
+        disabled: !cb || !cb.creationBytecode,
+        confirm: () => `Deploy the ArbExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
+        run: async (sent) => {
+          const hash = await sendTx({ data: cb.creationBytecode }, DEPLOY_GAS[cb === S.contracts?.arbExecutor ? "arb" : "route"]);
+          sent(hash);
+          const r = await waitReceipt(hash, 300000);
+          if (r.status !== "0x1" || !isAddr(r.contractAddress)) throw new Error("The deployment failed on-chain.");
+          W.deployedArb = r.contractAddress;
+          saveDeployedArb();
+          return { msg: `Deployed at ${r.contractAddress}.`, hash };
+        },
+      }));
+      if (LIVE && !W.account) b.append(h("p", { class: "sub" }, "Connect your wallet first."));
+      return b;
+    }
+    const info = S.wallet?.contracts?.arbExecutor;
+    const isOwner = !!(W.account && info?.owner && info.owner.toLowerCase() === W.account.toLowerCase());
+    b.append(contractRows(addr, info, true, isOwner));
+    if (W.deployedArb && !envAddr) {
+      const line = `EXECUTOR_ADDRESS=${W.deployedArb}`;
+      b.append(h("p", { class: "sub" }, "Put this line in .env (the dashboard can't edit it). Once the bot wallet is authorised and has gas, also set MODE=live and restart the bot."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
+    }
+    if (envAddr && W.deployedArb && envAddr.toLowerCase() !== W.deployedArb.toLowerCase()) b.append(statusLine("warn", `EXECUTOR_ADDRESS in .env is ${shortAddr(envAddr)}, not the contract you deployed from this browser (${shortAddr(W.deployedArb)}).`));
+    if (info?.deployed && W.account && !isOwner) b.append(h("p", { class: "sub" }, "Only the owner can authorise the bot or withdraw. Connect the wallet that deployed it."));
+    if (isOwner) {
+      const bot = S.state?.addresses?.bot;
+      const opIsBot = bot && info.operator && info.operator.toLowerCase() === bot.toLowerCase();
+      if (bot && !opIsBot) b.append(action("arb-operator", { label: "Authorise bot wallet", kind: "primary", confirm: () => `Let the bot wallet ${shortAddr(bot)} trade through this contract? It still can't withdraw; only you can, and you can take this back at any time.`, run: txRun(addr, SEL.setOperator + encAddr(bot), "Authorised") }));
+      if (bot && opIsBot) b.append(action("arb-revoke", { label: "Revoke the bot wallet", confirm: () => "Stop the bot wallet trading through this contract? The bot stops sending at its next check, within 5 minutes. For an immediate halt, use Stop sending.", run: txRun(addr, SEL.setOperator + encAddr("0x0000000000000000000000000000000000000000"), "Revoked") }));
+      if (!bot) b.append(h("p", { class: "sub" }, "Create the bot wallet first (node dist/main.js new-wallet), then restart the bot."));
+      b.append(...withdrawActions("arb", addr, info));
+    }
+    return b;
+  }
+  function completedDays(n) {
+    const byDay = new Map((S.summary?.days || []).map((d) => [d.day, d]));
+    const out = [];
+    for (let i = n; i >= 1; i--) out.push(byDay.get(utcDay(Date.now() - i * 86400000)) || null);
+    return out;
+  }
+  function readinessBlock() {
+    const b = h("div", { class: "ready" }, h("div", null, h("h3", null, "Live setup"), h("p", { class: "sub" }, "In order, top to bottom. The two .env steps are yours: the dashboard can't edit .env or switch modes.")));
+    const st = S.state;
+    const bot = st?.addresses?.bot;
+    const env = st?.addresses?.executor;
+    const addr = env || W.deployedArb;
+    const info = S.wallet?.contracts?.arbExecutor;
+    const botEth = bot ? S.wallet?.accounts?.[bot.toLowerCase()]?.eth : null;
+    const hasGas = botEth !== null && botEth !== undefined && BigInt(botEth) >= 1000000000000000n;
+    const authorised = !!(bot && info?.operator && info.operator.toLowerCase() === bot.toLowerCase());
+    const lv = st?.safety?.live;
+    const items = [
+      [!!(bot && st?.settings?.hasBotKey), "Bot wallet created", bot && st?.settings?.hasBotKey ? shortAddr(bot) : "Run node dist/main.js new-wallet, then restart the bot"],
+      [!!(addr && info?.deployed), "Trading contract deployed from your wallet", addr ? (info ? (info.deployed ? shortAddr(addr) : "No contract at this address") : "Checking…") : "Press Deploy under Trading contract"],
+      [authorised, "Bot wallet authorised on it", !addr ? "After deploying" : authorised ? "Yes" : "Press Authorise bot wallet"],
+      [hasGas, "Bot wallet has gas money (0.001 ETH or more)", bot ? (botEth !== null && botEth !== undefined ? `${fmtUnits(botEth, 18)} ETH` : "Checking…") : "After creating it"],
+      [!!(env && (!W.deployedArb || env.toLowerCase() === W.deployedArb.toLowerCase())), "EXECUTOR_ADDRESS in .env", env ? shortAddr(env) : "Copy the line shown under Trading contract"],
+      [st?.mode === "live", "MODE=live in .env, then restart the bot", st?.mode === "live" ? "Live" : "Paper, until you change it"],
+      [!!(st?.mode === "live" && lv && !lv.blocked && !st?.stop?.present), "The bot's own check passed", st?.mode !== "live" ? "Runs once live" : st?.stop?.present ? "A STOP file is present" : lv?.blocked ? lv.blocked : "Sending enabled"],
+    ];
+    b.append(h("ol", { class: "checklist" }, items.map(([ok, label, why], i) => h("li", null, icon(ok ? "good" : "skip"), h("span", null, `${i + 1}. ${label}`, h("span", { class: "why" }, why))))));
+    const positive = completedDays(7).filter((d) => d && d.realisticNetUsd > 0).length;
+    b.append(h("p", { class: "sub" }, `Paper results: ${positive} of the last 7 days had a simulated profit.${positive >= 5 ? "" : " Until most days do, a live run tests the setup more than it makes money."} Daily gas limit: ${usd(st?.settings?.maxDailyGasUsd ?? 20)}.`));
+    return b;
+  }
+  function preserveFocus(fn) {
+    const a = document.activeElement;
+    const id = a && a.id;
+    const pos = a && typeof a.selectionStart === "number" ? [a.selectionStart, a.selectionEnd] : null;
+    fn();
+    if (!id) return;
+    const n = $(id);
+    if (n && n !== a) {
+      n.focus({ preventScroll: true });
+      if (pos && n.setSelectionRange) {
+        try {
+          n.setSelectionRange(pos[0], pos[1]);
+        } catch {
+          /* not a text field */
+        }
+      }
+    }
+  }
+  function renderWallet() {
+    const box = $("vault-body");
+    preserveFocus(() => {
+      clear(box);
+      // The RouteExecutor lets concentrated-liquidity and multi-hop routes trade live too; fold it
+      // away only when the two-pool ArbExecutor isn't set up yet, so the first deploy stays simple.
+      const hasRoute = !!(S.state?.addresses?.routeExecutor || W.deployed);
+      const route = hasRoute ? routeBlock() : h("details", { class: "optional" }, h("summary", null, "RouteExecutor: deploy to trade CL and multi-hop routes live too"), routeBlock());
+      const hasLiq = !!(S.state?.addresses?.liqExecutor || W.deployedLiq);
+      const liq = hasLiq ? liqBlock() : h("details", { class: "optional" }, h("summary", null, "LiquidationExecutor: deploy to run Aave liquidations"), liqBlock());
+      const contracts = h("div", { class: "vcol" }, arbBlock(), route, liq);
+      box.append(h("div", { class: "vgrid" }, accountBlock(), botBlock(), contracts), readinessBlock());
+    });
+    $("wallet-btn").textContent = W.account ? shortAddr(W.account) : "Connect wallet";
+  }
+
+  // ---------------------------------------------------------------- shared
+  function renderSummaryParts() {
+    renderHero();
+    renderFigures();
+    renderDays();
+    renderStrategies();
+    renderRivals();
+    renderLiq();
+    renderWallet();
+  }
+  function initTheme() {
+    const root = document.documentElement;
+    let saved = null;
+    try {
+      saved = localStorage.getItem("bab.theme");
+    } catch {
+      /* fine */
+    }
+    if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
+    const effective = () => root.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const label = () => ($("theme-btn").textContent = effective() === "dark" ? "Light theme" : "Dark theme");
+    label();
+    $("theme-btn").addEventListener("click", () => {
+      const next = effective() === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try {
+        localStorage.setItem("bab.theme", next);
+      } catch {
+        /* fine */
+      }
+      label();
+    });
+  }
+  function initStatic() {
+    initTheme();
+    const tape = $("tape");
+    tape.addEventListener("pointermove", onTapePointer);
+    tape.addEventListener("pointerdown", onTapePointer);
+    tape.addEventListener("pointerleave", () => {
+      hideTip();
+      markTape(null);
+    });
+    $("days-toggle").addEventListener("click", () => {
+      S.tables.days = !S.tables.days;
+      renderDays();
+    });
+    $("hourly-toggle").addEventListener("click", () => {
+      S.tables.hourly = !S.tables.hourly;
+      renderHourly();
+    });
+    $("wallet-btn").addEventListener("click", () => {
+      $("wallet").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+      if (LIVE && !W.account && W.providers.size === 1) connect([...W.providers.values()][0]);
+    });
+    let rz = 0;
+    let lastW = window.innerWidth;
+    window.addEventListener("resize", () => {
+      clearTimeout(rz);
+      rz = setTimeout(() => {
+        if (window.innerWidth === lastW) return;
+        lastW = window.innerWidth;
+        renderDays();
+        renderHourly();
+      }, 120);
+    });
+    window.addEventListener("scroll", hideTip, { passive: true });
+    setInterval(() => {
+      renderHeader();
+      if (!LIVE || S.state?.running) {
+        const fb = $("foot");
+        if (fb && S.state) renderFooter();
+      }
+    }, 1000);
+  }
+
+  // ---------------------------------------------------------------- start
+  function boot() {
+    initStatic();
+    if (!LIVE) {
+      startDemo();
+      return;
+    }
+    loadState(true).catch(() => renderHeader());
+    loadRecent();
+    loadSummary();
+    loadContracts();
+    loadReview();
+    if (CLOUD) startPolling();
+    else connectEvents();
+    initWallets();
+    refreshWalletData();
+    const every = (ms, fn) => setInterval(() => !document.hidden && !S.stale && fn(), ms);
+    every(15000, () => loadState(false).catch(() => {}));
+    every(20000, loadSummary);
+    every(60000, refreshWalletData);
+    every(600000, loadReview);
+  }
+
+  // ---------------------------------------------------------------- example data (preview only)
+  function startDemo() {
+    let seed = 20261008;
+    const rnd = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const pick = (a) => a[Math.floor(rnd() * a.length)];
+    const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
+    const addr = () => `0x${hex(40)}`;
+    const now = Date.now();
+    const today = utcDay(now);
+    const rivals = Array.from({ length: 9 }, addr);
+    const bot = addr();
+    const T = {
+      WETH: { d: 18, p: 2450 }, USDC: { d: 6, p: 1 }, cbBTC: { d: 8, p: 98000 }, AERO: { d: 18, p: 0.92 },
+      VIRTUAL: { d: 18, p: 1.6 }, cbETH: { d: 18, p: 2690 }, DEGEN: { d: 18, p: 0.004 }, BRETT: { d: 18, p: 0.05 },
+    };
+    const units = (x, d) => (d >= 6 ? BigInt(Math.round(x * 1e6)) * 10n ** BigInt(d - 6) : BigInt(Math.round(x * 10 ** d))).toString();
+    const ROUTES = [
+      [["WETH", "USDC", "WETH"], ["uniswap-v3", "aerodrome"], "cl"],
+      [["WETH", "cbBTC", "WETH"], ["slipstream", "uniswap-v3"], "cl"],
+      [["WETH", "AERO", "WETH"], ["aerodrome", "uniswap-v2"], "classic"],
+      [["WETH", "VIRTUAL", "WETH"], ["uniswap-v2", "baseswap"], "classic"],
+      [["cbETH", "WETH", "cbETH"], ["slipstream", "uniswap-v3"], "cl"],
+      [["WETH", "USDC", "AERO", "WETH"], ["uniswap-v3", "aerodrome", "slipstream"], "triangular"],
+      [["WETH", "DEGEN", "WETH"], ["uniswap-v3", "uniswap-v2"], "classic"],
+      [["WETH", "BRETT", "USDC", "WETH"], ["uniswap-v2", "slipstream", "uniswap-v3"], "triangular"],
+    ];
+    const FEES = { "uniswap-v3": 500, slipstream: 100, aerodrome: 3000, "uniswap-v2": 3000, baseswap: 2500 };
+    let n = 52418000 + Math.floor(rnd() * 900);
+    let idSeq = 0;
+    function makeOpp(block, at, withOutcome) {
+      const [tokens, dexes, kind] = pick(ROUTES);
+      const net = Math.round((0.26 + rnd() ** 2.4 * 9) * 100) / 100;
+      const gas = 0.004 + rnd() * 0.02;
+      const start = T[tokens[0]];
+      const amountUsd = 800 + rnd() * 6000;
+      let amt = amountUsd / start.p;
+      const legs = [];
+      for (let i = 0; i < dexes.length; i++) {
+        const a = T[tokens[i]];
+        const b = T[tokens[i + 1]];
+        const out = i === dexes.length - 1 ? amt * (a.p / b.p) + (net + gas) / b.p : amt * (a.p / b.p) * (1 + (rnd() - 0.4) * 0.004);
+        legs.push({ dex: dexes[i], pool: addr(), from: { symbol: tokens[i], decimals: a.d }, to: { symbol: tokens[i + 1], decimals: b.d }, amountIn: units(amt, a.d), amountOut: units(out, b.d), feePpm: FEES[dexes[i]] });
+        amt = out;
+      }
+      const o = {
+        id: `demo-${++idSeq}`, block, foundAt: new Date(at).toISOString(),
+        pair: tokens.length > 3 ? tokens.join(" › ") : `${tokens[0]}/${tokens[1]}`,
+        via: dexes, kind, hops: dexes.length, netUsd: net, profitUsd: net + gas, gasUsd: gas,
+        sim: rnd() < 0.9 ? "executor-ok" : "quoter-mismatch", simDetail: null,
+        stage: rnd() < 0.18 ? "flashblock" : "block", msIntoBlock: Math.round(200 + rnd() * 1400), legs, outcome: null,
+      };
+      if (withOutcome) o.outcome = demoOutcome(o);
+      return o;
+    }
+    function demoOutcome(o) {
+      const r = rnd();
+      if (r < 0.2) return { id: o.id, status: "persisted", realisticNetUsd: Math.max(0, o.netUsd * (0.6 + rnd() * 0.4)), takenBy: null };
+      if (r < 0.72) return { id: o.id, status: "taken", realisticNetUsd: 0, takenBy: pick(rivals), takenTx: `0x${hex(64)}` };
+      return { id: o.id, status: "closed", realisticNetUsd: 0, takenBy: null };
+    }
+    const blocks = [];
+    for (let i = 0; i < TAPE_MAX; i++) blocks.push(makeBlock(n - TAPE_MAX + i, now - (TAPE_MAX - i) * 2000));
+    function makeBlock(num, at) {
+      const r = rnd();
+      const opps = r < 0.11 ? 1 + (rnd() < 0.25 ? 1 : 0) : 0;
+      const arbs = rnd() < 0.4 ? 1 + Math.floor(rnd() * 3) : 0;
+      return { n: num, at, ms: Math.round(180 + rnd() * 700), opps, bestNetUsd: opps ? Math.round((0.3 + rnd() * 4) * 100) / 100 : null, mev: arbs + (rnd() < 0.05 ? 1 : 0), arbs, gasUsd: 0.006 + rnd() * 0.01, ethUsd: 2450 };
+    }
+    blocks.splice(40, 1);
+    const feed = [];
+    for (let i = 0; i < 16; i++) feed.push(makeOpp(n - 10 - i * 37, now - (i + 1) * 74000, true));
+    const days = [];
+    for (let i = 0; i < 14; i++) {
+      const found = Math.round(60 + rnd() * 120);
+      const persisted = Math.round(found * (0.1 + rnd() * 0.12));
+      const taken = Math.round(found * (0.45 + rnd() * 0.1));
+      const day = utcDay(now - i * 86400000);
+      days.push({ day, found, persisted, taken, closed: Math.max(0, found - persisted - taken - (i ? 0 : 6)), pending: i ? 0 : 6, simMismatches: Math.round(found * 0.04), realisticNetUsd: i === 9 ? 0 : Math.round(persisted * (0.4 + rnd() * 1.6) * 100) / 100, optimisticNetUsd: Math.round(found * (0.5 + rnd() * 0.9) * 100) / 100 });
+    }
+    Object.assign(days[0], { found: 142, persisted: 25, taken: 70, closed: 41, pending: 6, realisticNetUsd: 12.4, optimisticNetUsd: 61.2 });
+    const kinds = [["concentrated-liquidity two-pool", 0.18], ["classic V2 two-pool", 0.11], ["triangular / multi-hop", 0.07]].map(([key, w], i) => {
+      const found = [88, 39, 15][i];
+      const done = found - 2;
+      const persisted = Math.round(done * w);
+      return { key, found, persisted, taken: Math.round(done * 0.55), closed: done - persisted - Math.round(done * 0.55), winRate: persisted / done, realisticNetUsd: Math.round(persisted * 0.62 * 100) / 100, optimisticNetUsd: found * 0.7 };
+    });
+    const hourly = Array.from({ length: 24 }, (_, i) => ({ hour: `${String(i).padStart(2, "0")}:00`, txs: i > new Date(now).getUTCHours() ? 0 : Math.round(60 + 70 * Math.sin((i / 24) * Math.PI * 2 - 1.2) ** 2 + rnd() * 40), profitUsd: Math.round(rnd() * 900) }));
+    S.summary = {
+      generatedAt: new Date(now).toISOString(), day: today, days,
+      today: {
+        byKind: kinds,
+        byStage: [{ key: "block", found: 116, persisted: 19, taken: 60, closed: 31, winRate: 0.17, realisticNetUsd: 10.2 }, { key: "flashblock", found: 26, persisted: 6, taken: 12, closed: 6, winRate: 0.25, realisticNetUsd: 3.4 }],
+        scores: [
+          { key: "WETH/USDC [uniswap-v3>aerodrome]", found: 31, persisted: 7, taken: 15, closed: 8, winRate: 0.23, realisticNetUsd: 5.12 },
+          { key: "WETH/cbBTC [slipstream>uniswap-v3]", found: 18, persisted: 4, taken: 10, closed: 3, winRate: 0.24, realisticNetUsd: 3.37 },
+          { key: "WETH/AERO [aerodrome>uniswap-v2]", found: 22, persisted: 3, taken: 12, closed: 6, winRate: 0.14, realisticNetUsd: 1.08 },
+        ],
+        takers: rivals.slice(0, 4).map((b, i) => ({ bot: b, count: [41, 17, 9, 4][i] })),
+        byPair: [],
+      },
+      market: {
+        arbitrageTxs: 2412, arbitrageProfitUsd: 3184, sandwichTxs: 37, sandwichProfitUsd: 212,
+        bots: rivals.slice(0, 8).map((b, i) => ({ bot: b, txs: [912, 433, 288, 201, 140, 96, 71, 40][i], arbitrage: [904, 430, 280, 199, 140, 95, 70, 40][i], sandwich: 0, profitUsd: [1460, 612, 380, 251, 170, 122, 88, 41][i], costUsd: [21.4, 9.8, 6.1, 4.2, 2.9, 2.2, 1.4, 0.8][i], unpricedTxs: 0, lastSeenBlock: n })),
+        topPairs: [], hourly,
+        arbPriority: { samples: 412, medianGwei: 0.0062, p90Gwei: 0.0415, maxGwei: 0.31 },
+      },
+      liq: { day: today, found: 3, taken: 2, recovered: 0, open: 1, estProfitUsd: 41.3, realisticProfitUsd: 12.4, liquidators: [], biggest: [] },
+    };
+    S.recent = {
+      opps: feed,
+      mev: [],
+      coverage: { sample: 300, allWatched: 171, someWatched: 94, noneWatched: 35 },
+      liq: [
+        { id: "l1", block: n - 300, foundAt: new Date(now - 3.1e6).toISOString(), user: addr(), healthFactor: 0.987, debtSymbol: "USDC", collateralSymbol: "WETH", repayUsd: 1240, bonusPct: 5, estProfitUsd: 12.4, outcome: "open", takenBy: null },
+        { id: "l2", block: n - 900, foundAt: new Date(now - 9.4e6).toISOString(), user: addr(), healthFactor: 0.962, debtSymbol: "WETH", collateralSymbol: "cbETH", repayUsd: 3880, bonusPct: 7.5, estProfitUsd: 22.1, outcome: "taken", takenBy: rivals[2] },
+        { id: "l3", block: n - 1400, foundAt: new Date(now - 1.6e7).toISOString(), user: addr(), healthFactor: 0.991, debtSymbol: "USDC", collateralSymbol: "cbBTC", repayUsd: 610, bonusPct: 6.5, estProfitUsd: 6.8, outcome: "taken", takenBy: rivals[5] },
+      ],
+      live: [],
+    };
+    S.feed = feed;
+    const startedAt = new Date(now - 26.5 * 3600000).toISOString();
+    const st = {
+      version: "0.5.0", running: true, mode: "paper", startedAt, now: new Date(now).toISOString(), chainId: 8453, ethUsd: 2450,
+      pools: { total: 396, cl: 305, pairs: 118 }, blocks,
+      rpc: { since: startedAt, requests: 512340, byMethod: { eth_call: 301220, eth_getLogs: 47710, eth_blockNumber: 118200, eth_getBlockByNumber: 45210 }, alchemyCu: 1.31e7, alchemyCuPerDay: 5.9e6, activeEndpoint: "https://mainnet.base.org", onPrimary: true, failovers: 0, transientErrors: 41, rateLimited: 12 },
+      refresh: { checks: 636, driftedPools: 2, lastCheckBlock: n - 40, lastDrift: [{ pool: addr(), dex: "slipstream", block: n - 4840 }, { pool: addr(), dex: "uniswap-v3", block: n - 9120 }] },
+      flashblocks: null, liquidations: { watched: 1843, stats: { checks: 9120, liquidatable: 3, recorded: 3 } },
+      stop: { present: false, reason: null },
+      funnel: { scans: 47510, candidates: 1284310, unpriced: 2210, gasAteIt: 1257402, belowMin: 18890, muted: 412, learnedSkip: 3120, overlapping: 4120, verified: 1095, reverted: 31, quoteMismatch: 58, unverified: 92 },
+      paper: { recorded: 142, alreadyTracked: 1104 },
+      learning: {
+        since: new Date(now - 6 * 86400000).toISOString(), halfLifeHours: 72,
+        counts: { sims: 4210, outcomes: 1388, rivalArbs: 15240, liveSends: 0, routes: 312, tokens: 188 },
+        skipping: [
+          { token: addr(), sym: "TIBBIR", p: 0.96, n: 41.2, why: "TransferFailed()", blocked: false },
+          { token: addr(), sym: "Fren Pet", p: 0.91, n: 12.5, why: "Error(Pancake: K)", blocked: false },
+          { token: addr(), sym: "WEBSIM", p: 0.83, n: 6, why: "InsufficientProfit(0,1)", blocked: false },
+        ],
+        routes: [
+          { key: "a", label: "WETH>VIRTUAL>GAME>WETH [aerodrome>uniswap-v2>slipstream]", kind: "route", found: 61.4, testFail: 0.12, tests: 40.2, stillThere: 0.58, takenShare: 0.31, topRival: addr(), live: null, bidMult: 1, lastSeen: new Date(now - 120000).toISOString() },
+          { key: "b", label: "USDC/AERO [aerodrome>uniswap-v2]", kind: "classic", found: 22.9, testFail: 0.05, tests: 19.1, stillThere: 0.71, takenShare: 0.12, topRival: addr(), live: null, bidMult: 1, lastSeen: new Date(now - 600000).toISOString() },
+          { key: "c", label: "WETH/DEGEN [uniswap-v3>uniswap-v2]", kind: "classic", found: 9.3, testFail: 0.4, tests: 8.6, stillThere: 0.22, takenShare: 0.67, topRival: addr(), live: null, bidMult: 1, lastSeen: new Date(now - 3600000).toISOString() },
+        ],
+        landRate: { classic: 0.48, route: 0.55 },
+        bids: [
+          { bucket: "<$0.50", samples: 400, p50: 0.0011, p60: 0.0016, p90: 0.012 },
+          { bucket: "$0.50-2", samples: 400, p50: 0.0019, p60: 0.0031, p90: 0.21 },
+          { bucket: "$2-10", samples: 233, p50: 0.0042, p60: 0.0105, p90: 0.88 },
+          { bucket: "$10+", samples: 61, p50: 0.031, p60: 0.09, p90: 4.2 },
+        ],
+        live: { sent: 0, ok: 0, reverted: 0, racesLost: 0, gasUsd: 0 },
+        pools: { tracked: 396, quiet: 51, prunedTotal: 214, pruneAfterDays: 3 },
+        recentSkips: [{ label: "WETH>VIRTUAL>TIBBIR>WETH", why: "TIBBIR failed 96% of 41 test runs", at: new Date(now - 30000).toISOString() }],
+      },
+      tuning: {
+        effective: { minProfitUsd: 0.25, maxBidShare: 0.3, evMinUsd: 0.01 }, fromEnv: { minProfitUsd: 0.25, maxBidShare: 0.3, evMinUsd: 0.01 }, overrides: {}, blockedTokens: [], applied: [],
+        suggestions: [{ id: "block:x", key: "blockToken", value: addr(), current: null, title: "Block TIBBIR", why: "Failed 96% of 41 recent test runs (last: TransferFailed()). Blocking it stops the re-tests and drops its pools.", source: "bot" }],
+        limits: { minProfitUsd: { min: 0.05, max: 5 }, maxBidShare: { min: 0, max: 0.5 }, evMinUsd: { min: 0, max: 1 } },
+      },
+      safety: { mode: "paper", signer: false, liveSubmission: false, maxConsecutiveFailures: 5, live: null },
+      capabilities: [
+        { name: "Two-pool trades on V2-style pools (Uniswap V2, SushiSwap, BaseSwap, Aerodrome)", built: "yes", tested: "Maths unit tests and a full paper run on a mock chain; ArbExecutor EVM tests need solc", paper: "on", live: "allowed" },
+        { name: "Concentrated-liquidity pools (Uniswap V3, Aerodrome Slipstream)", built: "yes", tested: "Tick maths checked against reference values; every find re-checked by the DEX's own quoter or a simulation", paper: "on", live: "blocked" },
+        { name: "Triangular and multi-hop routes (RouteExecutor)", built: "yes", tested: "Route engine unit tests; RouteExecutor EVM tests (forge, 9 passing)", paper: "on", live: "blocked" },
+        { name: "Reacting to Flashblocks (pre-confirmed state)", built: "yes", tested: "Not covered by automated tests", paper: "off", live: "blocked" },
+        { name: "Aave V3 liquidations", built: "partly", tested: "Monitor only: profit is an estimate, not simulated; not covered by automated tests", paper: "on", live: "n/a" },
+        { name: "Uniswap V4, Curve and Balancer pools", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
+        { name: "Splitting a trade across several pools", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
+        { name: "Liquidation executor contract", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
+        { name: "Encrypted key store (instead of PRIVATE_KEY in .env)", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
+      ],
+      code: { branch: "upgrade/v3-multihop-flashblocks-liquidations", commit: "c7d8ce8" },
+      telegram: false,
+      addresses: { bot, executor: null, routeExecutor: null },
+      settings: { minProfitUsd: 0.25, maxPools: 400, minPoolLiquidityWeth: 2, clPools: true, multiHop: true, maxHops: 3, flashSource: "morpho", flashblocks: false, liquidations: true, refreshMode: "events", fullRefreshBlocks: 150, priorityFeeGwei: 0.005, rpcFallbacks: 1, mevFeed: true },
+    };
+    S.contracts = { chainId: 8453, bot, routeExecutor: { address: null, creationBytecode: null, bytes: 6123, compiler: "solc 0.8.26" }, arbExecutor: { address: null }, tokens: {} };
+    S.wallet = { accounts: { [bot]: { eth: "4200000000000000", weth: "0", usdc: "0" } }, contracts: {} };
+    S.review = {
+      file: `ai-review-${today}.md (example)`,
+      modified: new Date(now - 7.2e6).toISOString(),
+      text: [
+        "# Daily review (example)",
+        "",
+        "This is placeholder text so you can see the layout. Your real review appears here after the scheduled Opus review runs each morning.",
+        "",
+        "## What the numbers say",
+        "- Concentrated-liquidity routes between **Uniswap V3** and **Aerodrome** were still there one block later most often (23%).",
+        "- About half of all finds were taken by other bots within a block. The busiest rival pays a median priority fee above `PRIORITY_FEE_GWEI`.",
+        "- 12% of rival arbitrages used pools the bot doesn't watch at all.",
+        "",
+        "## Suggestions (you decide)",
+        "1. Keep `MIN_PROFIT_USD` at 0.25 for another week before judging the CL routes.",
+        "2. Add the pools behind the uncovered rival trades to the watch list.",
+        "",
+        "| Strategy | Found | Still there |",
+        "|---|---|---|",
+        "| Two pools, concentrated liquidity | 88 | 18% |",
+        "| Two pools, V2-style | 39 | 11% |",
+        "| Triangular | 15 | 7% |",
+      ].join("\n"),
+    };
+    S.blocks = blocks;
+    S.lastBlockSeen = now - 900;
+    renderTape();
+    applyState(st, false);
+    renderSummaryParts();
+    renderFeed();
+    renderReview();
+    let pending = [];
+    setInterval(() => {
+      n += 1;
+      const b = makeBlock(n, Date.now());
+      st.now = new Date().toISOString();
+      onBlock(b);
+      pending = pending.filter((p) => {
+        if (n - p.block < 2) return true;
+        onOutcome(demoOutcome(p));
+        return false;
+      });
+      if (b.opps) {
+        const o = makeOpp(n, Date.now(), false);
+        pending.push(o);
+        onOpp(o);
+      }
+      st.funnel.candidates += 20 + Math.floor(rnd() * 14);
+      st.funnel.gasAteIt += 19 + Math.floor(rnd() * 12);
+      if (b.opps) {
+        st.funnel.verified++;
+        st.paper.recorded++;
+      }
+    }, 2000);
+  }
+
+  boot();
+})();
+</script>

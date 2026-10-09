@@ -35,6 +35,7 @@ import { AbiCoder, type Log } from "ethers";
 import { AAVE_V3 } from "./config.js";
 import { TOPIC_AAVE_BORROW, TOPIC_AAVE_LIQUIDATION, aaveDataProviderIface, aaveOracleIface, aavePoolIface, erc20Iface } from "./abi.js";
 import type { Chain, Call } from "./rpc.js";
+import type { LiquidatablePosition } from "./liquidate.js";
 import type { Store } from "./store.js";
 import { log } from "./log.js";
 
@@ -116,6 +117,8 @@ export class LiquidationMonitor {
   private logRange = 500;
   private dirtyBorrowers = false;
   stats = { checks: 0, liquidatable: 0, recorded: 0 };
+  /** Live sender hook: called with each profitable liquidatable position (set by main only when live). */
+  onLiquidatable?: (pos: LiquidatablePosition) => void;
 
   constructor(readonly chain: Chain, readonly store: Store, readonly opts: LiqOptions) {}
 
@@ -309,7 +312,7 @@ export class LiquidationMonitor {
     const prices = aaveOracleIface.decodeFunctionResult("getAssetsPrices", pr.returnData)[0] as bigint[];
     const unit = ur.success ? Number(abi.decode(["uint256"], ur.returnData)[0]) : 1e8;
 
-    let best: { debt?: { a: string; usd: number }; coll?: { a: string; usd: number } } = {};
+    let best: { debt?: { a: string; usd: number; price: number; decimals: number }; coll?: { a: string; usd: number } } = {};
     assets.forEach((a, i) => {
       const r = res[i]!;
       if (!r.success) return;
@@ -319,7 +322,7 @@ export class LiquidationMonitor {
       const toUsd = (x: bigint) => (Number(x) / 10 ** meta.decimals) * price;
       const debtUsd = toUsd((d[1] as bigint) + (d[2] as bigint));
       const collUsd = d[8] ? toUsd(d[0] as bigint) : 0;
-      if (debtUsd > (best.debt?.usd ?? 0)) best.debt = { a, usd: debtUsd };
+      if (debtUsd > (best.debt?.usd ?? 0)) best.debt = { a, usd: debtUsd, price, decimals: meta.decimals };
       if (collUsd > (best.coll?.usd ?? 0)) best.coll = { a, usd: collUsd };
     });
     if (!best.debt || !best.coll || best.debt.usd < this.opts.minDebtUsd) return;
@@ -362,6 +365,27 @@ export class LiquidationMonitor {
     log.info(
       `liquidation: ${user.slice(0, 10)} HF ${hf.toFixed(4)} — repay $${repayUsd.toFixed(0)} ${debtMeta.symbol} for ${collMeta.symbol} (+${rec.bonusPct.toFixed(1)}%), est. profit $${estProfitUsd.toFixed(2)}`,
     );
+    // Hand a live sender the raw amount to repay (debt units), if one is attached and it looks profitable.
+    if (this.onLiquidatable && estProfitUsd > 0 && best.debt.price > 0) {
+      const debtToCover = BigInt(Math.floor((repayUsd / best.debt.price) * 10 ** best.debt.decimals));
+      if (debtToCover > 0n) {
+        try {
+          this.onLiquidatable({
+            id: rec.id,
+            block,
+            user,
+            collateralAsset: collMeta.asset,
+            collateralSymbol: collMeta.symbol,
+            debtAsset: debtMeta.asset,
+            debtSymbol: debtMeta.symbol,
+            debtToCover,
+            estProfitUsd,
+          });
+        } catch (err) {
+          log.warn("live liquidation hook failed:", (err as Error).message.slice(0, 140));
+        }
+      }
+    }
   }
 
   /** Resolve pending candidates: taken by someone, recovered, or still open after N blocks. */

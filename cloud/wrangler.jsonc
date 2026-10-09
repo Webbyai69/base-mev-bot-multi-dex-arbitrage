@@ -1,0 +1,26 @@
+// Online copy of the bot's dashboard. Deployed by Cloudflare Workers Builds
+// (Git integration) with this folder as the root directory; see README.md here.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // Must match the Worker's name in the Cloudflare dashboard.
+  "name": "base-arb-dashboard",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-09-01",
+  "workers_dev": true,
+  // No per-version preview URLs: only the workers.dev address exists, and Access protects it.
+  "preview_urls": false,
+  // ACCESS_TEAM_DOMAIN and ACCESS_AUD are set in the dashboard; keep them across deploys.
+  "keep_vars": true,
+  "vars": {
+    // Public Base RPC used only for the wallet panel's balance reads.
+    "BASE_RPC_URL": "https://mainnet.base.org"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "MIRROR", "class_name": "BotMirror" }]
+  },
+  // SQLite-backed Durable Objects work on the Workers Free plan.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BotMirror"] }],
+  // ui/dashboard.html is imported as a string.
+  "rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }],
+  "observability": { "enabled": true }
+}
