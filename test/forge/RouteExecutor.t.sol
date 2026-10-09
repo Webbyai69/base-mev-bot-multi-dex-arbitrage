@@ -633,8 +633,8 @@ contract RouteExecutorTest {
         require(weth.balanceOf(MORPHO) == 1000e18, "Morpho not repaid");
     }
 
-    /// Uniswap V4, token/token (kind 4): WETH ->(V4 at 3000)-> USDC ->(V2 at 2900)-> WETH profits,
-    /// exercising unlock -> swap -> sync/settle -> take and the balanceOf-based hop accounting.
+    // Uniswap V4, token/token (kind 4): WETH ->(V4 at 3000)-> USDC ->(V2 at 2900)-> WETH profits,
+    // exercising unlock -> swap -> sync/settle -> take and the balanceOf-based hop accounting.
     function testV4TokenRouteProfits() public {
         _etchV4();
         (address c0, address c1) = address(weth) < address(usdc) ? (address(weth), address(usdc)) : (address(usdc), address(weth));
@@ -660,8 +660,8 @@ contract RouteExecutorTest {
         require(weth.balanceOf(address(ex)) == profit, "profit not held");
     }
 
-    /// Uniswap V4, native-ETH pool, WETH as the INPUT (kind 5): the executor unwraps WETH->ETH to
-    /// pay (settle{value}) and takes USDC. WETH ->(V4 native at 3000)-> USDC ->(V2 at 2900)-> WETH.
+    // Uniswap V4, native-ETH pool, WETH as the INPUT (kind 5): the executor unwraps WETH->ETH to
+    // pay (settle value) and takes USDC. WETH ->(V4 native at 3000)-> USDC ->(V2 at 2900)-> WETH.
     function testV4NativeInputRouteProfits() public {
         _etchV4();
         MockV4PoolManager(payable(PM)).setPrice(address(0), address(usdc), 500, 3000, 1); // 3000 USDC per ETH
@@ -689,8 +689,8 @@ contract RouteExecutorTest {
         require(WethMock(payable(WETH9)).balanceOf(address(ex)) == 1e18 + profit, "profit not held");
     }
 
-    /// Uniswap V4, native-ETH pool, WETH as the OUTPUT (kind 5): the executor takes native ETH and
-    /// wraps ETH->WETH on receipt (deposit{value}). USDC ->(V4 native at 3000)-> WETH ->(V2 at 3100)-> USDC.
+    // Uniswap V4, native-ETH pool, WETH as the OUTPUT (kind 5): the executor takes native ETH and
+    // wraps ETH->WETH on receipt (deposit value). USDC ->(V4 native at 3000)-> WETH ->(V2 at 3100)-> USDC.
     function testV4NativeOutputRouteProfits() public {
         _etchV4();
         MockV4PoolManager(payable(PM)).setPrice(address(0), address(usdc), 500, 3000, 1);
