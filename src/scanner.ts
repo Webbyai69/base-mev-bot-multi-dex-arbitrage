@@ -5,7 +5,7 @@
  */
 import type { Learner } from "./learn.js";
 import { AbiCoder } from "ethers";
-import { DEXES, USDC, WETH } from "./config.js";
+import { DEXES, USDC, WETH, V4, NATIVE } from "./config.js";
 import { blocksFor } from "./blocktime.js";
 import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface, v4QuoterIface } from "./abi.js";
 import { quoteArb, type ArbQuote } from "./math.js";
@@ -87,6 +87,8 @@ export interface RouteOptions {
 
 /** RouteExecutor hop kinds (contracts/RouteExecutor.sol). */
 export function hopKind(p: Pool): number {
+  // Uniswap V4 (RouteExecutor kinds 4/5): 5 when the WETH side is native ETH (currency 0x0), else 4.
+  if (p.v4) return p.v4.currency0 === NATIVE || p.v4.currency1 === NATIVE ? 5 : 4;
   if (p.cl) return 2;
   if (p.kind === "aerodrome") return 1;
   return p.feeModel === "bps" ? 3 : 0;
@@ -272,7 +274,9 @@ export class Scanner {
           dexes: r.pools.map((p) => p.dex),
           amounts: r.amounts,
           label,
-          executorHops: r.pools.map((p) => ({ pool: p.address, kind: hopKind(p), feePpm: Math.max(0, p.feePpm) })),
+          // A V4 pool's address is its poolId (not a contract), so the on-chain hop carries the PoolManager;
+          // the executor derives the PoolKey from the hop's tokens + fee. feePpm is the V4 fee tier.
+          executorHops: r.pools.map((p) => ({ pool: p.v4 ? V4.poolManager : p.address, kind: hopKind(p), feePpm: Math.max(0, p.feePpm) })),
         },
       });
     }
