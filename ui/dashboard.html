@@ -1549,6 +1549,22 @@ details.optional[open] > summary { margin-bottom: 8px; }
           h("td", { class: "num" }, r.peakHourUtc >= 0 ? String(r.peakHourUtc).padStart(2, "0") + ":00 UTC" : "–"),
           h("td", { class: "muted" }, r.lastSeen ? clock(r.lastSeen) : "–")))))));
     }
+    if ((L.topPools || []).length) {
+      box.append(h("h3", { style: "margin-top:22px" }, "Top pools — where the action is"));
+      box.append(h("p", { class: "sub" }, "The pools worth watching most, by value-score: depth × how often money moves through them (rivals' arbs and our own finds) × the spread seen. Decayed, so it follows the recent market and is what the scan and the hot set prioritise."));
+      box.append(h("div", { class: "scroll-x" }, h("table", { class: "t" },
+        h("thead", null, h("tr", null, ["Pool", "Pair", "DEX", "Score", "Liq (WETH)", "Rival arbs", "Our finds", "Edge seen"].map((x) => h("th", null, x)))),
+        h("tbody", null, L.topPools.map((p) => h("tr", null, [
+          h("td", null, addrLink(p.pool)),
+          h("td", null, p.pair || "–"),
+          h("td", { class: "muted" }, p.dex || "–"),
+          h("td", { class: "num" }, int(Math.round(p.score || 0))),
+          h("td", { class: "num" }, (p.liqWeth || 0).toFixed(2)),
+          h("td", { class: "num" }, (p.rivalRate || 0).toFixed(1)),
+          h("td", { class: "num" }, (p.foundRate || 0).toFixed(1)),
+          h("td", { class: "num" }, usd(p.edgeUsd || 0)),
+        ]))))));
+    }
   }
   function renderSafety() {
     const box = clear($("safety"));

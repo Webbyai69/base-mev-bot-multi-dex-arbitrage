@@ -55,6 +55,9 @@ export class FlashblockWatcher {
   /** Optional live-send hook: evaluates the finds and sends one immediately (set by main in live mode). */
   private liveSend?: (opps: Opportunity[], ethUsd: number, stage: "flashblock") => void;
 
+  /** Optional pool value-scorer (set by main): ranks the hot set so the most valuable pools are re-read first. */
+  private scoreOf?: (pool: string) => number;
+
   constructor(
     readonly chain: Chain,
     readonly registry: PoolRegistry,
@@ -68,6 +71,11 @@ export class FlashblockWatcher {
     this.liveSend = fn;
   }
 
+  /** Rank the hot set by this pool value-score instead of pure recency, so the best pools are re-read first. */
+  setScorer(fn: (pool: string) => number): void {
+    this.scoreOf = fn;
+  }
+
   /** Called by the block handler after each confirmed block. */
   onConfirmedBlock(ctx: FlashblockContext, interestingPools: Iterable<string>): void {
     this.ctx = ctx;
@@ -77,11 +85,14 @@ export class FlashblockWatcher {
     this.lastSignature = "";
   }
 
-  /** The pools re-read on every tick (most recently interesting first, then their siblings). */
+  /** The pools re-read on every tick: highest value-score first (then recency), then their siblings. */
   hotPools(): Set<string> {
-    const byRecency = [...this.recent.entries()].sort((a, b) => b[1] - a[1]).map(([p]) => p);
+    const score = this.scoreOf;
+    const ranked = [...this.recent.entries()]
+      .sort((a, b) => (score ? score(b[0]) - score(a[0]) : 0) || b[1] - a[1])
+      .map(([p]) => p);
     const out = new Set<string>();
-    for (const p of byRecency) {
+    for (const p of ranked) {
       if (out.size >= this.opts.maxPools) break;
       for (const s of this.registry.siblings([p])) {
         if (out.size >= this.opts.maxPools) break;

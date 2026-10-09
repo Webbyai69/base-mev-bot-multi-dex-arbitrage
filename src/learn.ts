@@ -106,6 +106,12 @@ interface PoolRec {
   activity: number;
   candidate: number;
   rival: number;
+  // Decayed signals for the value-score (0.9). Optional so a pre-0.9 learned.json still loads;
+  // initialised lazily on first bump. rivalHits/foundHits are decayed counts, edgeUsd a decayed
+  // sum of the gross spread (USD) seen moving through the pool (rivals' arbs and our own finds).
+  rivalHits?: Dc;
+  foundHits?: Dc;
+  edgeUsd?: Dc;
 }
 
 /** Per-wallet memory of one rival arbitrage bot: where, when and how it trades (bounded by the RIVAL_* caps below). */
@@ -152,6 +158,19 @@ export interface Evaluation {
   /** Priority fee to bid, in gwei, and how it was chosen. */
   bidGwei: number;
   bidWhy: string;
+}
+
+/** How much a pool is worth watching, and the decayed signals it rests on. */
+export interface PoolScore {
+  score: number;
+  /** Depth passed in by the caller (the learner doesn't read reserves). */
+  liqWeth: number;
+  /** Decayed count of rival arbitrages seen touching this pool. */
+  rivalRate: number;
+  /** Decayed count of our own positive-spread finds touching it. */
+  foundRate: number;
+  /** Decayed sum of gross spread (USD) seen moving through it. */
+  edgeUsd: number;
 }
 
 const PROFIT_BUCKETS: Array<[string, number]> = [
@@ -408,15 +427,26 @@ export class Learner {
 
   private seen(pool: string, now: number): PoolRec {
     let p = this.m.poolSeen[pool];
-    if (!p) p = this.m.poolSeen[pool] = { firstSeen: now, activity: 0, candidate: 0, rival: 0 };
+    if (!p) p = this.m.poolSeen[pool] = { firstSeen: now, activity: 0, candidate: 0, rival: 0, rivalHits: dc(), foundHits: dc(), edgeUsd: dc() };
     return p;
+  }
+
+  /** Add to one of a pool's decayed value-score signals, initialising it if an old file lacked it. */
+  private bumpPool(p: PoolRec, key: "rivalHits" | "foundHits" | "edgeUsd", x: number, now: number): void {
+    this.add((p[key] ??= dc()), x, now);
   }
 
   /** A candidate made it past the price check (before simulation). */
   onFound(o: Opportunity, now = Date.now()): void {
     const r = this.route(o, now);
     this.add(r.found, 1, now);
-    for (const p of r.pools) this.seen(p, now).candidate = now;
+    const edge = Math.max(0, o.profitUsd); // gross spread before gas — "how much money moved here"
+    for (const p of r.pools) {
+      const rec = this.seen(p, now);
+      rec.candidate = now;
+      this.bumpPool(rec, "foundHits", 1, now);
+      if (edge > 0) this.bumpPool(rec, "edgeUsd", edge, now);
+    }
     this.dirty = true;
   }
 
@@ -481,7 +511,13 @@ export class Learner {
       if (d.type !== "arbitrage") continue;
       // Our own trades would teach it to bid against itself.
       if (d.bot && this.self.has(String(d.bot).toLowerCase())) continue;
-      for (const p of d.pools) this.seen(p.toLowerCase(), now).rival = now;
+      const rivalEdge = typeof d.profitUsd === "number" && d.profitUsd > 0 ? d.profitUsd : 0;
+      for (const p of d.pools) {
+        const rec = this.seen(p.toLowerCase(), now);
+        rec.rival = now;
+        this.bumpPool(rec, "rivalHits", 1, now);
+        if (rivalEdge > 0) this.bumpPool(rec, "edgeUsd", rivalEdge, now);
+      }
       if (typeof d.priorityGwei === "number" && d.priorityGwei >= 0) {
         const b = bucketOf(typeof d.profitUsd === "number" ? d.profitUsd : 0);
         const ring = (this.m.rivalFees[b] ??= []);
@@ -667,6 +703,34 @@ export class Learner {
     const failCost = this.opts.revertGasShare * o.gasUsd + this.opts.revertGasShare * extraUsd;
     const evUsd = p * landedNet - (1 - p) * failCost;
     return { pLand: p, evidence, evUsd, bidGwei: Math.round(bid * 1e6) / 1e6, bidWhy: why };
+  }
+
+  /**
+   * How much a pool is worth watching: its depth, amplified by how often money
+   * actually moves through it (rivals' arbs and our own finds) and how large those
+   * spreads were. Multiplicative on a liquidity base — liq x (1 + activity) — so a
+   * deep but quiet pool keeps a baseline while a hot pool floats to the top, and a
+   * shallow pool everyone arbs can still outrank a deep sleepy one. Rebuilt from
+   * decayed memory each call, so it follows the recent market and needs no node.
+   * `liqWeth` comes from the caller — the learner never reads reserves.
+   */
+  poolScore(pool: string, liqWeth: number, now = Date.now()): PoolScore {
+    const s = this.m.poolSeen[pool.toLowerCase()];
+    const rivalRate = s?.rivalHits ? this.val(s.rivalHits, now) : 0;
+    const foundRate = s?.foundHits ? this.val(s.foundHits, now) : 0;
+    const edgeUsd = s?.edgeUsd ? this.val(s.edgeUsd, now) : 0;
+    const liq = Math.max(0, liqWeth);
+    // Rival arbs are the strongest "worth it" signal, our own finds next, and the dollar
+    // edge tips close calls (capped so one fat spread can't swamp the frequency signal).
+    const activity = 1 + 1.5 * rivalRate + 0.5 * foundRate + 0.02 * Math.min(edgeUsd, 500);
+    return { score: liq * activity, liqWeth: liq, rivalRate, foundRate, edgeUsd };
+  }
+
+  /** Top pools by value-score, for the dashboard and for ranking the hot set. `liqOf` supplies depth. */
+  topPools(liqOf: (pool: string) => number, n = 12, now = Date.now()): Array<PoolScore & { pool: string }> {
+    const out: Array<PoolScore & { pool: string }> = [];
+    for (const pool of Object.keys(this.m.poolSeen)) out.push({ pool, ...this.poolScore(pool, liqOf(pool), now) });
+    return out.sort((a, b) => b.score - a.score).slice(0, n);
   }
 
   /**
