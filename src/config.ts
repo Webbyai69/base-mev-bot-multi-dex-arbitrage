@@ -39,7 +39,10 @@ export const TOKENS: Record<string, TokenInfo> = {
 export const WETH = TOKENS.WETH!.address.toLowerCase();
 export const USDC = TOKENS.USDC!.address.toLowerCase();
 
-export type DexKind = "univ2" | "aerodrome" | "univ3" | "slipstream" | "pancakev3";
+export type DexKind = "univ2" | "aerodrome" | "univ3" | "slipstream" | "pancakev3" | "univ4";
+
+/** The zero address: Uniswap V4's native-ETH currency, and a sentinel elsewhere. */
+export const NATIVE = "0x0000000000000000000000000000000000000000";
 
 export interface DexInfo {
   /** Short id used in logs and data files. */
@@ -167,6 +170,29 @@ export const CL_DEXES: ClDexInfo[] = [
     poolKeys: [1, 50, 100, 200, 2000],
   },
 ];
+
+/**
+ * Uniswap V4 (~$197M/day on Base): a singleton PoolManager holding every pool, keyed by a poolId hash of
+ * the PoolKey (currency0, currency1, fee, tickSpacing, hooks). State is read through StateView and quoted
+ * through V4Quoter — there are no per-pool contracts. Quote-only for now (the RouteExecutor has no V4
+ * unlock hop): V4 pools are watched, priced and scanned so V4<->V3/Aerodrome spreads surface in paper, the
+ * dashboard and the value-score, but they never live-send. Verified on-chain: PoolManager/StateView/
+ * V4Quoter have code, the poolId derivation matches live pools, and the deep ETH/USDC pools use native ETH
+ * (currency 0x0), which we map to WETH in the token graph (1:1). Hookless pools only (hooks == 0x0).
+ */
+export const V4 = {
+  poolManager: "0x498581fF718922c3f8e6A244956aF099B2652b2b",
+  stateView: "0xA3c0c9b65baD0b08107Aa264b0f3dB444b867A71",
+  quoter: "0x0d5e0F971ED27FBfF6c2837bf31316121532048D",
+  /** [fee ppm, tickSpacing] tiers probed for each base/counter pair (V4 allows any pair; these are the liquid ones). */
+  feeTiers: [
+    [100, 1],
+    [500, 10],
+    [2500, 50],
+    [3000, 60],
+    [10000, 200],
+  ] as Array<[number, number]>,
+} as const;
 
 /** Free flash loans: Morpho Blue (single token, no fee) and Balancer V2 (fee set by governance, 0 so far). */
 export const MORPHO_BLUE = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb";

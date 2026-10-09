@@ -3,7 +3,7 @@
  * fragments. Event topic hashes are derived here rather than hard-coded so a
  * typo cannot silently break the classifier.
  */
-import { Interface } from "ethers";
+import { Interface, AbiCoder, keccak256 } from "ethers";
 
 export const multicall3Iface = new Interface([
   "function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)",
@@ -197,5 +197,20 @@ export const pancakeV3PoolIface = new Interface([
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint128 protocolFeesToken0, uint128 protocolFeesToken1)",
 ]);
 export const TOPIC_SWAP_PANCAKE_V3 = pancakeV3PoolIface.getEvent("Swap")!.topicHash;
+
+// ---- Uniswap V4 (singleton PoolManager; state via StateView; quotes via V4Quoter) ----
+export const stateViewIface = new Interface([
+  "function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
+  "function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)",
+  "function getTickBitmap(bytes32 poolId, int16 wordPos) view returns (uint256)",
+]);
+export const v4QuoterIface = new Interface([
+  "function quoteExactInputSingle(((address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) poolKey, bool zeroForOne, uint128 exactAmount, bytes hookData) params) returns (uint256 amountOut, uint256 gasEstimate)",
+]);
+const v4Abi = AbiCoder.defaultAbiCoder();
+/** Uniswap V4 pool id: keccak256(abi.encode(PoolKey{currency0,currency1,fee,tickSpacing,hooks})). */
+export function v4PoolId(currency0: string, currency1: string, fee: number, tickSpacing: number, hooks: string): string {
+  return keccak256(v4Abi.encode(["address", "address", "uint24", "int24", "address"], [currency0, currency1, fee, tickSpacing, hooks]));
+}
 export const TOPIC_AAVE_BORROW = aavePoolIface.getEvent("Borrow")!.topicHash;
 export const TOPIC_AAVE_LIQUIDATION = aavePoolIface.getEvent("LiquidationCall")!.topicHash;

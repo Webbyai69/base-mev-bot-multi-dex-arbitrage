@@ -7,7 +7,7 @@ import type { Learner } from "./learn.js";
 import { AbiCoder } from "ethers";
 import { DEXES, USDC, WETH } from "./config.js";
 import { blocksFor } from "./blocktime.js";
-import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface } from "./abi.js";
+import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface, v4QuoterIface } from "./abi.js";
 import { quoteArb, type ArbQuote } from "./math.js";
 import { findCycles, optimizeRoute, routeLabel, type RouteQuote } from "./routes.js";
 import { SIM_EXECUTOR_RUNTIME } from "./simBytecode.js";
@@ -108,7 +108,7 @@ export const SIM_ROUTE_OVERRIDE_ADDRESS = "0x00000000000000000000000000000000a4b
  * executor simulation, so it is a real paper find (quoter-ok) and never reaches a live send (which
  * requires executor-ok). Remove a kind here once the RouteExecutor is rebuilt with its callback.
  */
-const QUOTE_ONLY_KINDS = new Set<string>(["pancakev3"]);
+const QUOTE_ONLY_KINDS = new Set<string>(["pancakev3", "univ4"]);
 
 const routeKeyOf = routeKey;
 
@@ -624,6 +624,18 @@ const MAX_SQRT_MINUS_ONE = 1461446703485210103287273052203988822378723970341n;
 
 /** One exact-input quote for a hop, using the pool type's own on-chain quoter. */
 function hopQuoteCall(pool: Pool, tokenIn: string, tokenOut: string, amountIn: bigint): Call {
+  if (pool.v4) {
+    // V4Quoter takes the PoolKey (real currencies, native ETH as 0x0) + direction, not a univ3-style quote.
+    // tokenIn is the graph token (native ETH shows as WETH); token0 is the graph token for currency0.
+    const zeroForOne = tokenIn.toLowerCase() === pool.token0;
+    const params = {
+      poolKey: { currency0: pool.v4.currency0, currency1: pool.v4.currency1, fee: pool.v4.fee, tickSpacing: pool.v4.tickSpacing, hooks: pool.v4.hooks },
+      zeroForOne,
+      exactAmount: amountIn,
+      hookData: "0x",
+    };
+    return { target: pool.cl!.quoter, callData: v4QuoterIface.encodeFunctionData("quoteExactInputSingle", [params]) };
+  }
   if (pool.cl) {
     const zeroForOne = tokenIn === pool.token0;
     const limit = zeroForOne ? MIN_SQRT_PLUS_ONE : MAX_SQRT_MINUS_ONE;
