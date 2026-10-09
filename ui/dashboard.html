@@ -1535,6 +1535,20 @@ details.optional[open] > summary { margin-bottom: 8px; }
           h("td", { class: "num" }, r.live ? `${r.live.ok}/${r.live.sent}` : "–"),
           h("td", { class: "num" }, String(r.bidMult))))))));
     }
+    if ((L.rivals || []).length) {
+      box.append(h("h3", { style: "margin-top:22px" }, "Top rivals — who's winning and how"));
+      box.append(h("p", { class: "sub" }, "Real competitors only (shared routers and aggregators are filtered out), from the per-wallet memory: where, when and how hard each one trades."));
+      box.append(h("div", { class: "scroll-x" }, h("table", { class: "t" },
+        h("thead", null, h("tr", null, ["Bot", "Arbs", "Profit", "Favourite tokens", "Median bid", "Busiest hour", "Last seen"].map((x) => h("th", null, x)))),
+        h("tbody", null, L.rivals.map((r) => h("tr", null,
+          h("td", null, h("i", { class: "marker m-rival" }), addrLink(r.bot)),
+          h("td", { class: "num" }, int(r.arbs)),
+          h("td", { class: "num" }, usd(r.profitUsd)),
+          h("td", null, (r.topTokens || []).join(", ") || "–"),
+          h("td", { class: "num" }, r.medianFeeGwei === null || r.medianFeeGwei === undefined ? "–" : r.medianFeeGwei + " gwei"),
+          h("td", { class: "num" }, r.peakHourUtc >= 0 ? String(r.peakHourUtc).padStart(2, "0") + ":00 UTC" : "–"),
+          h("td", { class: "muted" }, r.lastSeen ? clock(r.lastSeen) : "–")))))));
+    }
   }
   function renderSafety() {
     const box = clear($("safety"));
