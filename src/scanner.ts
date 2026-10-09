@@ -6,6 +6,7 @@
 import type { Learner } from "./learn.js";
 import { AbiCoder } from "ethers";
 import { DEXES, USDC, WETH } from "./config.js";
+import { blocksFor } from "./blocktime.js";
 import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface } from "./abi.js";
 import { quoteArb, type ArbQuote } from "./math.js";
 import { findCycles, optimizeRoute, routeLabel, type RouteQuote } from "./routes.js";
@@ -120,8 +121,8 @@ export class Scanner {
   blockedTokens?: () => Set<string>;
   /** The latest learned skips, for the dashboard ("why it skipped …"). */
   readonly lastLearnedSkips: Array<{ label: string; why: string; at: string }> = [];
-  /** Blocks a reverting route stays muted (600 blocks = 20 minutes). */
-  failureMuteBlocks = 600;
+  /** Blocks a reverting route stays muted (~20 minutes). Derived from block time so it survives Denim's 200ms blocks. */
+  failureMuteBlocks = blocksFor(20 * 60_000);
   /** After this many revert failures the token pair's pools are dropped from the watch list. */
   failuresBeforeDrop = 3;
 

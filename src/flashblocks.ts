@@ -29,6 +29,7 @@ import type { PoolRegistry } from "./pools.js";
 import type { Scanner, Opportunity } from "./scanner.js";
 import type { PaperEngine } from "./paper.js";
 import type { GasQuote } from "./gas.js";
+import { blocksFor, PRECONF_TAG } from "./blocktime.js";
 import { log } from "./log.js";
 
 export interface FlashblockContext {
@@ -71,7 +72,7 @@ export class FlashblockWatcher {
   onConfirmedBlock(ctx: FlashblockContext, interestingPools: Iterable<string>): void {
     this.ctx = ctx;
     for (const p of interestingPools) this.recent.set(p, ctx.block);
-    const keep = this.opts.memoryBlocks ?? 30;
+    const keep = this.opts.memoryBlocks ?? blocksFor(60_000);
     for (const [p, b] of this.recent) if (ctx.block - b > keep) this.recent.delete(p);
     this.lastSignature = "";
   }
@@ -113,7 +114,7 @@ export class FlashblockWatcher {
     try {
       this.stats.ticks++;
       const pools = [...hot].map((a) => this.registry.pools.get(a)).filter((p): p is NonNullable<typeof p> => !!p);
-      await this.registry.refreshReserves(pools, "pending", this.chain);
+      await this.registry.refreshReserves(pools, PRECONF_TAG, this.chain);
       if (this.paused || this.ctx !== ctx) return; // a new block arrived mid-read; its handler refreshes everything
       const sig = pools.map((p) => `${p.reserve0}:${p.reserve1}`).join("|");
       if (sig === this.lastSignature) {
@@ -123,7 +124,7 @@ export class FlashblockWatcher {
       this.lastSignature = sig;
       this.stats.scans++;
       const opps = await this.scanner.scan(ctx.block, ctx.gas, ctx.ethUsd, this.opts.minProfitUsd, {
-        blockTag: "pending",
+        blockTag: PRECONF_TAG,
         only: hot,
         stage: "flashblock",
         msIntoBlock: Date.now() - ctx.seenAt,

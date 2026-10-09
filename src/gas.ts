@@ -5,6 +5,7 @@
 import { GAS_PRICE_ORACLE } from "./config.js";
 import { gasOracleIface, executorIface } from "./abi.js";
 import type { Chain } from "./rpc.js";
+import { blocksFor } from "./blocktime.js";
 import { log } from "./log.js";
 
 export interface GasQuote {
@@ -39,8 +40,8 @@ export class GasEstimator {
   constructor(readonly chain: Chain, readonly gasLimit: number, readonly priorityFeeGwei: number) {}
 
   private l1Cache: { block: number; fee: bigint } | undefined;
-  /** The L1 data fee moves slowly; refresh it every N blocks to save RPC budget. */
-  l1RefreshBlocks = 10;
+  /** The L1 data fee moves slowly; refresh it roughly every 20s to save RPC budget (derived from block time, so Denim-safe). */
+  l1RefreshBlocks = blocksFor(20_000);
 
   /** Quote is computed once per block and reused for every candidate in that block. */
   async quote(block: number, baseFeeWei: bigint | null): Promise<GasQuote> {
