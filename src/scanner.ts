@@ -5,8 +5,9 @@
  */
 import type { Learner } from "./learn.js";
 import { AbiCoder } from "ethers";
-import { DEXES, USDC, WETH } from "./config.js";
-import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface } from "./abi.js";
+import { DEXES, USDC, WETH, V4, NATIVE } from "./config.js";
+import { blocksFor } from "./blocktime.js";
+import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface, v4QuoterIface } from "./abi.js";
 import { quoteArb, type ArbQuote } from "./math.js";
 import { findCycles, optimizeRoute, routeLabel, type RouteQuote } from "./routes.js";
 import { SIM_EXECUTOR_RUNTIME } from "./simBytecode.js";
@@ -86,6 +87,8 @@ export interface RouteOptions {
 
 /** RouteExecutor hop kinds (contracts/RouteExecutor.sol). */
 export function hopKind(p: Pool): number {
+  // Uniswap V4 (RouteExecutor kinds 4/5): 5 when the WETH side is native ETH (currency 0x0), else 4.
+  if (p.v4) return p.v4.currency0 === NATIVE || p.v4.currency1 === NATIVE ? 5 : 4;
   if (p.cl) return 2;
   if (p.kind === "aerodrome") return 1;
   return p.feeModel === "bps" ? 3 : 0;
@@ -99,6 +102,15 @@ export function flashSourceId(s: RouteOptions["flashSource"]): number {
 export const SIM_OVERRIDE_ADDRESS = "0x00000000000000000000000000000000a4b17e51";
 /** Same idea for the multi-hop RouteExecutor. */
 export const SIM_ROUTE_OVERRIDE_ADDRESS = "0x00000000000000000000000000000000a4b17e52";
+
+/**
+ * Pool kinds the deployed RouteExecutor cannot trade yet (no swap callback for them). Their pools are
+ * still watched, priced and scanned — so cross-venue spreads surface in paper, on the dashboard and in
+ * the value-score — but any route through them is verified by the DEX's own quoter rather than the
+ * executor simulation, so it is a real paper find (quoter-ok) and never reaches a live send (which
+ * requires executor-ok). Remove a kind here once the RouteExecutor is rebuilt with its callback.
+ */
+const QUOTE_ONLY_KINDS = new Set<string>(["pancakev3", "univ4"]);
 
 const routeKeyOf = routeKey;
 
@@ -120,8 +132,8 @@ export class Scanner {
   blockedTokens?: () => Set<string>;
   /** The latest learned skips, for the dashboard ("why it skipped …"). */
   readonly lastLearnedSkips: Array<{ label: string; why: string; at: string }> = [];
-  /** Blocks a reverting route stays muted (600 blocks = 20 minutes). */
-  failureMuteBlocks = 600;
+  /** Blocks a reverting route stays muted (~20 minutes). Derived from block time so it survives Denim's 200ms blocks. */
+  failureMuteBlocks = blocksFor(20 * 60_000);
   /** After this many revert failures the token pair's pools are dropped from the watch list. */
   failuresBeforeDrop = 3;
 
@@ -262,7 +274,9 @@ export class Scanner {
           dexes: r.pools.map((p) => p.dex),
           amounts: r.amounts,
           label,
-          executorHops: r.pools.map((p) => ({ pool: p.address, kind: hopKind(p), feePpm: Math.max(0, p.feePpm) })),
+          // A V4 pool's address is its poolId (not a contract), so the on-chain hop carries the PoolManager;
+          // the executor derives the PoolKey from the hop's tokens + fee. feePpm is the V4 fee tier.
+          executorHops: r.pools.map((p) => ({ pool: p.v4 ? V4.poolManager : p.address, kind: hopKind(p), feePpm: Math.max(0, p.feePpm) })),
         },
       });
     }
@@ -385,7 +399,26 @@ export class Scanner {
 
   /** Verify multi-hop / CL routes: RouteExecutor.simulate() when available, else each hop against its DEX's quoter. */
   private async verifyRoutes(opps: Opportunity[], tag: number | "pending"): Promise<void> {
-    const mode = this.routeSimMode;
+    // Routes touching a quote-only venue (e.g. PancakeSwap V3) can't be executed by the deployed
+    // RouteExecutor, so verify them against the DEXes' own quoters instead of the executor sim: that marks
+    // them quoter-ok (a genuine paper find) rather than executor-reverted (which would mute them), and the
+    // live path still won't send them because it requires an executor-ok simulation.
+    const quoteOnly: Opportunity[] = [];
+    const executable: Opportunity[] = [];
+    for (const o of opps) (this.routeQuoteOnly(o) ? quoteOnly : executable).push(o);
+    await Promise.all([
+      executable.length ? this.verifyRoutesVia(executable, tag, this.routeSimMode) : undefined,
+      quoteOnly.length ? this.verifyRoutesVia(quoteOnly, tag, "quoter") : undefined,
+    ]);
+  }
+
+  /** A route the deployed RouteExecutor cannot trade (any hop is on a quote-only venue such as PancakeSwap V3). */
+  private routeQuoteOnly(o: Opportunity): boolean {
+    if (!o.route) return false;
+    return o.route.pools.some((a) => QUOTE_ONLY_KINDS.has(this.registry.pools.get(a)?.kind ?? ""));
+  }
+
+  private async verifyRoutesVia(opps: Opportunity[], tag: number | "pending", mode: "executor" | "override" | "quoter"): Promise<void> {
     if (mode !== "quoter") {
       await Promise.all(
         opps.map(async (o) => {
@@ -595,6 +628,18 @@ const MAX_SQRT_MINUS_ONE = 1461446703485210103287273052203988822378723970341n;
 
 /** One exact-input quote for a hop, using the pool type's own on-chain quoter. */
 function hopQuoteCall(pool: Pool, tokenIn: string, tokenOut: string, amountIn: bigint): Call {
+  if (pool.v4) {
+    // V4Quoter takes the PoolKey (real currencies, native ETH as 0x0) + direction, not a univ3-style quote.
+    // tokenIn is the graph token (native ETH shows as WETH); token0 is the graph token for currency0.
+    const zeroForOne = tokenIn.toLowerCase() === pool.token0;
+    const params = {
+      poolKey: { currency0: pool.v4.currency0, currency1: pool.v4.currency1, fee: pool.v4.fee, tickSpacing: pool.v4.tickSpacing, hooks: pool.v4.hooks },
+      zeroForOne,
+      exactAmount: amountIn,
+      hookData: "0x",
+    };
+    return { target: pool.cl!.quoter, callData: v4QuoterIface.encodeFunctionData("quoteExactInputSingle", [params]) };
+  }
   if (pool.cl) {
     const zeroForOne = tokenIn === pool.token0;
     const limit = zeroForOne ? MIN_SQRT_PLUS_ONE : MAX_SQRT_MINUS_ONE;

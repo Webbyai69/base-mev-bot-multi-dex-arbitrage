@@ -14,11 +14,12 @@
  * The MEV classifier can add pools it sees arbitrage bots use at runtime.
  */
 import { getAddress, AbiCoder, type Log } from "ethers";
-import { CL_DEXES, DEXES, TOKENS, WETH, USDC, type ClDexInfo, type DexInfo, type DexKind } from "./config.js";
+import { CL_DEXES, DEXES, TOKENS, WETH, USDC, V4, NATIVE, type ClDexInfo, type DexInfo, type DexKind } from "./config.js";
 import {
   TOPIC_BURN_V3,
   TOPIC_MINT_V3,
   TOPIC_SWAP_AERO,
+  TOPIC_SWAP_PANCAKE_V3,
   TOPIC_SWAP_V2,
   TOPIC_SWAP_V3,
   TOPIC_SYNC,
@@ -33,6 +34,8 @@ import {
   univ2RouterIface,
   univ3FactoryIface,
   univ3PoolIface,
+  stateViewIface,
+  v4PoolId,
 } from "./abi.js";
 import { getAmountOut, type FeeModel } from "./math.js";
 import { compressTick, virtualReserves, wordPosition, wordsNeeded, type ClState } from "./clmath.js";
@@ -51,8 +54,14 @@ export interface Pool {
   feeModel: FeeModel;
   stable: boolean;
   updatedBlock: number;
-  /** Concentrated-liquidity state (Uniswap V3 / Slipstream). reserve0/1 then hold virtual reserves. */
+  /** Concentrated-liquidity state (Uniswap V3 / Slipstream / PancakeSwap V3 / Uniswap V4). reserve0/1 then hold virtual reserves. */
   cl?: ClPoolState;
+  /**
+   * Uniswap V4 only: the pool lives inside the singleton PoolManager keyed by poolId (there is no pool
+   * contract), so it is read via StateView and quoted via V4Quoter, never by calling `address`. token0/
+   * token1 above are the graph tokens, with native ETH (currency 0x0) mapped to WETH; v4 holds the real key.
+   */
+  v4?: V4Info;
   /** Real token balances, only used for the liquidity floor during discovery. */
   bal0?: bigint;
   bal1?: bigint;
@@ -61,6 +70,17 @@ export interface Pool {
 export interface ClPoolState extends ClState {
   /** Quoter used to cross-check this pool's maths (one per factory). */
   quoter: string;
+}
+
+export interface V4Info {
+  /** keccak256(abi.encode(PoolKey)) — the registry key (Pool.address) for a V4 pool. */
+  poolId: string;
+  /** Real currencies; currency0 may be 0x0 (native ETH). token0/token1 are these with 0x0 mapped to WETH. */
+  currency0: string;
+  currency1: string;
+  fee: number;
+  tickSpacing: number;
+  hooks: string;
 }
 
 type SnapshotPool = Omit<Pool, "reserve0" | "reserve1" | "updatedBlock" | "cl" | "bal0" | "bal1"> & {
@@ -187,6 +207,7 @@ export class PoolRegistry {
     }
     if (this.clPools) {
       for (const dex of CL_DEXES) lookups.push({ name: dex.name, find: () => this.lookupClPools(dex, [WETH, USDC], [...counterTokens, ...BASE_TOKEN_SET], block) });
+      lookups.push({ name: "Uniswap V4 (hookless)", find: () => this.lookupV4Pools([WETH, USDC], [...counterTokens, ...BASE_TOKEN_SET], block) });
     }
     for (const { name, find } of lookups) {
       const found = (await find()).filter((p) => !have.has(p.address) && this.allowed(p));
@@ -237,7 +258,7 @@ export class PoolRegistry {
     while (start <= block) {
       const end = Math.min(block, start + range - 1);
       try {
-        const topics = this.clPools ? [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3] : [TOPIC_SWAP_V2, TOPIC_SWAP_AERO];
+        const topics = this.clPools ? [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3, TOPIC_SWAP_PANCAKE_V3] : [TOPIC_SWAP_V2, TOPIC_SWAP_AERO];
         const logs = await this.chain.getLogs({ fromBlock: start, toBlock: end, topics: [topics] });
         for (const l of logs) addrs.add(l.address.toLowerCase());
         log.debug(`blocks ${start}-${end}: ${logs.length} swaps, ${addrs.size} distinct pools so far`);
@@ -444,7 +465,8 @@ export class PoolRegistry {
           meta.push({ t0, t1, key });
           calls.push({
             target: dex.factory,
-            callData: dex.kind === "univ3" ? univ3FactoryIface.encodeFunctionData("getPool", [t0, t1, key]) : slipstreamFactoryIface.encodeFunctionData("getPool", [t0, t1, key]),
+            // Uniswap V3 and PancakeSwap V3 both key getPool by fee tier; Slipstream keys by tickSpacing.
+            callData: dex.kind === "slipstream" ? slipstreamFactoryIface.encodeFunctionData("getPool", [t0, t1, key]) : univ3FactoryIface.encodeFunctionData("getPool", [t0, t1, key]),
           });
         }
       }
@@ -462,7 +484,9 @@ export class PoolRegistry {
 
   /** Real token balances of CL pools (virtual reserves overstate depth for the liquidity floor). */
   private async loadClBalances(pools: Pool[], block: number): Promise<void> {
-    const cl = pools.filter((p) => p.cl);
+    // V4 has no pool contract holding the tokens (the PoolManager pools them), so its depth is read from
+    // virtual reserves instead — skip it here and liquidityInWeth falls back to reserve0/1.
+    const cl = pools.filter((p) => p.cl && !p.v4);
     if (cl.length === 0) return;
     const calls: Call[] = cl.flatMap((p) => [
       { target: p.token0, callData: erc20Iface.encodeFunctionData("balanceOf", [p.address]) },
@@ -529,7 +553,8 @@ export class PoolRegistry {
     if (pools.length === 0) return;
     if (block === "pending") for (const p of pools) this.pendingDirty.add(p.address);
     const v2 = pools.filter((p) => !p.cl);
-    const cl = pools.filter((p) => p.cl);
+    // V4 pools have no pool contract to call — they're refreshed separately via StateView (refreshV4).
+    const cl = pools.filter((p) => p.cl && !p.v4);
     await Promise.all([this.refreshV2(v2, block, via ?? this.chain), this.refreshCl(cl, block, via ?? this.chain)]);
   }
 
@@ -616,6 +641,128 @@ export class PoolRegistry {
     });
   }
 
+  // ---- Uniswap V4 (singleton PoolManager; poolId-keyed; read via StateView, quoted via V4Quoter) ----
+
+  /** Build a V4 pool. token0/token1 are graph tokens (native ETH mapped to WETH); v4 holds the real key. */
+  private newV4Pool(poolId: string, currency0: string, currency1: string, fee: number, tickSpacing: number, hooks: string): Pool {
+    const graph = (c: string) => (c === NATIVE ? WETH : c);
+    return {
+      address: poolId,
+      dex: "uniswap-v4",
+      kind: "univ4",
+      token0: graph(currency0),
+      token1: graph(currency1),
+      reserve0: 0n,
+      reserve1: 0n,
+      feePpm: fee,
+      feeModel: "ppm",
+      stable: false,
+      updatedBlock: 0,
+      cl: { sqrtPriceX96: 0n, tick: 0, liquidity: 0n, tickSpacing, feePips: fee, words: new Map(), quoter: V4.quoter.toLowerCase() },
+      v4: { poolId, currency0, currency1, fee, tickSpacing, hooks },
+    };
+  }
+
+  /**
+   * Discover hookless V4 pools for base x counter pairs: compute each candidate poolId over V4.feeTiers
+   * (hooks = 0x0), keep the ones StateView reports as initialised, and populate their state. For a WETH base
+   * we also probe the native-ETH (0x0) variant, since the deep ETH pools use native ETH.
+   */
+  private async lookupV4Pools(bases: string[], tokens: string[], block: number): Promise<Pool[]> {
+    const seen = new Set<string>();
+    const cands: Array<{ c0: string; c1: string; fee: number; ts: number }> = [];
+    const add = (a: string, b: string, fee: number, ts: number): void => {
+      const [la, lb] = [a.toLowerCase(), b.toLowerCase()];
+      const [c0, c1] = la < lb ? [la, lb] : [lb, la];
+      const key = `${c0}-${c1}-${fee}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      cands.push({ c0, c1, fee, ts });
+    };
+    for (const b of bases) {
+      for (const t of tokens) {
+        if (b.toLowerCase() === t.toLowerCase()) continue;
+        for (const [fee, ts] of V4.feeTiers) {
+          add(b, t, fee, ts);
+          if (b.toLowerCase() === WETH) add(NATIVE, t, fee, ts);
+        }
+      }
+    }
+    if (!cands.length) return [];
+    const calls: Call[] = cands.map((c) => ({ target: V4.stateView, callData: stateViewIface.encodeFunctionData("getSlot0", [v4PoolId(c.c0, c.c1, c.fee, c.ts, NATIVE)]) }));
+    const res = await this.chain.multicall(calls, block);
+    const found: Pool[] = [];
+    cands.forEach((c, i) => {
+      const r = res[i]!;
+      if (!r.success || r.returnData.length < 66) return;
+      const slot = stateViewIface.decodeFunctionResult("getSlot0", r.returnData);
+      if ((slot[0] as bigint) === 0n) return; // not initialised
+      found.push(this.newV4Pool(v4PoolId(c.c0, c.c1, c.fee, c.ts, NATIVE), c.c0, c.c1, c.fee, c.ts, NATIVE));
+    });
+    await this.refreshV4Set(found, block); // populate liquidity + words + virtual reserves for the floor check
+    return found;
+  }
+
+  /** Re-read every watched V4 pool from StateView. Called each block (never throws into the block loop). */
+  async refreshV4(block: number | "pending"): Promise<void> {
+    const v4 = [...this.pools.values()].filter((p) => p.v4);
+    if (v4.length) await this.refreshV4Set(v4, block);
+  }
+
+  private async refreshV4Set(pools: Pool[], block: number | "pending"): Promise<void> {
+    if (!pools.length) return;
+    const fresh = pools.filter((p) => p.cl!.sqrtPriceX96 === 0n);
+    if (fresh.length) await this.readV4(fresh, block, false); // learn the tick before choosing bitmap words
+    await this.readV4(pools, block, true);
+  }
+
+  /** One multicall of StateView.getSlot0 / getLiquidity / getTickBitmap per V4 pool (mirrors readCl). */
+  private async readV4(pools: Pool[], block: number | "pending", withWords: boolean): Promise<void> {
+    const calls: Call[] = [];
+    const layout: Array<{ start: number; words: number[] }> = [];
+    for (const p of pools) {
+      const s = p.cl!;
+      const id = p.v4!.poolId;
+      const start = calls.length;
+      calls.push({ target: V4.stateView, callData: stateViewIface.encodeFunctionData("getSlot0", [id]) });
+      calls.push({ target: V4.stateView, callData: stateViewIface.encodeFunctionData("getLiquidity", [id]) });
+      let words: number[] = [];
+      if (withWords) {
+        const w = wordPosition(compressTick(s.tick, s.tickSpacing));
+        words = [w - 1, w, w + 1];
+        for (const wp of words) calls.push({ target: V4.stateView, callData: stateViewIface.encodeFunctionData("getTickBitmap", [id, wp]) });
+      }
+      layout.push({ start, words });
+    }
+    const res = await this.chain.multicall(calls, block);
+    pools.forEach((p, i) => {
+      const s = p.cl!;
+      const { start, words } = layout[i]!;
+      const rs = res[start]!;
+      const rl = res[start + 1]!;
+      if (!rs.success || rs.returnData.length < 130) {
+        s.liquidity = 0n; // unusable this round
+        return;
+      }
+      const slot = stateViewIface.decodeFunctionResult("getSlot0", rs.returnData);
+      s.sqrtPriceX96 = slot[0] as bigint;
+      s.tick = Number(slot[1]);
+      const lpFee = Number(slot[3]);
+      if (lpFee > 0) ((s.feePips = lpFee), (p.feePpm = lpFee));
+      s.liquidity = rl.success && rl.returnData.length >= 66 ? (stateViewIface.decodeFunctionResult("getLiquidity", rl.returnData)[0] as bigint) : 0n;
+      s.words = new Map();
+      words.forEach((wp, k) => {
+        const r = res[start + 2 + k]!;
+        if (r && r.success && r.returnData.length >= 66) s.words.set(wp, abi.decode(["uint256"], r.returnData)[0] as bigint);
+      });
+      if (withWords && !wordsNeeded(s.tick, s.tickSpacing).every((w) => s.words.has(w))) s.words = new Map();
+      const v = virtualReserves(s);
+      p.reserve0 = v.reserve0;
+      p.reserve1 = v.reserve1;
+      if (block !== "pending") p.updatedBlock = block;
+    });
+  }
+
   async refreshAll(block: number): Promise<void> {
     await this.refreshReserves([...this.pools.values()], block);
     this.pendingDirty.clear();
@@ -661,8 +808,13 @@ export class PoolRegistry {
         }
         continue;
       }
-      if (t0 === TOPIC_SWAP_V3) {
-        const d = abi.decode(["int256", "int256", "uint160", "uint128", "int24"], l.data);
+      if (t0 === TOPIC_SWAP_V3 || t0 === TOPIC_SWAP_PANCAKE_V3) {
+        // PancakeSwap V3's Swap carries two extra protocol-fee fields; the first five (amount0, amount1,
+        // sqrtPriceX96, liquidity, tick) match Uniswap V3, so we read those and ignore the rest.
+        const d = abi.decode(
+          t0 === TOPIC_SWAP_PANCAKE_V3 ? ["int256", "int256", "uint160", "uint128", "int24", "uint128", "uint128"] : ["int256", "int256", "uint160", "uint128", "int24"],
+          l.data,
+        );
         const s = p.cl;
         s.sqrtPriceX96 = d[2] as bigint;
         s.liquidity = d[3] as bigint;
@@ -683,7 +835,7 @@ export class PoolRegistry {
     // CL pools never read, or whose tick moved into bitmap words we don't have.
     const wordRead = new Map<Pool, number[]>();
     for (const p of this.pools.values()) {
-      if (!p.cl || fullRead.has(p)) continue;
+      if (!p.cl || p.v4 || fullRead.has(p)) continue; // V4 bitmap words come from StateView (refreshV4), not the pool
       if (p.cl.sqrtPriceX96 === 0n) {
         fullRead.add(p);
         continue;
@@ -951,9 +1103,13 @@ export class PoolRegistry {
       discoveredAt: new Date().toISOString(),
       block,
       tokens: [...this.tokens.values()],
-      pools: [...this.pools.values()].map(({ reserve0: _r0, reserve1: _r1, updatedBlock: _b, cl, bal0: _x, bal1: _y, ...rest }) =>
-        cl ? { ...rest, cl: { tickSpacing: cl.tickSpacing, feePips: cl.feePips, quoter: cl.quoter } } : rest,
-      ),
+      // V4 pools are keyed by poolId, not an address, and are cheap to rediscover — keep them out of the
+      // address-keyed snapshot and let the V4 lookup re-add them on each start.
+      pools: [...this.pools.values()]
+        .filter((p) => !p.v4)
+        .map(({ reserve0: _r0, reserve1: _r1, updatedBlock: _b, cl, bal0: _x, bal1: _y, ...rest }) =>
+          cl ? { ...rest, cl: { tickSpacing: cl.tickSpacing, feePips: cl.feePips, quoter: cl.quoter } } : rest,
+        ),
     };
   }
 

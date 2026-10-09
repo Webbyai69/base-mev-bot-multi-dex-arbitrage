@@ -122,10 +122,26 @@ function dashboardSources(s: Settings, chain: Chain, registry: PoolRegistry, sto
     summaries: () => dashboardSummaries(store, registry, s),
     multicall: (calls) => chain.multicall(calls),
     symbol: (a) => registry.symbol(a),
-    learning: () => (extras?.learner ? { ...extras.learner.summary(Date.now(), extras.tuning?.blocked), recentSkips: extras.scanner?.lastLearnedSkips.slice(0, 6) ?? [] } : null),
+    learning: () => (extras?.learner ? { ...extras.learner.summary(Date.now(), extras.tuning?.blocked), recentSkips: extras.scanner?.lastLearnedSkips.slice(0, 6) ?? [], topPools: topPoolsView(registry, extras.learner) } : null),
     tuning: () => extras?.tuning?.view() ?? null,
     tune: (action, id) => extras?.tune?.(action, id) ?? { ok: false, error: "only while the bot runs" },
   };
+}
+
+/**
+ * Top watched pools by value-score, enriched with pair/dex for the dashboard. Liquidity
+ * comes from the registry (the learner never reads reserves), so this lives here.
+ */
+function topPoolsView(registry: PoolRegistry, learner: Learner, n = 12) {
+  const ethUsd = registry.pools.size ? registry.ethPrice() : 0;
+  const liqOf = (addr: string): number => {
+    const p = registry.pools.get(addr);
+    return p ? registry.liquidityInWeth(p, ethUsd) : 0;
+  };
+  return learner.topPools(liqOf, n).map((t) => {
+    const p = registry.pools.get(t.pool);
+    return { ...t, dex: p?.dex ?? "?", pair: p ? `${registry.symbol(p.token0)}/${registry.symbol(p.token1)}` : "", watched: !!p };
+  });
 }
 
 /** The newest reports/ai-review-*.md (written by the daily AI review), or null. */
@@ -323,7 +339,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   const tuning = new Tuning(store, { minProfitUsd: s.minProfitUsd, maxBidShare: s.liveMaxBidShare, evMinUsd: s.liveMinEvUsd });
   extras.tuning = tuning;
   const learner = s.learning
-    ? new Learner(store, { halfLifeMs: s.learnHalfLifeHours * 3_600_000, pruneAfterMs: s.learnPruneDays * 86_400_000 }, (a) => registry.symbol(a))
+    ? new Learner(store, { halfLifeMs: s.learnHalfLifeHours * 3_600_000, pruneAfterMs: s.learnPruneDays * 86_400_000, maxBidGwei: s.liveMaxBidGwei }, (a) => registry.symbol(a))
     : undefined;
   if (learner) {
     // Trades by the bot's own wallet or contract are its own results, never a rival's.
@@ -408,6 +424,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
         })
       : undefined;
   if (live) log.warn(`LIVE MODE: sending from ${live.wallet.address} via executor ${s.executorAddress}${s.routeExecutorAddress ? ` and routes via ${s.routeExecutorAddress}` : ""}. Create ${store.path("STOP")} to halt.`);
+  if (live && s.liveActAlways) log.warn("LIVE: act mode ON — sending every simulated-profitable find (bid sized by the learning), bounded by the daily gas cap and circuit breaker. Set LIVE_ACT_ALWAYS=false for expected-value gating.");
 
   let lastReport = 0;
   let blocksSeen = 0;
@@ -462,7 +479,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   // confirmed-block handler and the faster Flashblocks loop (routes only when the RouteExecutor is live).
   const considerLiveSend = (opps: Opportunity[], ethUsd: number, stage: "block" | "flashblock"): void => {
     if (!live || !learner) return;
-    const ctx = { ethUsd, gasUnits: s.arbGasLimit, basePriorityGwei: s.priorityFeeGwei, maxBidShare: tuning.maxBidShare, evMinUsd: tuning.evMinUsd };
+    const ctx = { ethUsd, gasUnits: s.arbGasLimit, basePriorityGwei: s.priorityFeeGwei, maxBidShare: tuning.maxBidShare, evMinUsd: tuning.evMinUsd, act: s.liveActAlways };
     const { send, passed } = pickLiveSend(opps, learner, ctx, live.routeReady);
     for (const x of passed) {
       const key = routeKey(x.o);
@@ -475,6 +492,13 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     if (sent) log.info(`live${stage === "flashblock" ? " [flashblock]" : ""}: sending ${send.o.pairSymbols}${send.o.route ? ` (${send.o.route.pools.length}-hop route)` : ""} (net $${send.o.netUsd.toFixed(3)}): lands ${(send.ev.pLand * 100).toFixed(0)}% of the time on ${send.ev.evidence.toFixed(1)} outcomes, expected $${send.ev.evUsd.toFixed(3)}, bid ${send.ev.bidGwei} gwei (${send.ev.bidWhy})`);
   };
   if (live) extras.fb?.setLiveSend(considerLiveSend);
+  // Rank the Flashblocks hot set by pool value-score (depth × rival/find frequency × spread), so the
+  // most valuable pools are re-read first at the pre-confirmed state. Node-independent; paper or live.
+  if (extras.fb && learner)
+    extras.fb.setScorer((pool) => {
+      const p = registry.pools.get(pool);
+      return p ? learner.poolScore(pool, registry.liquidityInWeth(p, registry.ethPrice())).score : 0;
+    });
 
   // Live Aave liquidations (opt-in: LIQUIDATIONS_LIVE + a deployed LiquidationExecutor). Latency-tolerant,
   // so it suits a home PC; each one is simulated on-chain first and sent through the owner-controlled contract.
@@ -562,21 +586,29 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
         }
       }
     }
+    // V4 pools are read from StateView (there is no pool contract), isolated from the address-based refresh
+    // above and wrapped so a V4 error can never break the block loop.
+    await registry.refreshV4(n).catch((e: Error) => log.warn("V4 refresh:", e.message.slice(0, 120)));
     const baseFee = blk?.baseFeePerGas ? BigInt(blk.baseFeePerGas) : null;
     const ethUsd = registry.ethPrice();
-    const [gasQuote, detected] = await Promise.all([
-      gas.quote(n, baseFee),
-      classifier ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), [])) : Promise.resolve([]),
-    ]);
-    learner?.onRivalArbs(detected);
+    // Run the MEV classifier (which fetches transaction receipts) concurrently with the trade path, so its RPC
+    // latency hides under the scan + send instead of adding to the block time that trips the "Lagging" badge.
+    const detectedP = classifier
+      ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), []))
+      : Promise.resolve([]);
+    const gasQuote = await gas.quote(n, baseFee);
     const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block" });
-    paper.onBlock(n, opps, detected, ethUsd);
+    // Send first: it needs only the refreshed pools and the gas quote, not the classifier's output.
     if (live && learner) {
       considerLiveSend(opps, ethUsd, "block");
     } else if (live) {
       const pick = opps.filter((o) => !o.route && o.sim === "executor-ok").sort((a, b) => b.netUsd - a.netUsd)[0];
       if (pick) live.trySend(pick, ethUsd);
     }
+    // Then the measurement, with the classifier result (already in flight) now awaited.
+    const detected = await detectedP;
+    learner?.onRivalArbs(detected);
+    paper.onBlock(n, opps, detected, ethUsd);
     if (extras.fb) {
       // Hot pools for the next ~2s: anything that showed a spread or was arbed by another bot.
       const interesting = new Set<string>([...scanner.lastCandidatePools, ...detected.filter((d) => d.type === "arbitrage").flatMap((d) => d.pools)]);

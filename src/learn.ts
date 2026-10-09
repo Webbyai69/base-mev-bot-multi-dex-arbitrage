@@ -106,6 +106,29 @@ interface PoolRec {
   activity: number;
   candidate: number;
   rival: number;
+  // Decayed signals for the value-score (0.9). Optional so a pre-0.9 learned.json still loads;
+  // initialised lazily on first bump. rivalHits/foundHits are decayed counts, edgeUsd a decayed
+  // sum of the gross spread (USD) seen moving through the pool (rivals' arbs and our own finds).
+  rivalHits?: Dc;
+  foundHits?: Dc;
+  edgeUsd?: Dc;
+}
+
+/** Per-wallet memory of one rival arbitrage bot: where, when and how it trades (bounded by the RIVAL_* caps below). */
+interface RivalRec {
+  firstSeen: number;
+  lastSeen: number;
+  arbs: number;
+  profitUsd: number;
+  /** pool / token / dex / sender -> count, each kept to the top RIVAL_MAP_CAP entries. */
+  pools: Record<string, number>;
+  tokens: Record<string, number>;
+  dexes: Record<string, number>;
+  senders: Record<string, number>;
+  /** 24 UTC-hour buckets. */
+  hours: number[];
+  /** Recent priority fees (gwei), newest last, capped at RIVAL_FEE_RING. */
+  fees: number[];
 }
 
 interface Memory {
@@ -120,6 +143,8 @@ interface Memory {
   poolSeen: Record<string, PoolRec>;
   /** Recent rival priority fees (gwei) by profit bucket, newest last. */
   rivalFees: Record<string, number[]>;
+  /** Per-wallet memory of rival arbitrage bots, keyed by the contract they call. */
+  rivals: Record<string, RivalRec>;
   prunedTotal: number;
   counts: { sims: number; outcomes: number; rivalArbs: number; liveSends: number };
 }
@@ -135,6 +160,19 @@ export interface Evaluation {
   bidWhy: string;
 }
 
+/** How much a pool is worth watching, and the decayed signals it rests on. */
+export interface PoolScore {
+  score: number;
+  /** Depth passed in by the caller (the learner doesn't read reserves). */
+  liqWeth: number;
+  /** Decayed count of rival arbitrages seen touching this pool. */
+  rivalRate: number;
+  /** Decayed count of our own positive-spread finds touching it. */
+  foundRate: number;
+  /** Decayed sum of gross spread (USD) seen moving through it. */
+  edgeUsd: number;
+}
+
 const PROFIT_BUCKETS: Array<[string, number]> = [
   ["<$0.50", 0.5],
   ["$0.50-2", 2],
@@ -143,6 +181,41 @@ const PROFIT_BUCKETS: Array<[string, number]> = [
 ];
 const bucketOf = (usd: number): string => PROFIT_BUCKETS.find(([, max]) => usd < max)![0];
 const FEE_RING = 400;
+
+/** Per-wallet rival memory bounds (keep learned.json small). */
+const RIVAL_FEE_RING = 60; //    priority-fee samples kept per rival
+const RIVAL_MAP_CAP = 16; //     top pools/tokens/dexes/senders kept per rival
+const RIVAL_CAP = 60; //         max rival wallets tracked at once
+/** A rival "bot" called by at least this many distinct EOAs is a shared router/aggregator, not one competitor. */
+const RIVAL_SHARED_SENDER_MIN = 5;
+
+/** Increment m[key]; when the map is full, keep the strongest by evicting the smallest (bounded top-K counter). */
+function bumpCapped(m: Record<string, number>, key: string, cap: number): void {
+  const cur = m[key];
+  if (cur !== undefined) {
+    m[key] = cur + 1;
+    return;
+  }
+  if (Object.keys(m).length < cap) {
+    m[key] = 1;
+    return;
+  }
+  let minK: string | null = null;
+  let minV = Infinity;
+  for (const [k, v] of Object.entries(m)) if (v < minV) ((minV = v), (minK = k));
+  if (minK !== null && minV <= 1) {
+    delete m[minK];
+    m[key] = 1;
+  }
+}
+
+/** The n keys with the highest counts. */
+function topKeys(m: Record<string, number>, n: number): string[] {
+  return Object.entries(m)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([k]) => k);
+}
 
 /** Tokens that are never blamed for a failed test run: the failure is in the other token or the pool. */
 const CORE = new Set(Object.values(TOKENS).map((t) => t.address.toLowerCase()));
@@ -182,7 +255,7 @@ export class Learner {
   }
 
   private fresh(now: number): Memory {
-    return { v: 2, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 } };
+    return { v: 2, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, rivals: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 } };
   }
 
   // ------------------------------------------------------------- decayed counts
@@ -303,6 +376,13 @@ export class Learner {
       left.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
       for (const [k] of left.slice(0, left.length - 4000)) delete this.m.routes[k];
     }
+    // Per-wallet rival memory: forget the long-unseen, then keep the most recent RIVAL_CAP.
+    for (const [k, r] of Object.entries(this.m.rivals)) if (now - r.lastSeen > this.opts.pruneAfterMs) delete this.m.rivals[k];
+    const rivals = Object.entries(this.m.rivals);
+    if (rivals.length > RIVAL_CAP) {
+      rivals.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+      for (const [k] of rivals.slice(0, rivals.length - RIVAL_CAP)) delete this.m.rivals[k];
+    }
   }
 
   // ------------------------------------------------------------------ observing
@@ -347,15 +427,26 @@ export class Learner {
 
   private seen(pool: string, now: number): PoolRec {
     let p = this.m.poolSeen[pool];
-    if (!p) p = this.m.poolSeen[pool] = { firstSeen: now, activity: 0, candidate: 0, rival: 0 };
+    if (!p) p = this.m.poolSeen[pool] = { firstSeen: now, activity: 0, candidate: 0, rival: 0, rivalHits: dc(), foundHits: dc(), edgeUsd: dc() };
     return p;
+  }
+
+  /** Add to one of a pool's decayed value-score signals, initialising it if an old file lacked it. */
+  private bumpPool(p: PoolRec, key: "rivalHits" | "foundHits" | "edgeUsd", x: number, now: number): void {
+    this.add((p[key] ??= dc()), x, now);
   }
 
   /** A candidate made it past the price check (before simulation). */
   onFound(o: Opportunity, now = Date.now()): void {
     const r = this.route(o, now);
     this.add(r.found, 1, now);
-    for (const p of r.pools) this.seen(p, now).candidate = now;
+    const edge = Math.max(0, o.profitUsd); // gross spread before gas — "how much money moved here"
+    for (const p of r.pools) {
+      const rec = this.seen(p, now);
+      rec.candidate = now;
+      this.bumpPool(rec, "foundHits", 1, now);
+      if (edge > 0) this.bumpPool(rec, "edgeUsd", edge, now);
+    }
     this.dirty = true;
   }
 
@@ -420,12 +511,38 @@ export class Learner {
       if (d.type !== "arbitrage") continue;
       // Our own trades would teach it to bid against itself.
       if (d.bot && this.self.has(String(d.bot).toLowerCase())) continue;
-      for (const p of d.pools) this.seen(p.toLowerCase(), now).rival = now;
+      const rivalEdge = typeof d.profitUsd === "number" && d.profitUsd > 0 ? d.profitUsd : 0;
+      for (const p of d.pools) {
+        const rec = this.seen(p.toLowerCase(), now);
+        rec.rival = now;
+        this.bumpPool(rec, "rivalHits", 1, now);
+        if (rivalEdge > 0) this.bumpPool(rec, "edgeUsd", rivalEdge, now);
+      }
       if (typeof d.priorityGwei === "number" && d.priorityGwei >= 0) {
         const b = bucketOf(typeof d.profitUsd === "number" ? d.profitUsd : 0);
         const ring = (this.m.rivalFees[b] ??= []);
         ring.push(Math.round(d.priorityGwei * 1e6) / 1e6);
         if (ring.length > FEE_RING) ring.splice(0, ring.length - FEE_RING);
+      }
+      // Per-wallet memory: where / when / how this rival trades.
+      const bot = d.bot ? String(d.bot).toLowerCase() : "";
+      if (bot && bot !== "unknown") {
+        const r = (this.m.rivals[bot] ??= { firstSeen: now, lastSeen: now, arbs: 0, profitUsd: 0, pools: {}, tokens: {}, dexes: {}, senders: {}, hours: new Array(24).fill(0) as number[], fees: [] });
+        r.lastSeen = now;
+        r.arbs++;
+        r.profitUsd += typeof d.profitUsd === "number" ? d.profitUsd : 0;
+        for (const p of d.pools) bumpCapped(r.pools, p.toLowerCase(), RIVAL_MAP_CAP);
+        for (const t of d.tokens) bumpCapped(r.tokens, t.toLowerCase(), RIVAL_MAP_CAP);
+        for (const x of d.dexes) bumpCapped(r.dexes, x, RIVAL_MAP_CAP);
+        if (d.sender) bumpCapped(r.senders, String(d.sender).toLowerCase(), RIVAL_MAP_CAP);
+        if (r.hours.length === 24) {
+          const h = new Date(now).getUTCHours();
+          r.hours[h] = (r.hours[h] ?? 0) + 1;
+        }
+        if (typeof d.priorityGwei === "number" && d.priorityGwei >= 0) {
+          r.fees.push(Math.round(d.priorityGwei * 1e6) / 1e6);
+          if (r.fees.length > RIVAL_FEE_RING) r.fees.splice(0, r.fees.length - RIVAL_FEE_RING);
+        }
       }
       this.m.counts.rivalArbs++;
     }
@@ -589,6 +706,34 @@ export class Learner {
   }
 
   /**
+   * How much a pool is worth watching: its depth, amplified by how often money
+   * actually moves through it (rivals' arbs and our own finds) and how large those
+   * spreads were. Multiplicative on a liquidity base — liq x (1 + activity) — so a
+   * deep but quiet pool keeps a baseline while a hot pool floats to the top, and a
+   * shallow pool everyone arbs can still outrank a deep sleepy one. Rebuilt from
+   * decayed memory each call, so it follows the recent market and needs no node.
+   * `liqWeth` comes from the caller — the learner never reads reserves.
+   */
+  poolScore(pool: string, liqWeth: number, now = Date.now()): PoolScore {
+    const s = this.m.poolSeen[pool.toLowerCase()];
+    const rivalRate = s?.rivalHits ? this.val(s.rivalHits, now) : 0;
+    const foundRate = s?.foundHits ? this.val(s.foundHits, now) : 0;
+    const edgeUsd = s?.edgeUsd ? this.val(s.edgeUsd, now) : 0;
+    const liq = Math.max(0, liqWeth);
+    // Rival arbs are the strongest "worth it" signal, our own finds next, and the dollar
+    // edge tips close calls (capped so one fat spread can't swamp the frequency signal).
+    const activity = 1 + 1.5 * rivalRate + 0.5 * foundRate + 0.02 * Math.min(edgeUsd, 500);
+    return { score: liq * activity, liqWeth: liq, rivalRate, foundRate, edgeUsd };
+  }
+
+  /** Top pools by value-score, for the dashboard and for ranking the hot set. `liqOf` supplies depth. */
+  topPools(liqOf: (pool: string) => number, n = 12, now = Date.now()): Array<PoolScore & { pool: string }> {
+    const out: Array<PoolScore & { pool: string }> = [];
+    for (const pool of Object.keys(this.m.poolSeen)) out.push({ pool, ...this.poolScore(pool, liqOf(pool), now) });
+    return out.sort((a, b) => b.score - a.score).slice(0, n);
+  }
+
+  /**
    * Watched pools to stop watching: nothing happened in them (no swap, no find,
    * no rival trade) for `pruneAfterMs`, or every test run through them failed.
    * Pools whose two tokens are both core (WETH, USDC…) are kept for pricing.
@@ -682,6 +827,21 @@ export class Learner {
     });
     const live = this.liveRecord();
     const watchedSeen = Object.values(this.m.poolSeen);
+    // Real competitors only (a wallet called by many EOAs is a shared router/aggregator, not one bot), most active first.
+    const rivalRows: LearningSummary["rivals"] = Object.entries(this.m.rivals)
+      .filter(([, r]) => Object.keys(r.senders).length < RIVAL_SHARED_SENDER_MIN)
+      .sort((a, b) => b[1].arbs - a[1].arbs)
+      .slice(0, 10)
+      .map(([bot, r]) => ({
+        bot,
+        arbs: r.arbs,
+        profitUsd: round(r.profitUsd, 2),
+        topPools: topKeys(r.pools, 3),
+        topTokens: topKeys(r.tokens, 3).map((t) => this.symbolOf(t)),
+        medianFeeGwei: quantile(r.fees, 0.5),
+        peakHourUtc: r.hours.length === 24 ? r.hours.indexOf(Math.max(...r.hours)) : -1,
+        lastSeen: new Date(r.lastSeen).toISOString(),
+      }));
     return {
       since: new Date(this.m.since).toISOString(),
       halfLifeHours: Math.round(this.opts.halfLifeMs / HOUR),
@@ -692,6 +852,7 @@ export class Learner {
       bids: fees,
       live: { ...live, gasUsd: round(live.gasUsd, 4) },
       pools: { tracked: watchedSeen.length, quiet: watchedSeen.filter((p) => now - Math.max(p.firstSeen, p.activity, p.candidate, p.rival) >= DAY).length, prunedTotal: this.m.prunedTotal, pruneAfterDays: round(this.opts.pruneAfterMs / DAY, 1) },
+      rivals: rivalRows,
     };
   }
 }
@@ -719,6 +880,8 @@ export interface LearningSummary {
   bids: Array<{ bucket: string; samples: number; p50: number | null; p60: number | null; p90: number | null }>;
   live: { sent: number; ok: number; reverted: number; racesLost: number; gasUsd: number };
   pools: { tracked: number; quiet: number; prunedTotal: number; pruneAfterDays: number };
+  /** Top real competitors (shared routers excluded): where/when/how they trade, from the per-wallet rival memory. */
+  rivals: Array<{ bot: string; arbs: number; profitUsd: number; topPools: string[]; topTokens: string[]; medianFeeGwei: number | null; peakHourUtc: number; lastSeen: string }>;
 }
 
 function round<T extends number | null>(x: T, dp: number): T {

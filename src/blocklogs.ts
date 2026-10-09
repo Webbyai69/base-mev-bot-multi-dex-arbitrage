@@ -22,6 +22,7 @@ import {
   TOPIC_BURN_V3,
   TOPIC_MINT_V3,
   TOPIC_SWAP_AERO,
+  TOPIC_SWAP_PANCAKE_V3,
   TOPIC_SWAP_V2,
   TOPIC_SWAP_V3,
   TOPIC_SYNC,
@@ -35,7 +36,7 @@ export class BlockLogFetcher {
   readonly topics: string[];
 
   constructor(readonly chain: Chain, opts: { liquidations: boolean }) {
-    this.topics = [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3, TOPIC_SYNC, TOPIC_SYNC_AERO, TOPIC_MINT_V3, TOPIC_BURN_V3];
+    this.topics = [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3, TOPIC_SWAP_PANCAKE_V3, TOPIC_SYNC, TOPIC_SYNC_AERO, TOPIC_MINT_V3, TOPIC_BURN_V3];
     if (opts.liquidations) this.topics.push(TOPIC_AAVE_BORROW, TOPIC_AAVE_LIQUIDATION);
   }
 

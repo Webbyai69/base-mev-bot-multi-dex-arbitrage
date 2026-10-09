@@ -77,7 +77,7 @@ export function pickLiveOpportunity(opps: Opportunity[]): Opportunity | undefine
 export function pickLiveSend(
   opps: Opportunity[],
   learner: Learner,
-  ctx: { ethUsd: number; gasUnits: number; basePriorityGwei: number; maxBidShare: number; evMinUsd: number },
+  ctx: { ethUsd: number; gasUnits: number; basePriorityGwei: number; maxBidShare: number; evMinUsd: number; act?: boolean },
   /** Routes (multi-hop and concentrated-liquidity) are considered only when the RouteExecutor is live. */
   allowRoutes = false,
 ): { send?: { o: Opportunity; ev: Evaluation }; passed: Array<{ o: Opportunity; ev: Evaluation }> } {
@@ -87,7 +87,12 @@ export function pickLiveSend(
     if (o.sim !== "executor-ok") continue;
     if (o.route && !allowRoutes) continue;
     const ev = learner.evaluate(o, ctx);
-    if (ev.evUsd > ctx.evMinUsd && (!send || ev.evUsd > send.ev.evUsd)) {
+    // Act mode: send every find that passed the on-chain simulation (which guarantees profit or revert), ranked by
+    // actual net profit — the learning still sizes the bid, it just no longer vetoes. Default: only positive-EV finds.
+    const worth = ctx.act ? o.netUsd > 0 : ev.evUsd > ctx.evMinUsd;
+    const score = ctx.act ? o.netUsd : ev.evUsd;
+    const best = send ? (ctx.act ? send.o.netUsd : send.ev.evUsd) : -Infinity;
+    if (worth && score > best) {
       if (send) passed.push(send);
       send = { o, ev };
     } else passed.push({ o, ev });
@@ -134,6 +139,24 @@ export async function liveFees(chain: Chain, priorityFeeGwei: number): Promise<{
   const block = await chain.provider.getBlock("latest");
   const base = block?.baseFeePerGas ?? (await chain.provider.getFeeData()).gasPrice ?? 0n;
   return { maxFeePerGas: base * 2n + priority, maxPriorityFeePerGas: priority };
+}
+
+/**
+ * Forward-looking gas budget check for one send: the worst-case USD cost at the full gas limit and this
+ * max fee, and whether it still fits inside the day's remaining MAX_DAILY_GAS_USD. Conservative — it uses
+ * the whole gas limit (a revert costs ~60% of this) and ignores the L1 data fee (cents on Base) — so it
+ * errs toward not overspending. Pure, so it is unit-tested directly.
+ */
+export function gasBudgetGuard(
+  gasLimit: number,
+  maxFeePerGasWei: bigint,
+  ethUsd: number,
+  gasSpentTodayUsd: number,
+  maxDailyGasUsd: number,
+): { worstCaseUsd: number; remainingUsd: number; fits: boolean } {
+  const worstCaseUsd = (Number((BigInt(Math.max(0, Math.floor(gasLimit))) * maxFeePerGasWei) / 1_000_000_000n) / 1e9) * ethUsd;
+  const remainingUsd = maxDailyGasUsd - gasSpentTodayUsd;
+  return { worstCaseUsd, remainingUsd, fits: worstCaseUsd <= remainingUsd };
 }
 
 /**
@@ -526,6 +549,17 @@ export class LiveExecutor {
     let tx: TransactionResponse;
     try {
       const [fees, pending] = await Promise.all([liveFees(this.chain, bidGwei), this.chain.provider.getTransactionCount(this.wallet.address, "pending")]);
+      // Forward-looking budget guard: never START a send whose own worst-case gas (landed, at the full
+      // gas limit and this bid) would push today's spend past MAX_DAILY_GAS_USD. gate() only stops AFTER
+      // an overshoot, so without this one high bid could blow the whole daily cap in a single transaction
+      // and drain the gas wallet. Raise MAX_DAILY_GAS_USD to let the bot bid this hard on a valuable trade.
+      const budget = gasBudgetGuard(gasLimit, fees.maxFeePerGas, ethUsd, this.gasSpentTodayUsd, this.opts.maxDailyGasUsd);
+      if (!budget.fits) {
+        log.warn(
+          `not sending ${job.label}: worst-case gas $${budget.worstCaseUsd.toFixed(2)} at ${bidGwei.toFixed(3)} gwei would exceed today's remaining budget $${Math.max(0, budget.remainingUsd).toFixed(2)} — skipped (raise MAX_DAILY_GAS_USD to bid this hard)`,
+        );
+        return;
+      }
       tx = await wallet.sendTransaction({
         to: target,
         data,

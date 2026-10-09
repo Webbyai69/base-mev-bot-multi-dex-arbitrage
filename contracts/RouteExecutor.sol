@@ -68,6 +68,39 @@ interface IBalancerVault {
     function flashLoan(address recipient, address[] calldata tokens, uint256[] calldata amounts, bytes calldata userData) external;
 }
 
+/**
+ * Uniswap V4: a singleton PoolManager. A swap runs inside unlock() -> unlockCallback(), where we swap and
+ * then resolve the currency deltas with sync/settle (pay the input) and take (receive the output). Currency
+ * is just an address; native ETH is address(0). BalanceDelta is an int256 packing int128 amount0 (high
+ * 128 bits) and int128 amount1 (low). Hookless pools only (hooks == address(0)).
+ */
+interface IPoolManager {
+    function unlock(bytes calldata data) external returns (bytes memory);
+    function swap(PoolKeyV4 calldata key, SwapParamsV4 calldata params, bytes calldata hookData) external returns (int256 delta);
+    function sync(address currency) external;
+    function settle() external payable returns (uint256);
+    function take(address currency, address to, uint256 amount) external;
+}
+
+interface IWETH {
+    function deposit() external payable;
+    function withdraw(uint256 amount) external;
+}
+
+struct PoolKeyV4 {
+    address currency0;
+    address currency1;
+    uint24 fee;
+    int24 tickSpacing;
+    address hooks;
+}
+
+struct SwapParamsV4 {
+    bool zeroForOne;
+    int256 amountSpecified; // negative = exact input
+    uint160 sqrtPriceLimitX96;
+}
+
 contract RouteExecutor {
     struct Hop {
         address pool;
@@ -77,6 +110,9 @@ contract RouteExecutor {
 
     address public constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     address public constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+    /// @notice Uniswap V4 singleton PoolManager and canonical WETH (for wrapping around native-ETH V4 pools).
+    address public constant POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
+    address public constant WETH = 0x4200000000000000000000000000000000000006;
     uint160 internal constant MIN_SQRT_RATIO_PLUS_ONE = 4295128740;
     uint160 internal constant MAX_SQRT_RATIO_MINUS_ONE = 1461446703485210103287273052203988822378723970341;
 
@@ -206,7 +242,14 @@ contract RouteExecutor {
     function _hop(address pool, uint8 kind, uint32 feePpm, address tokenIn, address tokenOut, uint256 amountIn) internal returns (uint256 out) {
         uint256 balBefore = IERC20(tokenOut).balanceOf(address(this));
         bool zeroForOne = tokenIn < tokenOut; // token0 is always the lower address
-        if (kind == 2) {
+        if (kind == 4 || kind == 5) {
+            // Uniswap V4: the swap runs inside PoolManager.unlock -> unlockCallback. kind 5 means the WETH
+            // side of this pool is native ETH (currency 0x0); the callback wraps/unwraps so the route still
+            // moves WETH. `out` is still read from balanceOf(tokenOut) below, exactly like every other hop.
+            expectedCaller = POOL_MANAGER;
+            IPoolManager(POOL_MANAGER).unlock(abi.encode(tokenIn, tokenOut, amountIn, feePpm, kind == 5));
+            expectedCaller = address(0);
+        } else if (kind == 2) {
             expectedCaller = pool;
             ICLPool(pool).swap(
                 address(this),
@@ -241,10 +284,80 @@ contract RouteExecutor {
 
     /// @dev Uniswap V3 and Slipstream both call this name. Pay what the pool is owed.
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
+        _clSwapCallback(amount0Delta, amount1Delta, data);
+    }
+
+    /// @dev PancakeSwap V3 pools call this instead of uniswapV3SwapCallback; settlement is identical.
+    function pancakeV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
+        _clSwapCallback(amount0Delta, amount1Delta, data);
+    }
+
+    function _clSwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) internal {
         if (msg.sender != expectedCaller || expectedCaller == address(0)) revert BadCallback();
         address tokenIn = abi.decode(data, (address));
         uint256 owed = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
         _transfer(tokenIn, msg.sender, owed);
+    }
+
+    /**
+     * @dev Uniswap V4 unlock callback: run one exact-input swap and resolve its currency deltas — pay the
+     * input via sync/settle (or settle{value} for native ETH) and take the output. For a native-ETH pool
+     * (nativeEth) the contract unwraps WETH->ETH to pay and wraps ETH->WETH on receipt, so the surrounding
+     * route still moves WETH. If the deltas don't net to zero the PoolManager reverts the whole unlock, so a
+     * mispriced or buggy hop costs gas, never principal.
+     */
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        if (msg.sender != POOL_MANAGER || expectedCaller != POOL_MANAGER) revert BadCallback();
+        (address tokenIn, address tokenOut, uint256 amountIn, uint32 feePpm, bool nativeEth) =
+            abi.decode(data, (address, address, uint256, uint32, bool));
+        // The WETH side becomes native ETH (0x0) for a native-ETH pool; the swap/settle/take live in a
+        // helper so this frame stays shallow (avoids "stack too deep").
+        _v4Swap(
+            (nativeEth && tokenIn == WETH) ? address(0) : tokenIn,
+            (nativeEth && tokenOut == WETH) ? address(0) : tokenOut,
+            amountIn,
+            feePpm
+        );
+        return "";
+    }
+
+    function _v4Swap(address inCur, address outCur, uint256 amountIn, uint32 feePpm) internal {
+        bool zeroForOne = inCur < outCur; // native 0x0 sorts first, matching currency0 < currency1
+        int256 delta = IPoolManager(POOL_MANAGER).swap(
+            PoolKeyV4({
+                currency0: zeroForOne ? inCur : outCur,
+                currency1: zeroForOne ? outCur : inCur,
+                fee: uint24(feePpm),
+                tickSpacing: _tickSpacing(feePpm),
+                hooks: address(0)
+            }),
+            SwapParamsV4({zeroForOne: zeroForOne, amountSpecified: -int256(amountIn), sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_RATIO_PLUS_ONE : MAX_SQRT_RATIO_MINUS_ONE}),
+            ""
+        );
+        // BalanceDelta packs int128 amount0 (high 128 bits) and int128 amount1 (low). The currency we owe
+        // has a negative delta; the one we receive, positive.
+        uint256 owed = uint256(int256(-(zeroForOne ? int128(delta >> 128) : int128(delta))));
+        uint256 got = uint256(int256(zeroForOne ? int128(delta) : int128(delta >> 128)));
+        if (inCur == address(0)) {
+            IWETH(WETH).withdraw(owed); // WETH -> ETH to pay a native-ETH pool
+            IPoolManager(POOL_MANAGER).settle{value: owed}();
+        } else {
+            IPoolManager(POOL_MANAGER).sync(inCur);
+            _transfer(inCur, POOL_MANAGER, owed);
+            IPoolManager(POOL_MANAGER).settle();
+        }
+        IPoolManager(POOL_MANAGER).take(outCur, address(this), got);
+        if (outCur == address(0)) IWETH(WETH).deposit{value: got}(); // ETH -> WETH so the route sees tokenOut
+    }
+
+    /// @dev V4 standard hookless fee tiers -> tick spacing (matches the bot's V4 discovery tiers).
+    function _tickSpacing(uint32 fee) internal pure returns (int24) {
+        if (fee == 100) return 1;
+        if (fee == 500) return 10;
+        if (fee == 2500) return 50;
+        if (fee == 3000) return 60;
+        if (fee == 10000) return 200;
+        revert BadRoute();
     }
 
     // ---------------------------------------------------------------------

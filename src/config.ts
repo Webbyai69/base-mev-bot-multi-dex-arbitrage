@@ -39,7 +39,10 @@ export const TOKENS: Record<string, TokenInfo> = {
 export const WETH = TOKENS.WETH!.address.toLowerCase();
 export const USDC = TOKENS.USDC!.address.toLowerCase();
 
-export type DexKind = "univ2" | "aerodrome" | "univ3" | "slipstream";
+export type DexKind = "univ2" | "aerodrome" | "univ3" | "slipstream" | "pancakev3" | "univ4";
+
+/** The zero address: Uniswap V4's native-ETH currency, and a sentinel elsewhere. */
+export const NATIVE = "0x0000000000000000000000000000000000000000";
 
 export interface DexInfo {
   /** Short id used in logs and data files. */
@@ -104,11 +107,19 @@ export const UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
 export interface ClDexInfo {
   id: string;
   name: string;
-  kind: "univ3" | "slipstream";
+  kind: "univ3" | "slipstream" | "pancakev3";
   factory: string;
   quoter: string;
-  /** Uniswap V3: getPool(a, b, fee) over these fee tiers. Slipstream: getPool(a, b, tickSpacing). */
+  /** Uniswap V3 / PancakeSwap V3: getPool(a, b, fee) over these fee tiers. Slipstream: getPool(a, b, tickSpacing). */
   poolKeys: number[];
+  /**
+   * Can the deployed RouteExecutor actually trade this venue? Default true. When false the venue is
+   * quote-only: its pools are watched, priced and scanned (so cross-venue spreads surface in paper,
+   * the dashboard and the value-score), but routes touching it are verified by quoters rather than the
+   * executor and so never reach a live send (the live path requires an executor-ok simulation). Flip to
+   * true once the RouteExecutor is rebuilt with the venue's swap callback.
+   */
+  executable?: boolean;
 }
 
 export const CL_DEXES: ClDexInfo[] = [
@@ -119,6 +130,20 @@ export const CL_DEXES: ClDexInfo[] = [
     factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
     quoter: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
     poolKeys: [100, 500, 3000, 10000],
+  },
+  {
+    // PancakeSwap V3 (~$121M/day on Base): a Uniswap V3 fork. Same tick math and QuoterV2 interface,
+    // but its own Swap event (two extra protocol-fee fields) and fee tiers (2500 where Uni has 3000).
+    // Quote-only for now: the deployed RouteExecutor can't call its pancakeV3SwapCallback, so these pools
+    // are watched and priced (surfacing Pancake<->Uni/Aero spreads in paper) but never live-sent. Verified
+    // on-chain: factory 5151 bytes, QuoterV2 answers the Uni QuoterV2 interface, pools report this factory.
+    id: "pancakeswap-v3",
+    name: "PancakeSwap V3",
+    kind: "pancakev3",
+    factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+    quoter: "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+    poolKeys: [100, 500, 2500, 10000],
+    executable: false,
   },
   {
     id: "slipstream",
@@ -145,6 +170,29 @@ export const CL_DEXES: ClDexInfo[] = [
     poolKeys: [1, 50, 100, 200, 2000],
   },
 ];
+
+/**
+ * Uniswap V4 (~$197M/day on Base): a singleton PoolManager holding every pool, keyed by a poolId hash of
+ * the PoolKey (currency0, currency1, fee, tickSpacing, hooks). State is read through StateView and quoted
+ * through V4Quoter — there are no per-pool contracts. Quote-only for now (the RouteExecutor has no V4
+ * unlock hop): V4 pools are watched, priced and scanned so V4<->V3/Aerodrome spreads surface in paper, the
+ * dashboard and the value-score, but they never live-send. Verified on-chain: PoolManager/StateView/
+ * V4Quoter have code, the poolId derivation matches live pools, and the deep ETH/USDC pools use native ETH
+ * (currency 0x0), which we map to WETH in the token graph (1:1). Hookless pools only (hooks == 0x0).
+ */
+export const V4 = {
+  poolManager: "0x498581fF718922c3f8e6A244956aF099B2652b2b",
+  stateView: "0xA3c0c9b65baD0b08107Aa264b0f3dB444b867A71",
+  quoter: "0x0d5e0F971ED27FBfF6c2837bf31316121532048D",
+  /** [fee ppm, tickSpacing] tiers probed for each base/counter pair (V4 allows any pair; these are the liquid ones). */
+  feeTiers: [
+    [100, 1],
+    [500, 10],
+    [2500, 50],
+    [3000, 60],
+    [10000, 200],
+  ] as Array<[number, number]>,
+} as const;
 
 /** Free flash loans: Morpho Blue (single token, no fee) and Balancer V2 (fee set by governance, 0 so far). */
 export const MORPHO_BLUE = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb";
@@ -256,6 +304,10 @@ export interface Settings {
   /** Live: most of the expected profit it may bid as priority fee, and the smallest expected value worth a send. */
   liveMaxBidShare: number;
   liveMinEvUsd: number;
+  /** Act mode (0.9): send every find that passes the on-chain simulation + min-profit floor, bid sized by learning, instead of only positive expected-value finds. */
+  liveActAlways: boolean;
+  /** Hard ceiling (gwei) for the live priority-fee bid; the bid is also capped at liveMaxBidShare of a trade's profit, so a higher ceiling lets bigger-profit trades bid proportionally more to win. */
+  liveMaxBidGwei: number;
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -379,6 +431,8 @@ export function loadSettings(): Settings {
     learnPruneDays: num("LEARN_PRUNE_DAYS", 3),
     liveMaxBidShare: num("LIVE_MAX_BID_SHARE", 0.3),
     liveMinEvUsd: num("LIVE_MIN_EV_USD", 0.01),
+    liveActAlways: bool("LIVE_ACT_ALWAYS", true),
+    liveMaxBidGwei: num("LIVE_MAX_BID_GWEI", 25),
   };
   if (settings.cloudUrl) {
     let u: URL;
@@ -402,6 +456,7 @@ export function loadSettings(): Settings {
   if (!(settings.learnPruneDays >= 0.5 && settings.learnPruneDays <= 60)) throw new Error("LEARN_PRUNE_DAYS must be between 0.5 and 60");
   if (!(settings.liveMaxBidShare >= 0 && settings.liveMaxBidShare <= 0.5)) throw new Error("LIVE_MAX_BID_SHARE must be between 0 and 0.5");
   if (!(settings.liveMinEvUsd >= 0 && settings.liveMinEvUsd <= 1)) throw new Error("LIVE_MIN_EV_USD must be between 0 and 1");
+  if (!(settings.liveMaxBidGwei >= 0 && settings.liveMaxBidGwei <= 100)) throw new Error("LIVE_MAX_BID_GWEI must be between 0 and 100");
   if (settings.mode === "live") {
     if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS (deploy the ArbExecutor from the dashboard, then copy its address into .env)");
     if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY (run: node dist/main.js new-wallet)");

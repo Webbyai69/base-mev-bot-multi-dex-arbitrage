@@ -25,6 +25,11 @@ import { log } from "./log.js";
 const abi = AbiCoder.defaultAbiCoder();
 export const MEV_FILE = "mev.jsonl";
 
+/** A "bot" (called contract) seen with at least this many distinct EOA senders in a day is a shared router/aggregator, not one competitor. */
+const SHARED_SENDER_MIN = 5;
+/** Cap on distinct senders tracked per bot per day (memory bound; we only need to know it crossed SHARED_SENDER_MIN). */
+const SENDER_CAP = 64;
+
 export type MevType = "arbitrage" | "sandwich";
 
 export interface DetectedMev {
@@ -332,7 +337,10 @@ export class Classifier {
     for (const a of addresses) {
       if (this.poolMeta.has(a)) continue;
       const p = this.registry.pools.get(a);
-      if (p) this.poolMeta.set(a, { token0: p.token0, token1: p.token1, kind: p.kind === "slipstream" ? "univ3" : p.kind, dex: p.dex });
+      // Slipstream, PancakeSwap V3 and Uniswap V4 are CL venues the classifier lumps with Uniswap V3 for
+      // metadata. (It doesn't match their distinct Swap topics yet, so their rival arbs aren't classified — a follow-up.)
+      const clk = p && (p.kind === "slipstream" || p.kind === "pancakev3" || p.kind === "univ4");
+      if (p) this.poolMeta.set(a, { token0: p.token0, token1: p.token1, kind: clk ? "univ3" : (p.kind as "univ2" | "aerodrome" | "univ3"), dex: p.dex });
     }
     const unknown = addresses.filter((a) => !this.poolMeta.has(a));
     if (unknown.length === 0) return;
@@ -419,6 +427,10 @@ export interface BotStats {
   costUsd: number;
   unpricedTxs: number;
   lastSeenBlock: number;
+  /** Distinct EOA senders that called this contract (capped at SENDER_CAP). Many ⇒ a shared router/aggregator. */
+  senders: number;
+  /** True when this address looks like a shared router/aggregator (>= SHARED_SENDER_MIN distinct senders), not one bot. */
+  shared: boolean;
 }
 
 export interface MarketSummary {
@@ -428,6 +440,8 @@ export interface MarketSummary {
   arbitrageProfitUsd: number;
   sandwichProfitUsd: number;
   bots: BotStats[];
+  /** Addresses that look like shared routers/aggregators (many distinct senders) — e.g. the V4 Universal Router. Kept out of `bots`. */
+  routers: BotStats[];
   topPairs: Array<{ pair: string; txs: number; profitUsd: number }>;
   topDexRoutes: Array<{ route: string; txs: number; profitUsd: number }>;
   hourly: Array<{ hour: string; txs: number; profitUsd: number }>;
@@ -445,6 +459,7 @@ function quantile(sorted: number[], q: number): number | null {
 export async function marketSummary(store: Store, symbolOf: (a: string) => string, watchBots: string[] = [], days?: string[]): Promise<MarketSummary[]> {
   const byDay = new Map<string, MarketSummary>();
   const bots = new Map<string, Map<string, BotStats>>();
+  const senders = new Map<string, Map<string, Set<string>>>();
   const pairs = new Map<string, Map<string, { txs: number; profitUsd: number }>>();
   const routes = new Map<string, Map<string, { txs: number; profitUsd: number }>>();
   const hourly = new Map<string, Map<string, { txs: number; profitUsd: number }>>();
@@ -455,7 +470,7 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
     if (days && !days.includes(day)) continue;
     let s = byDay.get(day);
     if (!s) {
-      s = { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [], arbPriority: { samples: 0, medianGwei: null, p90Gwei: null, maxGwei: null } };
+      s = { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], routers: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [], arbPriority: { samples: 0, medianGwei: null, p90Gwei: null, maxGwei: null } };
       byDay.set(day, s);
     }
     const usd = d.profitUsd ?? 0;
@@ -472,7 +487,7 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
       s.sandwichProfitUsd += usd;
     }
     const bm = bots.get(day) ?? new Map<string, BotStats>();
-    const b = bm.get(d.bot) ?? { bot: d.bot, txs: 0, arbitrage: 0, sandwich: 0, profitUsd: 0, costUsd: 0, unpricedTxs: 0, lastSeenBlock: 0 };
+    const b = bm.get(d.bot) ?? { bot: d.bot, txs: 0, arbitrage: 0, sandwich: 0, profitUsd: 0, costUsd: 0, unpricedTxs: 0, lastSeenBlock: 0, senders: 0, shared: false };
     b.txs++;
     b[d.type]++;
     b.profitUsd += usd;
@@ -481,6 +496,16 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
     b.lastSeenBlock = Math.max(b.lastSeenBlock, d.block);
     bm.set(d.bot, b);
     bots.set(day, bm);
+
+    // Distinct EOAs that called this contract — many ⇒ a shared router/aggregator, not one bot.
+    const sd = senders.get(day) ?? new Map<string, Set<string>>();
+    let ss = sd.get(d.bot);
+    if (!ss) {
+      ss = new Set<string>();
+      sd.set(d.bot, ss);
+    }
+    if (ss.size < SENDER_CAP && d.sender) ss.add(String(d.sender).toLowerCase());
+    senders.set(day, sd);
 
     const pairKey = d.tokens.map(symbolOf).sort().join("/");
     const pm = pairs.get(day) ?? new Map();
@@ -507,8 +532,14 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
     hourly.set(day, hm);
   }
   for (const s of byDay.values()) {
+    const senderMap = senders.get(s.day) ?? new Map<string, Set<string>>();
     const all = [...(bots.get(s.day)?.values() ?? [])].sort((a, b) => b.profitUsd - a.profitUsd);
-    s.bots = all.slice(0, 20);
+    for (const b of all) {
+      b.senders = senderMap.get(b.bot)?.size ?? 0;
+      b.shared = b.senders >= SHARED_SENDER_MIN;
+    }
+    s.bots = all.filter((b) => !b.shared).slice(0, 20);
+    s.routers = all.filter((b) => b.shared).slice(0, 10);
     s.watched = all.filter((b) => watchBots.includes(b.bot));
     s.topPairs = [...(pairs.get(s.day) ?? new Map()).entries()].map(([pair, v]) => ({ pair, ...v })).sort((a, b) => b.txs - a.txs).slice(0, 15);
     s.topDexRoutes = [...(routes.get(s.day) ?? new Map()).entries()].map(([route, v]) => ({ route, ...v })).sort((a, b) => b.txs - a.txs).slice(0, 10);
