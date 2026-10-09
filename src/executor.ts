@@ -77,7 +77,7 @@ export function pickLiveOpportunity(opps: Opportunity[]): Opportunity | undefine
 export function pickLiveSend(
   opps: Opportunity[],
   learner: Learner,
-  ctx: { ethUsd: number; gasUnits: number; basePriorityGwei: number; maxBidShare: number; evMinUsd: number },
+  ctx: { ethUsd: number; gasUnits: number; basePriorityGwei: number; maxBidShare: number; evMinUsd: number; act?: boolean },
   /** Routes (multi-hop and concentrated-liquidity) are considered only when the RouteExecutor is live. */
   allowRoutes = false,
 ): { send?: { o: Opportunity; ev: Evaluation }; passed: Array<{ o: Opportunity; ev: Evaluation }> } {
@@ -87,7 +87,12 @@ export function pickLiveSend(
     if (o.sim !== "executor-ok") continue;
     if (o.route && !allowRoutes) continue;
     const ev = learner.evaluate(o, ctx);
-    if (ev.evUsd > ctx.evMinUsd && (!send || ev.evUsd > send.ev.evUsd)) {
+    // Act mode: send every find that passed the on-chain simulation (which guarantees profit or revert), ranked by
+    // actual net profit — the learning still sizes the bid, it just no longer vetoes. Default: only positive-EV finds.
+    const worth = ctx.act ? o.netUsd > 0 : ev.evUsd > ctx.evMinUsd;
+    const score = ctx.act ? o.netUsd : ev.evUsd;
+    const best = send ? (ctx.act ? send.o.netUsd : send.ev.evUsd) : -Infinity;
+    if (worth && score > best) {
       if (send) passed.push(send);
       send = { o, ev };
     } else passed.push({ o, ev });

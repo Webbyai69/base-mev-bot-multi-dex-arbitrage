@@ -256,6 +256,8 @@ export interface Settings {
   /** Live: most of the expected profit it may bid as priority fee, and the smallest expected value worth a send. */
   liveMaxBidShare: number;
   liveMinEvUsd: number;
+  /** Act mode (0.9): send every find that passes the on-chain simulation + min-profit floor, bid sized by learning, instead of only positive expected-value finds. */
+  liveActAlways: boolean;
 }
 
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, optional quotes. */
@@ -379,6 +381,7 @@ export function loadSettings(): Settings {
     learnPruneDays: num("LEARN_PRUNE_DAYS", 3),
     liveMaxBidShare: num("LIVE_MAX_BID_SHARE", 0.3),
     liveMinEvUsd: num("LIVE_MIN_EV_USD", 0.01),
+    liveActAlways: bool("LIVE_ACT_ALWAYS", true),
   };
   if (settings.cloudUrl) {
     let u: URL;

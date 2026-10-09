@@ -408,6 +408,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
         })
       : undefined;
   if (live) log.warn(`LIVE MODE: sending from ${live.wallet.address} via executor ${s.executorAddress}${s.routeExecutorAddress ? ` and routes via ${s.routeExecutorAddress}` : ""}. Create ${store.path("STOP")} to halt.`);
+  if (live && s.liveActAlways) log.warn("LIVE: act mode ON — sending every simulated-profitable find (bid sized by the learning), bounded by the daily gas cap and circuit breaker. Set LIVE_ACT_ALWAYS=false for expected-value gating.");
 
   let lastReport = 0;
   let blocksSeen = 0;
@@ -462,7 +463,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   // confirmed-block handler and the faster Flashblocks loop (routes only when the RouteExecutor is live).
   const considerLiveSend = (opps: Opportunity[], ethUsd: number, stage: "block" | "flashblock"): void => {
     if (!live || !learner) return;
-    const ctx = { ethUsd, gasUnits: s.arbGasLimit, basePriorityGwei: s.priorityFeeGwei, maxBidShare: tuning.maxBidShare, evMinUsd: tuning.evMinUsd };
+    const ctx = { ethUsd, gasUnits: s.arbGasLimit, basePriorityGwei: s.priorityFeeGwei, maxBidShare: tuning.maxBidShare, evMinUsd: tuning.evMinUsd, act: s.liveActAlways };
     const { send, passed } = pickLiveSend(opps, learner, ctx, live.routeReady);
     for (const x of passed) {
       const key = routeKey(x.o);
