@@ -565,19 +565,24 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     }
     const baseFee = blk?.baseFeePerGas ? BigInt(blk.baseFeePerGas) : null;
     const ethUsd = registry.ethPrice();
-    const [gasQuote, detected] = await Promise.all([
-      gas.quote(n, baseFee),
-      classifier ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), [])) : Promise.resolve([]),
-    ]);
-    learner?.onRivalArbs(detected);
+    // Run the MEV classifier (which fetches transaction receipts) concurrently with the trade path, so its RPC
+    // latency hides under the scan + send instead of adding to the block time that trips the "Lagging" badge.
+    const detectedP = classifier
+      ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), []))
+      : Promise.resolve([]);
+    const gasQuote = await gas.quote(n, baseFee);
     const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block" });
-    paper.onBlock(n, opps, detected, ethUsd);
+    // Send first: it needs only the refreshed pools and the gas quote, not the classifier's output.
     if (live && learner) {
       considerLiveSend(opps, ethUsd, "block");
     } else if (live) {
       const pick = opps.filter((o) => !o.route && o.sim === "executor-ok").sort((a, b) => b.netUsd - a.netUsd)[0];
       if (pick) live.trySend(pick, ethUsd);
     }
+    // Then the measurement, with the classifier result (already in flight) now awaited.
+    const detected = await detectedP;
+    learner?.onRivalArbs(detected);
+    paper.onBlock(n, opps, detected, ethUsd);
     if (extras.fb) {
       // Hot pools for the next ~2s: anything that showed a spread or was arbed by another bot.
       const interesting = new Set<string>([...scanner.lastCandidatePools, ...detected.filter((d) => d.type === "arbitrage").flatMap((d) => d.pools)]);
