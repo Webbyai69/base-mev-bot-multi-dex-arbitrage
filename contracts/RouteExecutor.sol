@@ -310,26 +310,34 @@ contract RouteExecutor {
         if (msg.sender != POOL_MANAGER || expectedCaller != POOL_MANAGER) revert BadCallback();
         (address tokenIn, address tokenOut, uint256 amountIn, uint32 feePpm, bool nativeEth) =
             abi.decode(data, (address, address, uint256, uint32, bool));
-        address inCur = (nativeEth && tokenIn == WETH) ? address(0) : tokenIn;
-        address outCur = (nativeEth && tokenOut == WETH) ? address(0) : tokenOut;
+        // The WETH side becomes native ETH (0x0) for a native-ETH pool; the swap/settle/take live in a
+        // helper so this frame stays shallow (avoids "stack too deep").
+        _v4Swap(
+            (nativeEth && tokenIn == WETH) ? address(0) : tokenIn,
+            (nativeEth && tokenOut == WETH) ? address(0) : tokenOut,
+            amountIn,
+            feePpm
+        );
+        return "";
+    }
+
+    function _v4Swap(address inCur, address outCur, uint256 amountIn, uint32 feePpm) internal {
         bool zeroForOne = inCur < outCur; // native 0x0 sorts first, matching currency0 < currency1
-        PoolKeyV4 memory key = PoolKeyV4({
-            currency0: zeroForOne ? inCur : outCur,
-            currency1: zeroForOne ? outCur : inCur,
-            fee: uint24(feePpm),
-            tickSpacing: _tickSpacing(feePpm),
-            hooks: address(0)
-        });
         int256 delta = IPoolManager(POOL_MANAGER).swap(
-            key,
+            PoolKeyV4({
+                currency0: zeroForOne ? inCur : outCur,
+                currency1: zeroForOne ? outCur : inCur,
+                fee: uint24(feePpm),
+                tickSpacing: _tickSpacing(feePpm),
+                hooks: address(0)
+            }),
             SwapParamsV4({zeroForOne: zeroForOne, amountSpecified: -int256(amountIn), sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_RATIO_PLUS_ONE : MAX_SQRT_RATIO_MINUS_ONE}),
             ""
         );
-        int128 amount0 = int128(delta >> 128);
-        int128 amount1 = int128(delta);
-        (int128 inDelta, int128 outDelta) = zeroForOne ? (amount0, amount1) : (amount1, amount0);
-        uint256 owed = uint256(int256(-inDelta)); // input delta is negative (we owe it)
-        uint256 got = uint256(int256(outDelta)); // output delta is positive (owed to us)
+        // BalanceDelta packs int128 amount0 (high 128 bits) and int128 amount1 (low). The currency we owe
+        // has a negative delta; the one we receive, positive.
+        uint256 owed = uint256(int256(-(zeroForOne ? int128(delta >> 128) : int128(delta))));
+        uint256 got = uint256(int256(zeroForOne ? int128(delta) : int128(delta >> 128)));
         if (inCur == address(0)) {
             IWETH(WETH).withdraw(owed); // WETH -> ETH to pay a native-ETH pool
             IPoolManager(POOL_MANAGER).settle{value: owed}();
@@ -340,7 +348,6 @@ contract RouteExecutor {
         }
         IPoolManager(POOL_MANAGER).take(outCur, address(this), got);
         if (outCur == address(0)) IWETH(WETH).deposit{value: got}(); // ETH -> WETH so the route sees tokenOut
-        return "";
     }
 
     /// @dev V4 standard hookless fee tiers -> tick spacing (matches the bot's V4 discovery tiers).
