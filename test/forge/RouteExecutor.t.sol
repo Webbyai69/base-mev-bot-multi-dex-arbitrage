@@ -22,6 +22,7 @@ interface Vm {
     function prank(address sender) external;
     function expectRevert(bytes4 selector) external;
     function expectRevert() external;
+    function deal(address to, uint256 give) external;
 }
 
 contract Token {
@@ -192,10 +193,190 @@ contract ThiefCLPool {
     }
 }
 
+interface IPancakeCallback {
+    function pancakeV3SwapCallback(int256, int256, bytes calldata) external;
+}
+
+/// PancakeSwap V3 pool: identical to CLPool but it calls pancakeV3SwapCallback — the one
+/// interface difference the executor has to handle. Settles exactly like Uniswap V3.
+contract PancakeCLPool {
+    address public token0;
+    address public token1;
+    address public a;
+    uint256 public num;
+    uint256 public den;
+    uint256 public feePips;
+
+    constructor(address _a, address b, uint256 _num, uint256 _den, uint256 fee) {
+        (token0, token1) = _a < b ? (_a, b) : (b, _a);
+        a = _a;
+        num = _num;
+        den = _den;
+        feePips = fee;
+    }
+
+    function swap(address recipient, bool zeroForOne, int256 amountSpecified, uint160, bytes calldata data) external returns (int256, int256) {
+        require(amountSpecified > 0, "exact in only");
+        uint256 amountIn = uint256(amountSpecified);
+        uint256 lessFee = (amountIn * (1_000_000 - feePips)) / 1_000_000;
+        (address tin, address tout) = zeroForOne ? (token0, token1) : (token1, token0);
+        uint256 out = tin == a ? (lessFee * num) / den : (lessFee * den) / num;
+        Token(tout).transfer(recipient, out);
+        uint256 before = Token(tin).balanceOf(address(this));
+        (int256 d0, int256 d1) = zeroForOne ? (int256(amountIn), -int256(out)) : (-int256(out), int256(amountIn));
+        IPancakeCallback(msg.sender).pancakeV3SwapCallback(d0, d1, data);
+        require(Token(tin).balanceOf(address(this)) >= before + amountIn, "IIA");
+        return (d0, d1);
+    }
+}
+
+/// A fake Pancake pool a leaked operator key could aim a kind-2 hop at: in its swap it asks the
+/// executor's pancakeV3SwapCallback to hand over a valuable token the executor holds.
+contract ThiefPancakePool {
+    address public executor;
+    address public loot;
+
+    constructor(address _executor, address _loot) {
+        executor = _executor;
+        loot = _loot;
+    }
+
+    function swap(address, bool, int256, uint160, bytes calldata) external returns (int256, int256) {
+        uint256 all = Token(loot).balanceOf(executor);
+        IPancakeCallback(executor).pancakeV3SwapCallback(int256(all), int256(0), abi.encode(loot));
+        return (int256(all), int256(0));
+    }
+}
+
+interface IUnlockCb {
+    function unlockCallback(bytes calldata) external returns (bytes memory);
+}
+
+/**
+ * Minimal but faithful Uniswap V4 singleton PoolManager. A swap runs inside unlock ->
+ * unlockCallback, and the caller resolves its currency deltas with sync/settle (pay the input)
+ * and take (pull the output). The mock tracks the caller's net delta per currency and REQUIRES
+ * both to be zero before unlock returns — the real PoolManager invariant, and the thing that
+ * makes a mispriced or buggy V4 hop revert (cost gas) instead of leaking principal.
+ *
+ * Price is registered per pool as "1 unit of currency0 == num/den units of currency1".
+ * Native ETH is currency address(0); `settle` is paid with msg.value, `take` sends ETH.
+ */
+contract MockV4PoolManager {
+    mapping(bytes32 => uint256) public priceNum;
+    mapping(bytes32 => uint256) public priceDen;
+    mapping(address => int256) public delta; // caller's net per-currency delta during this unlock
+    mapping(address => uint256) private synced; // balance snapshot taken by sync()
+    address private lastSynced;
+    address private swapCur0;
+    address private swapCur1;
+    bool private swapped;
+
+    receive() external payable {}
+
+    function setPrice(address c0, address c1, uint24 fee, uint256 num, uint256 den) external {
+        bytes32 id = keccak256(abi.encode(c0, c1, fee));
+        priceNum[id] = num;
+        priceDen[id] = den;
+    }
+
+    function _bal(address cur) internal view returns (uint256) {
+        return cur == address(0) ? address(this).balance : Token(cur).balanceOf(address(this));
+    }
+
+    function unlock(bytes calldata data) external returns (bytes memory) {
+        swapped = false;
+        IUnlockCb(msg.sender).unlockCallback(data);
+        require(swapped, "no swap");
+        require(delta[swapCur0] == 0 && delta[swapCur1] == 0, "deltas unsettled");
+        return "";
+    }
+
+    function swap(PoolKeyV4 calldata key, SwapParamsV4 calldata params, bytes calldata) external returns (int256) {
+        bytes32 id = keccak256(abi.encode(key.currency0, key.currency1, key.fee));
+        uint256 den = priceDen[id];
+        require(den != 0, "no price");
+        uint256 num = priceNum[id];
+        uint256 amountIn = uint256(-params.amountSpecified); // negative == exact input
+        uint256 lessFee = (amountIn * (1_000_000 - key.fee)) / 1_000_000;
+        address inCur = params.zeroForOne ? key.currency0 : key.currency1;
+        address outCur = params.zeroForOne ? key.currency1 : key.currency0;
+        uint256 out = params.zeroForOne ? (lessFee * num) / den : (lessFee * den) / num;
+        delta[inCur] -= int256(amountIn);
+        delta[outCur] += int256(out);
+        swapCur0 = key.currency0;
+        swapCur1 = key.currency1;
+        swapped = true;
+        // Pack BalanceDelta: int128 amount0 in the high 128 bits, int128 amount1 in the low 128.
+        int128 a0 = params.zeroForOne ? -int128(int256(amountIn)) : int128(int256(out));
+        int128 a1 = params.zeroForOne ? int128(int256(out)) : -int128(int256(amountIn));
+        return (int256(a0) << 128) | int256(uint256(uint128(a1)));
+    }
+
+    function sync(address currency) external {
+        lastSynced = currency;
+        synced[currency] = _bal(currency);
+    }
+
+    function settle() external payable returns (uint256 paid) {
+        if (msg.value > 0) {
+            delta[address(0)] += int256(msg.value);
+            return msg.value;
+        }
+        paid = _bal(lastSynced) - synced[lastSynced];
+        delta[lastSynced] += int256(paid);
+    }
+
+    function take(address currency, address to, uint256 amount) external {
+        delta[currency] -= int256(amount);
+        if (currency == address(0)) {
+            (bool ok, ) = to.call{value: amount}("");
+            require(ok, "eth take");
+        } else {
+            Token(currency).transfer(to, amount);
+        }
+    }
+}
+
+/// Canonical WETH (0x4200...0006) for the V4 native-ETH tests: an ERC20 plus deposit/withdraw.
+contract WethMock {
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address to, uint256 a) external {
+        balanceOf[to] += a;
+    }
+
+    function transfer(address to, uint256 a) external returns (bool) {
+        require(balanceOf[msg.sender] >= a, "bal");
+        balanceOf[msg.sender] -= a;
+        balanceOf[to] += a;
+        return true;
+    }
+
+    function approve(address, uint256) external returns (bool) {
+        return true;
+    }
+
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+    }
+
+    function withdraw(uint256 a) external {
+        require(balanceOf[msg.sender] >= a, "bal");
+        balanceOf[msg.sender] -= a;
+        (bool ok, ) = msg.sender.call{value: a}("");
+        require(ok, "eth");
+    }
+
+    receive() external payable {}
+}
+
 contract RouteExecutorTest {
     Vm constant vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
     address constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     address constant VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+    address constant PM = 0x498581fF718922c3f8e6A244956aF099B2652b2b; // Uniswap V4 PoolManager
+    address constant WETH9 = 0x4200000000000000000000000000000000000006; // canonical WETH on Base
 
     RouteExecutor ex;
     Token weth;
@@ -400,5 +581,204 @@ contract RouteExecutorTest {
         } catch (bytes memory err) {
             require(bytes4(err) == RouteExecutor.BadRoute.selector, "wrong error");
         }
+    }
+
+    // =====================================================================
+    // PancakeSwap V3 + Uniswap V4 execution (commits 6906269 / f51bfe9)
+    // =====================================================================
+
+    /// Generic simulate helper for an arbitrary route (the file's _simulate is pinned to _route()).
+    function _sim(address[] memory tokens, RouteExecutor.Hop[] memory hops, uint256 amountIn, uint8 source)
+        internal
+        returns (uint256 profit)
+    {
+        try ex.simulate(tokens, hops, amountIn, source) {
+            revert("simulate must revert");
+        } catch (bytes memory err) {
+            require(bytes4(err) == RouteExecutor.Simulated.selector, "expected Simulated(profit)");
+            assembly {
+                profit := mload(add(err, 36))
+            }
+        }
+    }
+
+    /// Put the V4 PoolManager and canonical WETH at the addresses the contract hard-codes.
+    function _etchV4() internal {
+        vm.etch(PM, address(new MockV4PoolManager()).code);
+        vm.etch(WETH9, address(new WethMock()).code);
+    }
+
+    /// A PancakeSwap V3 leg (kind 2, pancakeV3SwapCallback) settles and composes with other hops,
+    /// exactly like the Uniswap-V3 leg it mirrors. Same profitable WETH->USDC->AERO->WETH cycle.
+    function testPancakeV3RouteSettlesViaAlias() public {
+        PancakeCLPool pcl = new PancakeCLPool(address(weth), address(aero), 2870, 1, 500);
+        aero.mint(address(pcl), 10_000_000e18);
+        weth.mint(address(pcl), 10_000e18);
+
+        address[] memory tokens = new address[](4);
+        tokens[0] = address(weth);
+        tokens[1] = address(usdc);
+        tokens[2] = address(aero);
+        tokens[3] = address(weth);
+        RouteExecutor.Hop[] memory hops = new RouteExecutor.Hop[](3);
+        hops[0] = RouteExecutor.Hop(address(v2), 0, 3000);
+        hops[1] = RouteExecutor.Hop(address(ae), 1, 3000);
+        hops[2] = RouteExecutor.Hop(address(pcl), 2, 500);
+
+        uint256 sim = _sim(tokens, hops, 1e18, 1);
+        require(sim > 0, "no profit via pancake");
+        uint256 profit = ex.execute(tokens, hops, 1e18, sim, 1);
+        require(profit == sim, "execute != simulate");
+        require(weth.balanceOf(address(ex)) == profit, "profit not held by executor");
+        require(weth.balanceOf(MORPHO) == 1000e18, "Morpho not repaid");
+    }
+
+    /// Uniswap V4, token/token (kind 4): WETH ->(V4 @3000)-> USDC ->(V2 @2900)-> WETH profits,
+    /// exercising unlock -> swap -> sync/settle -> take and the balanceOf-based hop accounting.
+    function testV4TokenRouteProfits() public {
+        _etchV4();
+        (address c0, address c1) = address(weth) < address(usdc) ? (address(weth), address(usdc)) : (address(usdc), address(weth));
+        if (c0 == address(weth)) MockV4PoolManager(payable(PM)).setPrice(c0, c1, 500, 3000, 1);
+        else MockV4PoolManager(payable(PM)).setPrice(c0, c1, 500, 1, 3000);
+        usdc.mint(PM, 10_000_000e18); // inventory the PoolManager pays out via take()
+
+        V2Pair v2cheap = new V2Pair(address(weth), address(usdc), 3000, false); // WETH cheaper here
+        _fund(address(v2cheap), weth, 1000e18, usdc, 2_900_000e18);
+
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(weth);
+        tokens[1] = address(usdc);
+        tokens[2] = address(weth);
+        RouteExecutor.Hop[] memory hops = new RouteExecutor.Hop[](2);
+        hops[0] = RouteExecutor.Hop(PM, 4, 500); // pool field is ignored for kind 4/5 (POOL_MANAGER is fixed)
+        hops[1] = RouteExecutor.Hop(address(v2cheap), 0, 3000);
+
+        uint256 sim = _sim(tokens, hops, 1e18, 1);
+        require(sim > 0, "no V4 profit");
+        uint256 profit = ex.execute(tokens, hops, 1e18, sim, 1);
+        require(profit == sim, "execute != simulate");
+        require(weth.balanceOf(address(ex)) == profit, "profit not held");
+    }
+
+    /// Uniswap V4, native-ETH pool, WETH as the INPUT (kind 5): the executor unwraps WETH->ETH to
+    /// pay (settle{value}) and takes USDC. WETH ->(V4 native @3000)-> USDC ->(V2 @2900)-> WETH.
+    function testV4NativeInputRouteProfits() public {
+        _etchV4();
+        MockV4PoolManager(payable(PM)).setPrice(address(0), address(usdc), 500, 3000, 1); // 3000 USDC per ETH
+        usdc.mint(PM, 10_000_000e18); // take(USDC) inventory
+        vm.deal(WETH9, 100e18); // ETH backing so WETH.withdraw can pay out
+
+        V2Pair v2cheap = new V2Pair(WETH9, address(usdc), 3000, false);
+        WethMock(payable(WETH9)).mint(address(v2cheap), 1000e18);
+        usdc.mint(address(v2cheap), 2_900_000e18);
+        V2Pair(address(v2cheap)).sync();
+
+        WethMock(payable(WETH9)).mint(address(ex), 1e18); // own capital
+        address[] memory tokens = new address[](3);
+        tokens[0] = WETH9;
+        tokens[1] = address(usdc);
+        tokens[2] = WETH9;
+        RouteExecutor.Hop[] memory hops = new RouteExecutor.Hop[](2);
+        hops[0] = RouteExecutor.Hop(PM, 5, 500); // kind 5: the WETH side of this pool is native ETH
+        hops[1] = RouteExecutor.Hop(address(v2cheap), 0, 3000);
+
+        uint256 sim = _sim(tokens, hops, 1e18, 0);
+        require(sim > 0, "no native-V4 profit");
+        uint256 profit = ex.execute(tokens, hops, 1e18, sim, 0);
+        require(profit == sim && profit > 0, "execute != simulate");
+        require(WethMock(payable(WETH9)).balanceOf(address(ex)) == 1e18 + profit, "profit not held");
+    }
+
+    /// Uniswap V4, native-ETH pool, WETH as the OUTPUT (kind 5): the executor takes native ETH and
+    /// wraps ETH->WETH on receipt (deposit{value}). USDC ->(V4 native @3000)-> WETH ->(V2 @3100)-> USDC.
+    function testV4NativeOutputRouteProfits() public {
+        _etchV4();
+        MockV4PoolManager(payable(PM)).setPrice(address(0), address(usdc), 500, 3000, 1);
+        vm.deal(PM, 100e18); // ETH inventory so take(ETH) can pay the executor
+
+        V2Pair v2dear = new V2Pair(WETH9, address(usdc), 3000, false); // WETH dearer here
+        WethMock(payable(WETH9)).mint(address(v2dear), 1000e18);
+        usdc.mint(address(v2dear), 3_100_000e18);
+        V2Pair(address(v2dear)).sync();
+
+        usdc.mint(address(ex), 3000e18); // own capital
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(usdc);
+        tokens[1] = WETH9;
+        tokens[2] = address(usdc);
+        RouteExecutor.Hop[] memory hops = new RouteExecutor.Hop[](2);
+        hops[0] = RouteExecutor.Hop(PM, 5, 500);
+        hops[1] = RouteExecutor.Hop(address(v2dear), 0, 3000);
+
+        uint256 sim = _sim(tokens, hops, 3000e18, 0);
+        require(sim > 0, "no profit");
+        uint256 profit = ex.execute(tokens, hops, 3000e18, sim, 0);
+        require(profit == sim && profit > 0, "execute != simulate");
+        require(usdc.balanceOf(address(ex)) == 3000e18 + profit, "profit not held");
+    }
+
+    /// A mispriced V4 hop costs gas, never principal: price the V4 pool below the V2 return leg so
+    /// the round trip loses, and assert the whole execute reverts with the principal untouched.
+    function testV4LosingRouteRevertsAndKeepsPrincipal() public {
+        _etchV4();
+        (address c0, address c1) = address(weth) < address(usdc) ? (address(weth), address(usdc)) : (address(usdc), address(weth));
+        if (c0 == address(weth)) MockV4PoolManager(payable(PM)).setPrice(c0, c1, 500, 2800, 1);
+        else MockV4PoolManager(payable(PM)).setPrice(c0, c1, 500, 1, 2800);
+        usdc.mint(PM, 10_000_000e18);
+
+        V2Pair v2mid = new V2Pair(address(weth), address(usdc), 3000, false);
+        _fund(address(v2mid), weth, 1000e18, usdc, 3_000_000e18);
+
+        weth.mint(address(ex), 2e18); // principal sitting in the contract
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(weth);
+        tokens[1] = address(usdc);
+        tokens[2] = address(weth);
+        RouteExecutor.Hop[] memory hops = new RouteExecutor.Hop[](2);
+        hops[0] = RouteExecutor.Hop(PM, 4, 500);
+        hops[1] = RouteExecutor.Hop(address(v2mid), 0, 3000);
+
+        try ex.execute(tokens, hops, 1e18, 0, 0) {
+            revert("losing V4 route must revert");
+        } catch {}
+        require(weth.balanceOf(address(ex)) == 2e18, "principal intact");
+    }
+
+    /// Neither new callback can be driven by a stranger: with no swap in progress (expectedCaller == 0)
+    /// both revert BadCallback, same guard as uniswapV3SwapCallback / onMorphoFlashLoan.
+    function testStrangerCannotCallNewCallbacks() public {
+        try ex.pancakeV3SwapCallback(int256(1), int256(0), abi.encode(address(weth))) {
+            revert("pancake callback accepted from stranger");
+        } catch (bytes memory err) {
+            require(bytes4(err) == RouteExecutor.BadCallback.selector, "pancake: wrong error");
+        }
+        bytes memory d = abi.encode(address(weth), address(usdc), uint256(1), uint32(500), false);
+        try ex.unlockCallback(d) returns (bytes memory) {
+            revert("unlock callback accepted from stranger");
+        } catch (bytes memory err) {
+            require(bytes4(err) == RouteExecutor.BadCallback.selector, "unlock: wrong error");
+        }
+    }
+
+    /// The leaked-operator drain guard holds for the Pancake alias too: the thief's callback pulls the
+    /// WETH, but the end-of-run balance check reverts the whole tx, so the loot never leaves.
+    function testLeakedOperatorCannotDrainViaFakePancakePool() public {
+        address bot = address(0xB07);
+        ex.setOperator(bot);
+        weth.mint(address(ex), 5e18);
+        ThiefPancakePool thief = new ThiefPancakePool(address(ex), address(weth));
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(weth);
+        tokens[1] = address(aero);
+        tokens[2] = address(weth);
+        RouteExecutor.Hop[] memory hops = new RouteExecutor.Hop[](2);
+        hops[0] = RouteExecutor.Hop(address(thief), 2, 500);
+        hops[1] = RouteExecutor.Hop(address(ae), 1, 3000);
+        vm.prank(bot);
+        try ex.execute(tokens, hops, 1e18, 0, 0) {
+            revert("drain must revert");
+        } catch {}
+        require(weth.balanceOf(address(ex)) == 5e18, "profit still in the contract");
+        require(weth.balanceOf(address(thief)) == 0, "thief got nothing");
     }
 }
