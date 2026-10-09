@@ -3,9 +3,12 @@
 Live mode sends real transactions. Before you start, know what it can and
 can't do:
 
-- It only sends **classic two-pool trades** (Uniswap V2 / SushiSwap /
-  BaseSwap / Aerodrome volatile pools) that passed the on-chain test run at
-  the same block. Multi-hop and concentrated-liquidity routes stay paper-only.
+- It sends **classic two-pool trades** (Uniswap V2 / SushiSwap / BaseSwap /
+  Aerodrome volatile pools) through the ArbExecutor, and — once you also deploy
+  a **RouteExecutor** and set `ROUTE_EXECUTOR_ADDRESS` — **concentrated-liquidity
+  and multi-hop routes** too. Everything is sent only after it passed the
+  on-chain test run at the same block. Without a RouteExecutor, CL and multi-hop
+  routes stay paper-only.
 - Every trade borrows what it needs with a flash swap, so it needs **no
   trading capital**, only gas. A trade that would lose money reverts. You
   pay its gas (about a cent on Base) but never lose principal.
@@ -42,9 +45,10 @@ Your own wallet's key never goes in a file.
      the `STOP` file and stops sending until you delete it.
    - Leave `WS_URL` empty. The websocket costs more Alchemy credit than polling
      and can go quiet without warning.
-   - Optional, for a faster bot that uses fewer credits: `MULTI_HOP=false`,
-     `CL_POOLS=false`, `LIQUIDATIONS=false`. Live mode can't send any of those
-     anyway; turn them back on when you want the paper numbers for them.
+   - Keep `MULTI_HOP=true` and `CL_POOLS=true` if you want to trade CL and
+     multi-hop routes live (see "Trading CL and multi-hop routes" below); set
+     them to `false` for a leaner two-pool-only bot. `LIQUIDATIONS` is never
+     sent, only watched.
 4. **Restart the bot** (still `MODE=paper`). Open http://localhost:8787 and
    connect your own wallet in **Wallet and contracts**. Make sure it's on Base.
 5. **Deploy the trading contract** with the button under *Trading contract
@@ -68,6 +72,28 @@ The log says `LIVE: setup checks out … sending enabled`. The dashboard's
 *Live setup* list shows all seven steps green, and Telegram, if set up, says
 "Live trading enabled". Until then the dashboard says what's missing and
 nothing is sent.
+
+## Trading CL and multi-hop routes too
+
+Two-pool trades go through the ArbExecutor above. To also trade
+concentrated-liquidity (Uniswap V3 / Aerodrome Slipstream) and multi-hop
+routes live, deploy a second contract, the **RouteExecutor**:
+
+1. In *Wallet and contracts*, open **RouteExecutor** and press **Deploy**. Your
+   wallet becomes its owner, exactly like the ArbExecutor.
+2. Press **Authorise bot wallet** on it.
+3. Copy the `ROUTE_EXECUTOR_ADDRESS=0x…` line, paste it into `.env`, and
+   restart the bot.
+
+It uses the same bot wallet and gas money, and the same safety: a route borrows
+what it needs with a free Morpho flash loan (no capital), and the whole
+transaction reverts unless it ends holding more of the token it started with, so
+a stale route or a leaked bot key costs gas, never principal. The bot checks the
+RouteExecutor's code, role and gas just like the ArbExecutor, and the log says
+`LIVE: RouteExecutor setup checks out`. Routes are never sent until that passes,
+so you can deploy and authorise at your own pace. These routes are newer than the
+two-pool path and tested against mock pools rather than live Base liquidity, so
+start small and watch the first few in `data/live.jsonl`.
 
 ## While it runs
 

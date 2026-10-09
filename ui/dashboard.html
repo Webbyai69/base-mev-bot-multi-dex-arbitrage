@@ -1552,7 +1552,13 @@ details.optional[open] > summary { margin-bottom: 8px; }
       live && lv ? ["Trades sent", `${int(lv.sent ?? 0)} sent, ${int(lv.succeeded ?? 0)} succeeded`] : null,
       ["Circuit breaker", !live ? "Not needed in paper mode" : tripped ? chip("bad", "Tripped") : `Armed: stops after ${sf.maxConsecutiveFailures ?? 5} failed transactions in a row (now ${sf.live?.consecutiveFailures ?? 0})`],
       live && sf.live ? ["Gas budget today", `${usd(sf.live.gasSpentTodayUsd)} of ${usd(sf.live.maxDailyGasUsd)}`] : null,
-      ["Multi-hop and CL routes", "Paper only: blocked from sending in code"],
+      ["Multi-hop and CL routes", !live
+        ? "Paper only in paper mode"
+        : lv?.routeBlocked === undefined
+          ? "Paper only until a RouteExecutor is deployed and set in .env"
+          : lv.routeBlocked
+            ? h("span", null, chip("warn", "Waiting for the RouteExecutor setup"), " ", h("span", { class: "muted" }, String(lv.routeBlocked).slice(0, 160)))
+            : chip("good", "Live: sent through your RouteExecutor")],
       ["Liquidations", "Watched and estimated; nothing is ever sent"],
     ]));
     if (live && !stopped) box.append(h("div", { class: "row", style: "margin-top:14px" }, stopControl()));
@@ -2073,7 +2079,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     return out;
   }
   function routeBlock() {
-    const b = h("div", { class: "vblock" }, h("h3", null, "RouteExecutor (optional)"), h("p", { class: "sub" }, "For multi-hop routes, which are paper-only for now, so you don't need it to go live. You own it; the bot's key could trade through it but never withdraw."));
+    const b = h("div", { class: "vblock" }, h("h3", null, "RouteExecutor"), h("p", { class: "sub" }, "For concentrated-liquidity and multi-hop routes. Deploy it, authorise the bot and add its address to .env to trade those live too (two-pool trades go through the ArbExecutor above). You own it; the bot's key can trade through it but never withdraw."));
     const envAddr = S.state?.addresses?.routeExecutor;
     const addr = envAddr || W.deployed;
     if (!addr) {
@@ -2100,7 +2106,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     b.append(contractRows(addr, info, true, isOwner));
     if (W.deployed && !envAddr) {
       const line = `ROUTE_EXECUTOR_ADDRESS=${W.deployed}`;
-      b.append(h("p", { class: "sub" }, "Add this line to .env and restart the bot. The dashboard can't edit .env."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
+      b.append(h("p", { class: "sub" }, "Authorise the bot wallet below, then add this line to .env and restart the bot to send CL and multi-hop routes live. The dashboard can't edit .env."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
     }
     if (info?.deployed && W.account && !isOwner) b.append(h("p", { class: "sub" }, "Only the owner can change it or withdraw. Connect the wallet that deployed it."));
     if (isOwner) {
@@ -2215,9 +2221,10 @@ details.optional[open] > summary { margin-bottom: 8px; }
     const box = $("vault-body");
     preserveFocus(() => {
       clear(box);
-      // The RouteExecutor isn't needed to go live, so it stays folded away unless one exists already.
+      // The RouteExecutor lets concentrated-liquidity and multi-hop routes trade live too; fold it
+      // away only when the two-pool ArbExecutor isn't set up yet, so the first deploy stays simple.
       const hasRoute = !!(S.state?.addresses?.routeExecutor || W.deployed);
-      const route = hasRoute ? routeBlock() : h("details", { class: "optional" }, h("summary", null, "RouteExecutor: optional, not needed to go live"), routeBlock());
+      const route = hasRoute ? routeBlock() : h("details", { class: "optional" }, h("summary", null, "RouteExecutor: deploy to trade CL and multi-hop routes live too"), routeBlock());
       const contracts = h("div", { class: "vcol" }, arbBlock(), route);
       box.append(h("div", { class: "vgrid" }, accountBlock(), botBlock(), contracts), readinessBlock());
     });

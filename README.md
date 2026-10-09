@@ -17,6 +17,27 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
               ──► every minute: reports/YYYY-MM-DD.html
 ```
 
+## What's new in 0.7: faster, and routes trade live
+
+- **Concentrated-liquidity and multi-hop routes go live.** They used to be
+  paper-only. Deploy the `RouteExecutor` from the dashboard (you own it, the
+  bot is only its operator), authorise the bot and set `ROUTE_EXECUTOR_ADDRESS`
+  in `.env`, and the bot sends verified CL and multi-hop routes through it with
+  a Morpho flash loan — no capital, gas only. Same safety as the two-pool
+  contract: every execution must end holding more of the start token or the
+  whole transaction reverts, so a stale route or a leaked bot key costs gas,
+  never principal (16 `forge` tests, including a leaked-operator drain attempt
+  through a fake pool and callback).
+- **It reacts on Flashblocks.** With `FLASHBLOCKS=true` the bot acts on Base's
+  ~200 ms pre-confirmed state instead of waiting ~2 s for the full block, and
+  now *sends* from that faster loop, not just records it on paper. The
+  Flashblocks poll runs against a free public endpoint by default
+  (`FLASHBLOCKS_RPC_URL`), so it doesn't spend your metered RPC plan.
+- **The expected-value gate and learned bids** (from 0.6) decide and price
+  these sends too; routes are only ever sent once the `RouteExecutor` setup
+  checks out, so turning the feature on can never send a route by accident.
+- Tune the route gas limit with `ROUTE_GAS_LIMIT` (default 600,000).
+
 ## What's new in 0.6: it learns as it trades
 
 The bot now keeps a memory, `data/learned.json`, of everything it sees: which
@@ -333,7 +354,7 @@ Leave it running for a few days. `data\opportunities.jsonl` and
 | `src/paper.ts` | paper engine with N+1/N+2 outcome tracking, summaries |
 | `src/classifier.ts` | MEV classifier (arbitrage + sandwich) from Swap logs, leaderboard, market summary |
 | `src/report.ts` | daily HTML report |
-| `src/executor.ts` | live sender: setup check, one tx in flight, STOP file, daily gas budget, circuit breaker; classic routes only |
+| `src/executor.ts` | live sender for both contracts: setup checks, one tx in flight, STOP file, daily gas budget, circuit breaker; two-pool via ArbExecutor, CL/multi-hop via RouteExecutor |
 | `src/wallet.ts` | `new-wallet`: the bot's own gas wallet, key written straight into `.env` |
 | `src/learn.ts` | learning engine: decayed records of test runs, outcomes, rival bids and live sends (`data/learned.json`); skips, P(land), expected value, bids, pool pruning; bounded dashboard tuning (`data/tuning.json`) |
 | `contracts/ArbExecutor.sol` | on-chain executor: flash-swap or own-capital, min-profit check, `simulate()`, owner/operator roles |
@@ -421,9 +442,11 @@ or chat.
 * Concentrated-liquidity trades are limited to the current tick range (up to
   the next initialized tick). That is exact but conservative: a route that
   would profit from crossing several ticks is sized down, not skipped.
-* Multi-hop and CL routes are paper-only. RouteExecutor has EVM tests against
-  mocks, not yet against live Base pools. Watch the "failed on-chain
-  verification" count in the report before ever considering live use.
+* Multi-hop and CL routes trade live only once you deploy a RouteExecutor and
+  set `ROUTE_EXECUTOR_ADDRESS`; until then they stay paper-only. RouteExecutor
+  has EVM tests against mocks (`forge test`), including a leaked-operator drain
+  attempt, but has not been battle-tested against live Base pools — start small
+  and watch the "failed on-chain verification" count in the report.
 * Aerodrome stable pools and Uniswap V4 are not traded.
 * The Flashblocks loop depends on a Flashblocks-aware RPC answering
   `eth_call` at the `pending` tag. Base plans to deprecate Flashblocks in a

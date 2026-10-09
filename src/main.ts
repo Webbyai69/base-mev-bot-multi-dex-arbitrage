@@ -35,7 +35,7 @@ import { formatUnits } from "./math.js";
 import { LiquidationMonitor, liquidationSummary } from "./liquidations.js";
 import { FlashblockWatcher } from "./flashblocks.js";
 import { renderDigest, writeDigest } from "./digest.js";
-import { poolsOf } from "./scanner.js";
+import { poolsOf, flashSourceId, routeKey, type Opportunity } from "./scanner.js";
 import { BlockLogFetcher } from "./blocklogs.js";
 import { UiServer, type Summaries, type UiSources } from "./ui/server.js";
 import { Alerts, telegramSetup } from "./alerts.js";
@@ -286,7 +286,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   const routeOpts = routeOptions(s);
   const scanner = new Scanner(chain, registry, s.executorAddress, s.simOverride, routeOpts);
   log.info(`on-chain verification: ${scanner.simMode}${scanner.simMode === "override" ? " (ArbExecutor bytecode injected via eth_call state override; no deployment needed)" : ""}`);
-  if (s.multiHop) log.info(`multi-hop routes: up to ${s.maxHops} hops, verified by ${scanner.routeSimMode === "quoter" ? "each DEX's quoter" : `RouteExecutor.simulate() (${scanner.routeSimMode})`}; paper only`);
+  if (s.multiHop) log.info(`multi-hop and CL routes: up to ${s.maxHops} hops, verified by ${scanner.routeSimMode === "quoter" ? "each DEX's quoter" : `RouteExecutor.simulate() (${scanner.routeSimMode})`}; ${s.mode === "live" && s.routeExecutorAddress ? "sent live through your RouteExecutor" : "paper only (set ROUTE_EXECUTOR_ADDRESS to trade them live)"}`);
   const gas = new GasEstimator(chain, s.arbGasLimit, s.priorityFeeGwei);
   const paper = new PaperEngine(store, registry);
   const classifier = s.mevFeed ? new Classifier(chain, registry, store) : undefined;
@@ -345,6 +345,15 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     }
     paper.onOutcome = (o, status, takenBy) => learner.onOutcome(o, status, takenBy);
     extras.learner = learner;
+    // Lift any dashboard block that this version's corrected blame rule no longer supports. A 0.6.0
+    // suggestion blamed a hub token (e.g. VIRTUAL) for the small tokens paired with it; re-learned
+    // with the fix, those are no longer unreliable, so unblock them and let their pools come back.
+    const stillBad = new Set(learner.badTokens(Date.now(), 6, 0.8).map((t) => t.token));
+    for (const t of [...tuning.blocked]) {
+      if (stillBad.has(t) || s.tokenBlacklist.has(t)) continue; // genuinely bad, or pinned in .env
+      const r = tuning.act("unblock", t);
+      if (r.ok) log.info(`learning: unblocked ${registry.symbol(t)} (${t}) — with the corrected blame rule it no longer looks unreliable; its pools return as other bots trade them`);
+    }
     tuning.refresh(learner, latestReviewText(s.reportDir));
   }
   // Tokens you blocked on the dashboard stay out of discovery and the watch list.
@@ -391,9 +400,11 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
           maxDailyGasUsd: Number(process.env.MAX_DAILY_GAS_USD ?? 20),
           maxConsecutiveFailures: Number(process.env.MAX_CONSECUTIVE_FAILURES ?? 5),
           useFlash: (process.env.USE_FLASH ?? "true") !== "false",
+          // With a deployed RouteExecutor, concentrated-liquidity and multi-hop routes go live too.
+          ...(s.routeExecutorAddress ? { routeExecutorAddress: s.routeExecutorAddress, routeGasLimit: s.routeGasLimit, routeFlashSource: flashSourceId(s.flashSource) } : {}),
         })
       : undefined;
-  if (live) log.warn(`LIVE MODE: sending from ${live.wallet.address} via executor ${s.executorAddress}. Create ${store.path("STOP")} to halt.`);
+  if (live) log.warn(`LIVE MODE: sending from ${live.wallet.address} via executor ${s.executorAddress}${s.routeExecutorAddress ? ` and routes via ${s.routeExecutorAddress}` : ""}. Create ${store.path("STOP")} to halt.`);
 
   let lastReport = 0;
   let blocksSeen = 0;
@@ -443,6 +454,24 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     // Nothing is sent until the contract, the bot wallet's role and its gas money check out.
     live.startChecks();
   }
+
+  // Decide whether to send a live trade from a set of finds, and do it. Used by both the
+  // confirmed-block handler and the faster Flashblocks loop (routes only when the RouteExecutor is live).
+  const considerLiveSend = (opps: Opportunity[], ethUsd: number, stage: "block" | "flashblock"): void => {
+    if (!live || !learner) return;
+    const ctx = { ethUsd, gasUnits: s.arbGasLimit, basePriorityGwei: s.priorityFeeGwei, maxBidShare: tuning.maxBidShare, evMinUsd: tuning.evMinUsd };
+    const { send, passed } = pickLiveSend(opps, learner, ctx, live.routeReady);
+    for (const x of passed) {
+      const key = routeKey(x.o);
+      if (Date.now() - (quietSkips.get(key) ?? 0) < 300_000) continue;
+      quietSkips.set(key, Date.now());
+      log.info(`live: not sending ${x.o.pairSymbols} (net $${x.o.netUsd.toFixed(3)}): expected value $${x.ev.evUsd.toFixed(3)}, lands ${(x.ev.pLand * 100).toFixed(0)}% of the time on ${x.ev.evidence.toFixed(1)} outcomes`);
+    }
+    if (!send) return;
+    const sent = send.o.route ? live.trySendRoute(send.o, ethUsd, send.ev.bidGwei) : live.trySend(send.o, ethUsd, send.ev.bidGwei);
+    if (sent) log.info(`live${stage === "flashblock" ? " [flashblock]" : ""}: sending ${send.o.pairSymbols}${send.o.route ? ` (${send.o.route.pools.length}-hop route)` : ""} (net $${send.o.netUsd.toFixed(3)}): lands ${(send.ev.pLand * 100).toFixed(0)}% of the time on ${send.ev.evidence.toFixed(1)} outcomes, expected $${send.ev.evUsd.toFixed(3)}, bid ${send.ev.bidGwei} gwei (${send.ev.bidWhy})`);
+  };
+  if (live) extras.fb?.setLiveSend(considerLiveSend);
   const counts = poolCounts(registry);
   void alerts?.started({ version: version(), pools: counts.total, clPools: counts.cl, dashboard: s.cloudUrl || ui?.url || undefined });
   // Start the stall clock now, so a feed that never delivers a first block also alerts.
@@ -518,17 +547,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block" });
     paper.onBlock(n, opps, detected, ethUsd);
     if (live && learner) {
-      const ctx = { ethUsd, gasUnits: s.arbGasLimit, basePriorityGwei: s.priorityFeeGwei, maxBidShare: tuning.maxBidShare, evMinUsd: tuning.evMinUsd };
-      const { send, passed } = pickLiveSend(opps, learner, ctx);
-      for (const x of passed) {
-        const key = `${x.o.buyPool}-${x.o.sellPool}`;
-        if (Date.now() - (quietSkips.get(key) ?? 0) < 300_000) continue;
-        quietSkips.set(key, Date.now());
-        log.info(`live: not sending ${x.o.pairSymbols} (net $${x.o.netUsd.toFixed(3)}): expected value $${x.ev.evUsd.toFixed(3)}, lands ${(x.ev.pLand * 100).toFixed(0)}% of the time on ${x.ev.evidence.toFixed(1)} outcomes`);
-      }
-      if (send && live.trySend(send.o, ethUsd, send.ev.bidGwei)) {
-        log.info(`live: sending ${send.o.pairSymbols} (net $${send.o.netUsd.toFixed(3)}): lands ${(send.ev.pLand * 100).toFixed(0)}% of the time on ${send.ev.evidence.toFixed(1)} outcomes, expected $${send.ev.evUsd.toFixed(3)}, bid ${send.ev.bidGwei} gwei (${send.ev.bidWhy})`);
-      }
+      considerLiveSend(opps, ethUsd, "block");
     } else if (live) {
       const pick = opps.filter((o) => !o.route && o.sim === "executor-ok").sort((a, b) => b.netUsd - a.netUsd)[0];
       if (pick) live.trySend(pick, ethUsd);

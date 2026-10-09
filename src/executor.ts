@@ -23,11 +23,12 @@
  */
 import { writeFileSync } from "node:fs";
 import { Wallet, keccak256, type TransactionReceipt, type TransactionResponse } from "ethers";
-import { executorIface } from "./abi.js";
+import { executorIface, routeExecutorIface } from "./abi.js";
 import type { Chain } from "./rpc.js";
 import type { Opportunity } from "./scanner.js";
 import type { Store } from "./store.js";
 import { SIM_EXECUTOR_RUNTIME } from "./simBytecode.js";
+import { ROUTE_EXECUTOR_RUNTIME } from "./simBytecodeRoute.js";
 import type { Evaluation, Learner } from "./learn.js";
 import { log } from "./log.js";
 
@@ -46,11 +47,14 @@ export function pickLiveSend(
   opps: Opportunity[],
   learner: Learner,
   ctx: { ethUsd: number; gasUnits: number; basePriorityGwei: number; maxBidShare: number; evMinUsd: number },
+  /** Routes (multi-hop and concentrated-liquidity) are considered only when the RouteExecutor is live. */
+  allowRoutes = false,
 ): { send?: { o: Opportunity; ev: Evaluation }; passed: Array<{ o: Opportunity; ev: Evaluation }> } {
   const passed: Array<{ o: Opportunity; ev: Evaluation }> = [];
   let send: { o: Opportunity; ev: Evaluation } | undefined;
   for (const o of opps) {
-    if (o.route || o.sim !== "executor-ok") continue;
+    if (o.sim !== "executor-ok") continue;
+    if (o.route && !allowRoutes) continue;
     const ev = learner.evaluate(o, ctx);
     if (ev.evUsd > ctx.evMinUsd && (!send || ev.evUsd > send.ev.evUsd)) {
       if (send) passed.push(send);
@@ -77,6 +81,16 @@ export interface LiveCheck {
 }
 
 const EXPECTED_CODE_HASH = keccak256(SIM_EXECUTOR_RUNTIME);
+const ROUTE_EXPECTED_CODE_HASH = keccak256(ROUTE_EXECUTOR_RUNTIME);
+
+/** What `checkLiveSetup` is checking: the two-pool ArbExecutor, or the multi-hop / CL RouteExecutor. */
+export interface ContractKind {
+  label: string;
+  envVar: string;
+  expectedCodeHash: string;
+}
+export const ARB_CONTRACT: ContractKind = { label: "ArbExecutor", envVar: "EXECUTOR_ADDRESS", expectedCodeHash: EXPECTED_CODE_HASH };
+export const ROUTE_CONTRACT: ContractKind = { label: "RouteExecutor", envVar: "ROUTE_EXECUTOR_ADDRESS", expectedCodeHash: ROUTE_EXPECTED_CODE_HASH };
 
 /**
  * Fee caps for a send: twice the latest base fee plus our tip. (ethers' getFeeData() adds a
@@ -94,7 +108,7 @@ export async function liveFees(chain: Chain, priorityFeeGwei: number): Promise<{
  * Is everything in place to trade? Reads the contract code, its owner and
  * operator, and the bot wallet's balance. Never throws: RPC trouble becomes a problem line.
  */
-export async function checkLiveSetup(chain: Chain, executor: string, bot: string, gasLimit: number, priorityFeeGwei: number): Promise<LiveCheck> {
+export async function checkLiveSetup(chain: Chain, executor: string, bot: string, gasLimit: number, priorityFeeGwei: number, kind: ContractKind = ARB_CONTRACT): Promise<LiveCheck> {
   const problems: string[] = [];
   const r: LiveCheck = { ok: false, problems, executor, bot, codeMatches: false, owner: null, operator: null, botBalanceWei: 0n, minGasWei: 0n, checkedAt: new Date().toISOString() };
   const p = chain.provider;
@@ -103,10 +117,10 @@ export async function checkLiveSetup(chain: Chain, executor: string, bot: string
     r.botBalanceWei = balance;
     r.minGasWei = BigInt(gasLimit) * fees.maxFeePerGas;
     if (!code || code === "0x") {
-      problems.push(`There is no contract at EXECUTOR_ADDRESS (${executor}). Deploy the ArbExecutor from the dashboard and put its address in .env.`);
+      problems.push(`There is no contract at ${kind.envVar} (${executor}). Deploy the ${kind.label} from the dashboard and put its address in .env.`);
     } else {
-      r.codeMatches = keccak256(code) === EXPECTED_CODE_HASH;
-      if (!r.codeMatches) problems.push(`The contract at EXECUTOR_ADDRESS (${executor}) isn't this version's ArbExecutor. Deploy one from the dashboard and put its address in .env.`);
+      r.codeMatches = keccak256(code) === kind.expectedCodeHash;
+      if (!r.codeMatches) problems.push(`The contract at ${kind.envVar} (${executor}) isn't this version's ${kind.label}. Deploy one from the dashboard and put its address in .env.`);
       const read = async (fn: "owner" | "operator"): Promise<string | null> => {
         try {
           const ret = await p.call({ to: executor, data: executorIface.encodeFunctionData(fn, []) });
@@ -118,7 +132,7 @@ export async function checkLiveSetup(chain: Chain, executor: string, bot: string
       [r.owner, r.operator] = await Promise.all([read("owner"), read("operator")]);
       const me = bot.toLowerCase();
       if (r.owner !== me && r.operator !== me) {
-        problems.push(`The bot wallet ${bot} isn't authorised on the ArbExecutor. On the dashboard, connect the owner's wallet${r.owner ? ` (${r.owner})` : ""} and press "Authorise bot wallet".`);
+        problems.push(`The bot wallet ${bot} isn't authorised on the ${kind.label}. On the dashboard, connect the owner's wallet${r.owner ? ` (${r.owner})` : ""} and press "Authorise bot wallet".`);
       }
     }
     if (balance < r.minGasWei * 3n) {
@@ -138,6 +152,8 @@ export interface LiveRecord {
   sentAt: string;
   txHash: string;
   status: "pending" | "success" | "reverted" | "dropped";
+  /** A multi-hop / CL route sent through the RouteExecutor (vs a classic two-pool ArbExecutor trade). */
+  route?: boolean;
   /** Priority fee bid, in gwei. */
   priorityFeeGwei?: number;
   gasUsedWei?: bigint;
@@ -209,20 +225,25 @@ export interface LiveSafety {
   maxDailyGasUsd: number;
   /** Why nothing is being sent yet (null = ready). */
   blocked: string | null;
-  check: null | {
-    ok: boolean;
-    problems: string[];
-    executor: string;
-    bot: string;
-    codeMatches: boolean;
-    owner: string | null;
-    operator: string | null;
-    botBalanceEth: number;
-    minGasEth: number;
-    checkedAt: string;
-  };
+  check: null | LiveCheckView;
+  /** The RouteExecutor's status: undefined = routes not configured (CL/multi-hop stay paper-only). */
+  routeBlocked?: string | null;
+  routeCheck?: null | LiveCheckView;
   sent: number;
   succeeded: number;
+}
+
+export interface LiveCheckView {
+  ok: boolean;
+  problems: string[];
+  executor: string;
+  bot: string;
+  codeMatches: boolean;
+  owner: string | null;
+  operator: string | null;
+  botBalanceEth: number;
+  minGasEth: number;
+  checkedAt: string;
 }
 
 export class LiveExecutor {
@@ -238,6 +259,9 @@ export class LiveExecutor {
   /** Why nothing is being sent yet; null once the live setup checks out. */
   blocked: string | null = "Checking the live setup…";
   lastCheck: LiveCheck | null = null;
+  /** Same, for the multi-hop / CL RouteExecutor; null = ready, undefined = routes not configured. */
+  routeBlocked: string | null | undefined;
+  lastRouteCheck: LiveCheck | null = null;
   readonly wallet: Wallet;
   /** Called when the circuit breaker trips (alerts hook). */
   onTrip?: (reason: string) => void;
@@ -251,18 +275,35 @@ export class LiveExecutor {
     readonly store: Store,
     privateKey: string,
     readonly executorAddress: string,
-    readonly opts: { gasLimit: number; priorityFeeGwei: number; maxDailyGasUsd: number; useFlash: boolean; maxConsecutiveFailures?: number },
+    readonly opts: {
+      gasLimit: number;
+      priorityFeeGwei: number;
+      maxDailyGasUsd: number;
+      useFlash: boolean;
+      maxConsecutiveFailures?: number;
+      /** The multi-hop / CL RouteExecutor, deployed from the dashboard; when set, CL and multi-hop routes go live too. */
+      routeExecutorAddress?: string;
+      routeGasLimit?: number;
+      /** Flash-loan source id for routes (0 own capital, 1 Morpho, 2 Balancer); must match the one simulation used. */
+      routeFlashSource?: number;
+    },
   ) {
     this.wallet = new Wallet(privateKey, chain.provider);
+    this.routeBlocked = opts.routeExecutorAddress ? "Checking the live setup…" : undefined;
   }
 
   get busy(): boolean {
     return this.inFlight !== null;
   }
 
-  /** Re-run the live setup check now. Sending is enabled only while it passes. */
+  /** True while verified route sending is possible (RouteExecutor configured and its setup checks out). */
+  get routeReady(): boolean {
+    return this.routeBlocked === null;
+  }
+
+  /** Re-run the live setup check(s) now. Sending is enabled only while it passes. */
   async verify(): Promise<LiveCheck> {
-    const c = await checkLiveSetup(this.chain, this.executorAddress, this.wallet.address, this.opts.gasLimit, this.opts.priorityFeeGwei);
+    const c = await checkLiveSetup(this.chain, this.executorAddress, this.wallet.address, this.opts.gasLimit, this.opts.priorityFeeGwei, ARB_CONTRACT);
     this.lastCheck = c;
     const was = this.blocked;
     this.blocked = c.ok ? null : c.problems.join(" ");
@@ -273,7 +314,18 @@ export class LiveExecutor {
       log.warn(`LIVE: not sending yet. ${this.blocked}`);
       this.onReadyChange?.(false, this.blocked);
     }
+    if (this.opts.routeExecutorAddress) await this.verifyRoute();
     return c;
+  }
+
+  /** The RouteExecutor's own check. It shares the bot wallet and gas, so only the contract and role differ. */
+  private async verifyRoute(): Promise<void> {
+    const c = await checkLiveSetup(this.chain, this.opts.routeExecutorAddress!, this.wallet.address, this.opts.routeGasLimit ?? this.opts.gasLimit, this.opts.priorityFeeGwei, ROUTE_CONTRACT);
+    this.lastRouteCheck = c;
+    const was = this.routeBlocked;
+    this.routeBlocked = c.ok ? null : c.problems.join(" ");
+    if (was !== null && this.routeBlocked === null) log.warn(`LIVE: RouteExecutor setup checks out (${this.opts.routeExecutorAddress}); multi-hop and CL routes will be sent too`);
+    else if (this.routeBlocked !== null && this.routeBlocked !== was) log.warn(`LIVE: not sending routes yet. ${this.routeBlocked}`);
   }
 
   /** Check now, then every minute while blocked and every 5 minutes while ready (the gas money can run out). */
@@ -293,14 +345,8 @@ export class LiveExecutor {
 
   /** For the dashboard's safety panel. */
   get safety(): LiveSafety {
-    const c = this.lastCheck;
-    return {
-      consecutiveFailures: this.consecutiveFailures,
-      limit: this.opts.maxConsecutiveFailures ?? 5,
-      gasSpentTodayUsd: this.gasSpentTodayUsd,
-      maxDailyGasUsd: this.opts.maxDailyGasUsd,
-      blocked: this.blocked,
-      check: c && {
+    const view = (c: LiveCheck | null): LiveCheckView | null =>
+      c && {
         ok: c.ok,
         problems: c.problems,
         executor: c.executor,
@@ -311,7 +357,15 @@ export class LiveExecutor {
         botBalanceEth: Number(c.botBalanceWei) / 1e18,
         minGasEth: Number(c.minGasWei) / 1e18,
         checkedAt: c.checkedAt,
-      },
+      };
+    return {
+      consecutiveFailures: this.consecutiveFailures,
+      limit: this.opts.maxConsecutiveFailures ?? 5,
+      gasSpentTodayUsd: this.gasSpentTodayUsd,
+      maxDailyGasUsd: this.opts.maxDailyGasUsd,
+      blocked: this.blocked,
+      check: view(this.lastCheck),
+      ...(this.opts.routeExecutorAddress ? { routeBlocked: this.routeBlocked ?? null, routeCheck: view(this.lastRouteCheck) } : {}),
       sent: this.sent,
       succeeded: this.succeeded,
     };
@@ -321,57 +375,70 @@ export class LiveExecutor {
     return this.store.exists("STOP");
   }
 
-  /** Fire-and-track. Returns false if the opportunity was not sent. `priorityFeeGwei` overrides PRIORITY_FEE_GWEI (the learned bid). */
-  trySend(o: Opportunity, ethUsd: number, priorityFeeGwei?: number): boolean {
+  /** Shared pre-flight for a send; returns null to proceed or a reason it won't. `blocked` is the relevant readiness. */
+  private gate(o: Opportunity, blocked: string | null | undefined): string | null {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== this.day) {
       this.day = today;
       this.gasSpentTodayUsd = 0;
     }
-    if (this.blocked) {
-      log.debug(`not sending ${o.id}: ${this.blocked}`);
-      return false;
-    }
-    if (this.stopped()) {
-      log.warn("STOP file present; not sending");
-      return false;
-    }
-    if (this.inFlight) return false;
-    if (this.gasSpentTodayUsd > this.opts.maxDailyGasUsd) {
-      log.warn(`daily gas budget exhausted ($${this.gasSpentTodayUsd.toFixed(2)}); not sending`);
-      return false;
-    }
-    if (o.route) {
-      // Multi-hop / CL routes need RouteExecutor and stay paper-only for now;
-      // never send them through the two-pool ArbExecutor.
-      log.debug(`not sending ${o.id}: multi-hop routes are paper-only`);
-      return false;
-    }
-    if (o.sim !== "executor-ok") {
-      log.warn(`refusing to send ${o.id}: simulation state is ${o.sim} (${o.simDetail ?? ""})`);
+    if (blocked) return blocked;
+    if (this.stopped()) return "STOP file present";
+    if (this.inFlight) return "another transaction is in flight";
+    if (this.gasSpentTodayUsd > this.opts.maxDailyGasUsd) return `daily gas budget exhausted ($${this.gasSpentTodayUsd.toFixed(2)})`;
+    if (o.sim !== "executor-ok") return `simulation state is ${o.sim}`;
+    return null;
+  }
+
+  /** Fire-and-track a classic two-pool trade through the ArbExecutor. Returns false if it was not sent. */
+  trySend(o: Opportunity, ethUsd: number, priorityFeeGwei?: number): boolean {
+    if (o.route) return false; // routes go through trySendRoute
+    const no = this.gate(o, this.blocked);
+    if (no) {
+      log.debug(`not sending ${o.id}: ${no}`);
       return false;
     }
     const bid = priorityFeeGwei !== undefined && Number.isFinite(priorityFeeGwei) && priorityFeeGwei >= 0 ? priorityFeeGwei : this.opts.priorityFeeGwei;
-    this.inFlight = this.send(o, ethUsd, bid).finally(() => {
+    // Give up 5% of the modelled profit to reserve slack for reserve drift within the block.
+    const minProfit = (o.profit * 95n) / 100n;
+    const fn = this.opts.useFlash ? "executeFlash" : "executeWithCapital";
+    const data = executorIface.encodeFunctionData(fn, [o.buyPool, o.sellPool, o.tokenIn, o.amountIn, o.amountMid, o.amountOut, minProfit]);
+    this.inFlight = this.submit(o, ethUsd, bid, this.executorAddress, this.opts.gasLimit, data).finally(() => {
       this.inFlight = null;
     });
     return true;
   }
 
-  private async send(o: Opportunity, ethUsd: number, bidGwei: number): Promise<void> {
-    // Give up 5% of the modelled profit to reserve slack for reserve drift within the block.
+  /** Fire-and-track a multi-hop / concentrated-liquidity route through the RouteExecutor. Returns false if it was not sent. */
+  trySendRoute(o: Opportunity, ethUsd: number, priorityFeeGwei?: number): boolean {
+    if (!o.route || !this.opts.routeExecutorAddress) return false;
+    const no = this.gate(o, this.routeBlocked);
+    if (no) {
+      log.debug(`not sending route ${o.id}: ${no}`);
+      return false;
+    }
+    const bid = priorityFeeGwei !== undefined && Number.isFinite(priorityFeeGwei) && priorityFeeGwei >= 0 ? priorityFeeGwei : this.opts.priorityFeeGwei;
     const minProfit = (o.profit * 95n) / 100n;
-    const fn = this.opts.useFlash ? "executeFlash" : "executeWithCapital";
-    const data = executorIface.encodeFunctionData(fn, [o.buyPool, o.sellPool, o.tokenIn, o.amountIn, o.amountMid, o.amountOut, minProfit]);
+    const source = this.opts.routeFlashSource ?? 1;
+    const hops = o.route.executorHops.map((h) => [h.pool, h.kind, h.feePpm] as const);
+    const data = routeExecutorIface.encodeFunctionData("execute", [o.route.tokens, hops, o.amountIn, minProfit, source]);
+    this.inFlight = this.submit(o, ethUsd, bid, this.opts.routeExecutorAddress, this.opts.routeGasLimit ?? this.opts.gasLimit, data).finally(() => {
+      this.inFlight = null;
+    });
+    return true;
+  }
+
+  /** Sign, send and track one transaction to `target`, whichever contract it is. */
+  private async submit(o: Opportunity, ethUsd: number, bidGwei: number, target: string, gasLimit: number, data: string): Promise<void> {
     // Re-bind to whichever RPC endpoint is active now (the client fails over between endpoints).
     const wallet = this.wallet.connect(this.chain.provider);
     let tx: TransactionResponse;
     try {
       const [fees, pending] = await Promise.all([liveFees(this.chain, bidGwei), this.chain.provider.getTransactionCount(this.wallet.address, "pending")]);
       tx = await wallet.sendTransaction({
-        to: this.executorAddress,
+        to: target,
         data,
-        gasLimit: this.opts.gasLimit,
+        gasLimit,
         ...fees,
         nonce: Math.max(pending, this.nextNonce),
         type: 2,
@@ -386,9 +453,9 @@ export class LiveExecutor {
       return;
     }
     this.sent++;
-    const rec: LiveRecord = { kind: "live", id: o.id, block: o.block, sentAt: new Date().toISOString(), txHash: tx.hash, status: "pending", priorityFeeGwei: bidGwei, expectedProfitUsd: o.netUsd };
+    const rec: LiveRecord = { kind: "live", id: o.id, block: o.block, sentAt: new Date().toISOString(), txHash: tx.hash, status: "pending", priorityFeeGwei: bidGwei, expectedProfitUsd: o.netUsd, ...(o.route ? { route: true } : {}) };
     this.store.append("live.jsonl", rec);
-    log.info(`live: sent ${tx.hash} for ${o.pairSymbols} expecting net $${o.netUsd.toFixed(3)}`);
+    log.info(`live: sent ${tx.hash} for ${o.pairSymbols}${o.route ? ` (${o.route.pools.length}-hop route)` : ""} expecting net $${o.netUsd.toFixed(3)}`);
     let receipt: TransactionReceipt | null = null;
     try {
       receipt = await tx.wait(1, 60_000);

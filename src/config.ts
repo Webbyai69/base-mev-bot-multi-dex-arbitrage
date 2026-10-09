@@ -170,6 +170,8 @@ export interface Settings {
   minPoolLiquidityWeth: number;
   maxPools: number;
   arbGasLimit: number;
+  /** Gas limit for a live multi-hop / CL route through the RouteExecutor (bigger: more hops, flash-loan overhead). */
+  routeGasLimit: number;
   priorityFeeGwei: number;
   executorAddress: string | undefined;
   privateKey: string | undefined;
@@ -301,6 +303,7 @@ export function loadSettings(): Settings {
     minPoolLiquidityWeth: num("MIN_POOL_LIQUIDITY_WETH", 2),
     maxPools: num("MAX_POOLS", 400),
     arbGasLimit: num("ARB_GAS_LIMIT", 260_000),
+    routeGasLimit: num("ROUTE_GAS_LIMIT", 600_000),
     priorityFeeGwei: num("PRIORITY_FEE_GWEI", 0.005),
     executorAddress: str("EXECUTOR_ADDRESS"),
     privateKey: str("PRIVATE_KEY"),

@@ -315,3 +315,21 @@ test("tuning: a blocked token can be unblocked, and isn't suggested again for a 
   assert.equal(T.act("unblock", BAD).ok, false);
   assert.match(T.view().applied[0].title, /^Unblock /);
 });
+
+test("pickLiveSend sends routes only when the RouteExecutor is live", () => {
+  const L = new Learner(null, {}, sym);
+  const t0 = Date.now();
+  const classic = { ...opp(GOOD), id: "classic", sim: "executor-ok", netUsd: 0.5, profitUsd: 0.51 };
+  const route = {
+    ...opp(GOOD), id: "route", sim: "executor-ok", netUsd: 2.5, profitUsd: 2.51,
+    route: { tokens: [WETH, GOOD, WETH], pools: [pool(), pool()], dexes: ["uniswap-v3", "slipstream-v3"], amounts: [1n, 1n, 2n], label: "WETH>GOOD>WETH", executorHops: [] },
+  };
+  const ctx = { ethUsd: 2500, gasUnits: 300_000, basePriorityGwei: 0.005, maxBidShare: 0.3, evMinUsd: 0.01 };
+  // Routes off: the classic find is the only candidate, the route is ignored entirely.
+  const off = pickLiveSend([route, classic], L, ctx, false);
+  assert.equal(off.send?.o.id, "classic");
+  assert.ok(!off.passed.some((x) => x.o.id === "route") && off.send?.o.id !== "route", "route not considered at all");
+  // Routes on: the higher-EV route wins.
+  const on = pickLiveSend([route, classic], L, ctx, true);
+  assert.equal(on.send?.o.id, "route", "the route is picked when it has the best expected value");
+});

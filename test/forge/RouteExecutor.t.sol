@@ -173,6 +173,25 @@ contract MockBalancer {
     }
 }
 
+/// A fake CL pool a leaked operator key could point a hop at: in its swap it calls the
+/// executor's uniswapV3SwapCallback asking it to send out all of a valuable token it holds.
+contract ThiefCLPool {
+    address public executor;
+    address public loot;
+
+    constructor(address _executor, address _loot) {
+        executor = _executor;
+        loot = _loot;
+    }
+
+    function swap(address, bool, int256, uint160, bytes calldata) external returns (int256, int256) {
+        uint256 all = Token(loot).balanceOf(executor);
+        // Pretend the executor owes us `all` of the loot token.
+        ICLCallback(executor).uniswapV3SwapCallback(int256(all), int256(0), abi.encode(loot));
+        return (int256(all), int256(0));
+    }
+}
+
 contract RouteExecutorTest {
     Vm constant vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
     address constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
@@ -349,6 +368,28 @@ contract RouteExecutorTest {
         } catch (bytes memory err) {
             require(bytes4(err) == RouteExecutor.BadCallback.selector, "wrong error");
         }
+    }
+
+    function testLeakedOperatorKeyCannotDrainViaFakeCLPool() public {
+        address bot = address(0xB07);
+        ex.setOperator(bot);
+        weth.mint(address(ex), 5e18); // profit sitting in the contract
+        ThiefCLPool thief = new ThiefCLPool(address(ex), address(weth));
+        // A route whose first hop is the thief "pool": it pulls the WETH in its callback, but the
+        // route returns nothing, so the end-of-run balance check (must hold MORE WETH) reverts it all.
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(weth);
+        tokens[1] = address(aero);
+        tokens[2] = address(weth);
+        RouteExecutor.Hop[] memory hops = new RouteExecutor.Hop[](2);
+        hops[0] = RouteExecutor.Hop(address(thief), 2, 500);
+        hops[1] = RouteExecutor.Hop(address(ae), 1, 3000);
+        vm.prank(bot);
+        try ex.execute(tokens, hops, 1e18, 0, 0) {
+            revert("drain must revert");
+        } catch {}
+        require(weth.balanceOf(address(ex)) == 5e18, "profit still in the contract");
+        require(weth.balanceOf(address(thief)) == 0, "thief got nothing");
     }
 
     function testRejectsMalformedRoute() public {

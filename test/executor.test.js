@@ -24,9 +24,10 @@ import { quoteArb } from "../dist/math.js";
 import { executorIface } from "../dist/abi.js";
 import { Chain } from "../dist/rpc.js";
 import { Store } from "../dist/store.js";
-import { LiveExecutor, checkLiveSetup, pickLiveOpportunity } from "../dist/executor.js";
+import { LiveExecutor, checkLiveSetup, pickLiveOpportunity, ROUTE_CONTRACT } from "../dist/executor.js";
+import { routeExecutorIface } from "../dist/abi.js";
 import { SIM_EXECUTOR_RUNTIME } from "../dist/simBytecode.js";
-import { ARB_EXECUTOR_CREATION } from "../dist/deployBytecode.js";
+import { ARB_EXECUTOR_CREATION, ROUTE_EXECUTOR_CREATION } from "../dist/deployBytecode.js";
 
 const ANVIL = process.env.ANVIL;
 const SOLC = process.env.SOLC;
@@ -196,6 +197,65 @@ test("live path: deploy from your wallet, authorise the bot wallet, trade, withd
     await live.verify();
     assert.match(live.blocked ?? "", /isn't authorised/);
     assert.equal(live.trySend(opp, 2000), false);
+    live.stopChecks();
+  } finally {
+    await chain.destroy();
+  }
+});
+
+test("live route path: RouteExecutor readiness gates multi-hop / CL sending", { skip }, async () => {
+  const { url, provider } = await startAnvil();
+  const fund = (addr, eth) => provider.send("anvil_setBalance", [addr, "0x" + (BigInt(Math.round(eth * 1e6)) * 10n ** 12n).toString(16)]);
+  const owner = Wallet.createRandom().connect(provider);
+  const botKey = Wallet.createRandom();
+  await fund(owner.address, 10);
+
+  // Your wallet deploys the exact RouteExecutor creation bytecode the dashboard's Deploy button sends.
+  const deployTx = await owner.sendTransaction({ data: ROUTE_EXECUTOR_CREATION });
+  const route = (await deployTx.wait()).contractAddress;
+  assert.ok(route, "RouteExecutor deployed");
+  const routeC = new Contract(route, routeExecutorIface, owner);
+  assert.equal((await routeC.owner()).toLowerCase(), owner.address.toLowerCase(), "your wallet owns the RouteExecutor");
+
+  // An unrelated ArbExecutor at another address is NOT accepted as a RouteExecutor.
+  const arbTx = await owner.sendTransaction({ data: ARB_EXECUTOR_CREATION });
+  const arb = (await arbTx.wait()).contractAddress;
+
+  const chain = new Chain(url);
+  try {
+    // Checked as a RouteExecutor: code matches, but not authorised and no gas yet.
+    let c = await checkLiveSetup(chain, route, botKey.address, 600_000, 0.005, ROUTE_CONTRACT);
+    assert.equal(c.codeMatches, true, "on-chain code is exactly this version's RouteExecutor");
+    assert.ok(c.problems.some((p) => /isn't authorised on the RouteExecutor/.test(p)), c.problems.join(" | "));
+    assert.ok(c.problems.some((p) => /not enough for gas/.test(p)), c.problems.join(" | "));
+    // The ArbExecutor fails the RouteExecutor code-hash check (different contract).
+    const wrong = await checkLiveSetup(chain, arb, botKey.address, 600_000, 0.005, ROUTE_CONTRACT);
+    assert.ok(wrong.problems.some((p) => /isn't this version's RouteExecutor/.test(p)), wrong.problems.join(" | "));
+
+    // Authorise the bot wallet on both contracts and give it gas: now it checks out.
+    await (await routeC.setOperator(botKey.address)).wait();
+    await (await new Contract(arb, executorIface, owner).setOperator(botKey.address)).wait();
+    await (await owner.sendTransaction({ to: botKey.address, value: 10n ** 16n })).wait();
+    c = await checkLiveSetup(chain, route, botKey.address, 600_000, 0.005, ROUTE_CONTRACT);
+    assert.deepEqual(c.problems, []);
+    assert.equal(c.operator, botKey.address.toLowerCase());
+
+    // A LiveExecutor configured with BOTH contracts: routes are blocked until the route check passes.
+    const store = new Store(mkdtempSync(join(tmpdir(), "liveroute-")));
+    const live = new LiveExecutor(chain, store, botKey.privateKey, arb, {
+      gasLimit: 260_000, priorityFeeGwei: 0.005, maxDailyGasUsd: 1, useFlash: true, maxConsecutiveFailures: 5,
+      routeExecutorAddress: route, routeGasLimit: 600_000, routeFlashSource: 1,
+    });
+    assert.equal(live.routeReady, false, "routes blocked before the first check");
+    await live.verify();
+    assert.equal(live.blocked, null, "ArbExecutor ready");
+    assert.equal(live.routeReady, true, "RouteExecutor ready after authorise + gas");
+    assert.equal(live.safety.routeCheck?.ok, true);
+    // A route find with no route executor configured would never be routeReady.
+    const bare = new LiveExecutor(chain, store, botKey.privateKey, arb, { gasLimit: 260_000, priorityFeeGwei: 0.005, maxDailyGasUsd: 1, useFlash: true });
+    await bare.verify();
+    assert.equal(bare.routeReady, false, "no RouteExecutor configured -> routes stay paper-only");
+    assert.equal(bare.safety.routeBlocked, undefined);
     live.stopChecks();
   } finally {
     await chain.destroy();
