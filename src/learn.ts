@@ -108,6 +108,23 @@ interface PoolRec {
   rival: number;
 }
 
+/** Per-wallet memory of one rival arbitrage bot: where, when and how it trades (bounded by the RIVAL_* caps below). */
+interface RivalRec {
+  firstSeen: number;
+  lastSeen: number;
+  arbs: number;
+  profitUsd: number;
+  /** pool / token / dex / sender -> count, each kept to the top RIVAL_MAP_CAP entries. */
+  pools: Record<string, number>;
+  tokens: Record<string, number>;
+  dexes: Record<string, number>;
+  senders: Record<string, number>;
+  /** 24 UTC-hour buckets. */
+  hours: number[];
+  /** Recent priority fees (gwei), newest last, capped at RIVAL_FEE_RING. */
+  fees: number[];
+}
+
 interface Memory {
   /** 2 since token blame became single-culprit (0.6.1); a v1 file is re-learned from the data files. */
   v: 2;
@@ -120,6 +137,8 @@ interface Memory {
   poolSeen: Record<string, PoolRec>;
   /** Recent rival priority fees (gwei) by profit bucket, newest last. */
   rivalFees: Record<string, number[]>;
+  /** Per-wallet memory of rival arbitrage bots, keyed by the contract they call. */
+  rivals: Record<string, RivalRec>;
   prunedTotal: number;
   counts: { sims: number; outcomes: number; rivalArbs: number; liveSends: number };
 }
@@ -143,6 +162,41 @@ const PROFIT_BUCKETS: Array<[string, number]> = [
 ];
 const bucketOf = (usd: number): string => PROFIT_BUCKETS.find(([, max]) => usd < max)![0];
 const FEE_RING = 400;
+
+/** Per-wallet rival memory bounds (keep learned.json small). */
+const RIVAL_FEE_RING = 60; //    priority-fee samples kept per rival
+const RIVAL_MAP_CAP = 16; //     top pools/tokens/dexes/senders kept per rival
+const RIVAL_CAP = 60; //         max rival wallets tracked at once
+/** A rival "bot" called by at least this many distinct EOAs is a shared router/aggregator, not one competitor. */
+const RIVAL_SHARED_SENDER_MIN = 5;
+
+/** Increment m[key]; when the map is full, keep the strongest by evicting the smallest (bounded top-K counter). */
+function bumpCapped(m: Record<string, number>, key: string, cap: number): void {
+  const cur = m[key];
+  if (cur !== undefined) {
+    m[key] = cur + 1;
+    return;
+  }
+  if (Object.keys(m).length < cap) {
+    m[key] = 1;
+    return;
+  }
+  let minK: string | null = null;
+  let minV = Infinity;
+  for (const [k, v] of Object.entries(m)) if (v < minV) ((minV = v), (minK = k));
+  if (minK !== null && minV <= 1) {
+    delete m[minK];
+    m[key] = 1;
+  }
+}
+
+/** The n keys with the highest counts. */
+function topKeys(m: Record<string, number>, n: number): string[] {
+  return Object.entries(m)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([k]) => k);
+}
 
 /** Tokens that are never blamed for a failed test run: the failure is in the other token or the pool. */
 const CORE = new Set(Object.values(TOKENS).map((t) => t.address.toLowerCase()));
@@ -182,7 +236,7 @@ export class Learner {
   }
 
   private fresh(now: number): Memory {
-    return { v: 2, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 } };
+    return { v: 2, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, rivals: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 } };
   }
 
   // ------------------------------------------------------------- decayed counts
@@ -302,6 +356,13 @@ export class Learner {
     if (left.length > 4000) {
       left.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
       for (const [k] of left.slice(0, left.length - 4000)) delete this.m.routes[k];
+    }
+    // Per-wallet rival memory: forget the long-unseen, then keep the most recent RIVAL_CAP.
+    for (const [k, r] of Object.entries(this.m.rivals)) if (now - r.lastSeen > this.opts.pruneAfterMs) delete this.m.rivals[k];
+    const rivals = Object.entries(this.m.rivals);
+    if (rivals.length > RIVAL_CAP) {
+      rivals.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+      for (const [k] of rivals.slice(0, rivals.length - RIVAL_CAP)) delete this.m.rivals[k];
     }
   }
 
@@ -426,6 +487,26 @@ export class Learner {
         const ring = (this.m.rivalFees[b] ??= []);
         ring.push(Math.round(d.priorityGwei * 1e6) / 1e6);
         if (ring.length > FEE_RING) ring.splice(0, ring.length - FEE_RING);
+      }
+      // Per-wallet memory: where / when / how this rival trades.
+      const bot = d.bot ? String(d.bot).toLowerCase() : "";
+      if (bot && bot !== "unknown") {
+        const r = (this.m.rivals[bot] ??= { firstSeen: now, lastSeen: now, arbs: 0, profitUsd: 0, pools: {}, tokens: {}, dexes: {}, senders: {}, hours: new Array(24).fill(0) as number[], fees: [] });
+        r.lastSeen = now;
+        r.arbs++;
+        r.profitUsd += typeof d.profitUsd === "number" ? d.profitUsd : 0;
+        for (const p of d.pools) bumpCapped(r.pools, p.toLowerCase(), RIVAL_MAP_CAP);
+        for (const t of d.tokens) bumpCapped(r.tokens, t.toLowerCase(), RIVAL_MAP_CAP);
+        for (const x of d.dexes) bumpCapped(r.dexes, x, RIVAL_MAP_CAP);
+        if (d.sender) bumpCapped(r.senders, String(d.sender).toLowerCase(), RIVAL_MAP_CAP);
+        if (r.hours.length === 24) {
+          const h = new Date(now).getUTCHours();
+          r.hours[h] = (r.hours[h] ?? 0) + 1;
+        }
+        if (typeof d.priorityGwei === "number" && d.priorityGwei >= 0) {
+          r.fees.push(Math.round(d.priorityGwei * 1e6) / 1e6);
+          if (r.fees.length > RIVAL_FEE_RING) r.fees.splice(0, r.fees.length - RIVAL_FEE_RING);
+        }
       }
       this.m.counts.rivalArbs++;
     }
@@ -682,6 +763,21 @@ export class Learner {
     });
     const live = this.liveRecord();
     const watchedSeen = Object.values(this.m.poolSeen);
+    // Real competitors only (a wallet called by many EOAs is a shared router/aggregator, not one bot), most active first.
+    const rivalRows: LearningSummary["rivals"] = Object.entries(this.m.rivals)
+      .filter(([, r]) => Object.keys(r.senders).length < RIVAL_SHARED_SENDER_MIN)
+      .sort((a, b) => b[1].arbs - a[1].arbs)
+      .slice(0, 10)
+      .map(([bot, r]) => ({
+        bot,
+        arbs: r.arbs,
+        profitUsd: round(r.profitUsd, 2),
+        topPools: topKeys(r.pools, 3),
+        topTokens: topKeys(r.tokens, 3).map((t) => this.symbolOf(t)),
+        medianFeeGwei: quantile(r.fees, 0.5),
+        peakHourUtc: r.hours.length === 24 ? r.hours.indexOf(Math.max(...r.hours)) : -1,
+        lastSeen: new Date(r.lastSeen).toISOString(),
+      }));
     return {
       since: new Date(this.m.since).toISOString(),
       halfLifeHours: Math.round(this.opts.halfLifeMs / HOUR),
@@ -692,6 +788,7 @@ export class Learner {
       bids: fees,
       live: { ...live, gasUsd: round(live.gasUsd, 4) },
       pools: { tracked: watchedSeen.length, quiet: watchedSeen.filter((p) => now - Math.max(p.firstSeen, p.activity, p.candidate, p.rival) >= DAY).length, prunedTotal: this.m.prunedTotal, pruneAfterDays: round(this.opts.pruneAfterMs / DAY, 1) },
+      rivals: rivalRows,
     };
   }
 }
@@ -719,6 +816,8 @@ export interface LearningSummary {
   bids: Array<{ bucket: string; samples: number; p50: number | null; p60: number | null; p90: number | null }>;
   live: { sent: number; ok: number; reverted: number; racesLost: number; gasUsd: number };
   pools: { tracked: number; quiet: number; prunedTotal: number; pruneAfterDays: number };
+  /** Top real competitors (shared routers excluded): where/when/how they trade, from the per-wallet rival memory. */
+  rivals: Array<{ bot: string; arbs: number; profitUsd: number; topPools: string[]; topTokens: string[]; medianFeeGwei: number | null; peakHourUtc: number; lastSeen: string }>;
 }
 
 function round<T extends number | null>(x: T, dp: number): T {

@@ -96,7 +96,7 @@ export function renderReport(
   liq?: LiqDaySummary,
 ): string {
   const p = paper ?? { day, found: 0, optimisticNetUsd: 0, realisticNetUsd: 0, persisted: 0, taken: 0, closed: 0, pending: 0, gasUsd: 0, byPair: [], byRoute: [], takers: [], simMismatches: 0, byKind: [], byStage: [], scores: [] };
-  const m = market ?? { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [] };
+  const m = market ?? { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], routers: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [] };
   const decided = p.persisted + p.taken + p.closed;
   const hitRate = decided ? `${((p.persisted / decided) * 100).toFixed(0)}% of decided opportunities would have landed` : "no opportunities decided yet";
 
