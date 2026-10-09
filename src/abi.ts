@@ -188,5 +188,14 @@ export const TOPIC_SYNC = univ2PairIface.getEvent("Sync")!.topicHash;
 export const TOPIC_SYNC_AERO = aeroPoolIface.getEvent("Sync")!.topicHash;
 export const TOPIC_MINT_V3 = univ3PoolIface.getEvent("Mint")!.topicHash;
 export const TOPIC_BURN_V3 = univ3PoolIface.getEvent("Burn")!.topicHash;
+/**
+ * PancakeSwap V3's Swap event carries two extra protocol-fee fields, so its topic hash differs from
+ * Uniswap V3's — but the first five data fields (amount0, amount1, sqrtPriceX96, liquidity, tick) line up,
+ * so the same decode reads them. Mint/Burn are identical to Uniswap V3 (shared TOPIC_MINT_V3/TOPIC_BURN_V3).
+ */
+export const pancakeV3PoolIface = new Interface([
+  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint128 protocolFeesToken0, uint128 protocolFeesToken1)",
+]);
+export const TOPIC_SWAP_PANCAKE_V3 = pancakeV3PoolIface.getEvent("Swap")!.topicHash;
 export const TOPIC_AAVE_BORROW = aavePoolIface.getEvent("Borrow")!.topicHash;
 export const TOPIC_AAVE_LIQUIDATION = aavePoolIface.getEvent("LiquidationCall")!.topicHash;

@@ -103,7 +103,7 @@ async function runUpgradeChecks(chain: Chain, opts: Required<CheckOptions>): Pro
   for (const d of opts.clPools ? CL_DEXES : []) {
     const calls: Call[] = d.poolKeys.map((k) => ({
       target: d.factory,
-      callData: d.kind === "univ3" ? univ3FactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]) : slipstreamFactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]),
+      callData: d.kind === "slipstream" ? slipstreamFactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]) : univ3FactoryIface.encodeFunctionData("getPool", [WETH, USDC, k]),
     }));
     const res = await chain.multicall(calls);
     const found = res
@@ -119,9 +119,9 @@ async function runUpgradeChecks(chain: Chain, opts: Required<CheckOptions>): Pro
     const { key, pool } = found[0]!;
     const amountIn = 10n ** 16n;
     const callData =
-      d.kind === "univ3"
-        ? univ3QuoterIface.encodeFunctionData("quoteExactInputSingle", [{ tokenIn: WETH, tokenOut: USDC, amountIn, fee: key, sqrtPriceLimitX96: 0n }])
-        : slipstreamQuoterIface.encodeFunctionData("quoteExactInputSingle", [{ tokenIn: WETH, tokenOut: USDC, amountIn, tickSpacing: key, sqrtPriceLimitX96: 0n }]);
+      d.kind === "slipstream"
+        ? slipstreamQuoterIface.encodeFunctionData("quoteExactInputSingle", [{ tokenIn: WETH, tokenOut: USDC, amountIn, tickSpacing: key, sqrtPriceLimitX96: 0n }])
+        : univ3QuoterIface.encodeFunctionData("quoteExactInputSingle", [{ tokenIn: WETH, tokenOut: USDC, amountIn, fee: key, sqrtPriceLimitX96: 0n }]);
     const [q] = await chain.multicall([{ target: d.quoter, callData }]);
     if (!q || !q.success || q.returnData.length < 66) {
       log.error(`FAIL ${d.name} quoter ${d.quoter}: could not quote WETH->USDC through ${pool}`);

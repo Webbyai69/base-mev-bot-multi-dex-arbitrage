@@ -19,6 +19,7 @@ import {
   TOPIC_BURN_V3,
   TOPIC_MINT_V3,
   TOPIC_SWAP_AERO,
+  TOPIC_SWAP_PANCAKE_V3,
   TOPIC_SWAP_V2,
   TOPIC_SWAP_V3,
   TOPIC_SYNC,
@@ -237,7 +238,7 @@ export class PoolRegistry {
     while (start <= block) {
       const end = Math.min(block, start + range - 1);
       try {
-        const topics = this.clPools ? [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3] : [TOPIC_SWAP_V2, TOPIC_SWAP_AERO];
+        const topics = this.clPools ? [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3, TOPIC_SWAP_PANCAKE_V3] : [TOPIC_SWAP_V2, TOPIC_SWAP_AERO];
         const logs = await this.chain.getLogs({ fromBlock: start, toBlock: end, topics: [topics] });
         for (const l of logs) addrs.add(l.address.toLowerCase());
         log.debug(`blocks ${start}-${end}: ${logs.length} swaps, ${addrs.size} distinct pools so far`);
@@ -444,7 +445,8 @@ export class PoolRegistry {
           meta.push({ t0, t1, key });
           calls.push({
             target: dex.factory,
-            callData: dex.kind === "univ3" ? univ3FactoryIface.encodeFunctionData("getPool", [t0, t1, key]) : slipstreamFactoryIface.encodeFunctionData("getPool", [t0, t1, key]),
+            // Uniswap V3 and PancakeSwap V3 both key getPool by fee tier; Slipstream keys by tickSpacing.
+            callData: dex.kind === "slipstream" ? slipstreamFactoryIface.encodeFunctionData("getPool", [t0, t1, key]) : univ3FactoryIface.encodeFunctionData("getPool", [t0, t1, key]),
           });
         }
       }
@@ -661,8 +663,13 @@ export class PoolRegistry {
         }
         continue;
       }
-      if (t0 === TOPIC_SWAP_V3) {
-        const d = abi.decode(["int256", "int256", "uint160", "uint128", "int24"], l.data);
+      if (t0 === TOPIC_SWAP_V3 || t0 === TOPIC_SWAP_PANCAKE_V3) {
+        // PancakeSwap V3's Swap carries two extra protocol-fee fields; the first five (amount0, amount1,
+        // sqrtPriceX96, liquidity, tick) match Uniswap V3, so we read those and ignore the rest.
+        const d = abi.decode(
+          t0 === TOPIC_SWAP_PANCAKE_V3 ? ["int256", "int256", "uint160", "uint128", "int24", "uint128", "uint128"] : ["int256", "int256", "uint160", "uint128", "int24"],
+          l.data,
+        );
         const s = p.cl;
         s.sqrtPriceX96 = d[2] as bigint;
         s.liquidity = d[3] as bigint;

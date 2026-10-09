@@ -337,7 +337,9 @@ export class Classifier {
     for (const a of addresses) {
       if (this.poolMeta.has(a)) continue;
       const p = this.registry.pools.get(a);
-      if (p) this.poolMeta.set(a, { token0: p.token0, token1: p.token1, kind: p.kind === "slipstream" ? "univ3" : p.kind, dex: p.dex });
+      // Slipstream and PancakeSwap V3 are CL venues the classifier lumps with Uniswap V3 for metadata.
+      // (It won't match Pancake's distinct Swap topic yet, so Pancake rival arbs aren't classified — a follow-up.)
+      if (p) this.poolMeta.set(a, { token0: p.token0, token1: p.token1, kind: p.kind === "slipstream" || p.kind === "pancakev3" ? "univ3" : p.kind, dex: p.dex });
     }
     const unknown = addresses.filter((a) => !this.poolMeta.has(a));
     if (unknown.length === 0) return;

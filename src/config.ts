@@ -39,7 +39,7 @@ export const TOKENS: Record<string, TokenInfo> = {
 export const WETH = TOKENS.WETH!.address.toLowerCase();
 export const USDC = TOKENS.USDC!.address.toLowerCase();
 
-export type DexKind = "univ2" | "aerodrome" | "univ3" | "slipstream";
+export type DexKind = "univ2" | "aerodrome" | "univ3" | "slipstream" | "pancakev3";
 
 export interface DexInfo {
   /** Short id used in logs and data files. */
@@ -104,11 +104,19 @@ export const UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
 export interface ClDexInfo {
   id: string;
   name: string;
-  kind: "univ3" | "slipstream";
+  kind: "univ3" | "slipstream" | "pancakev3";
   factory: string;
   quoter: string;
-  /** Uniswap V3: getPool(a, b, fee) over these fee tiers. Slipstream: getPool(a, b, tickSpacing). */
+  /** Uniswap V3 / PancakeSwap V3: getPool(a, b, fee) over these fee tiers. Slipstream: getPool(a, b, tickSpacing). */
   poolKeys: number[];
+  /**
+   * Can the deployed RouteExecutor actually trade this venue? Default true. When false the venue is
+   * quote-only: its pools are watched, priced and scanned (so cross-venue spreads surface in paper,
+   * the dashboard and the value-score), but routes touching it are verified by quoters rather than the
+   * executor and so never reach a live send (the live path requires an executor-ok simulation). Flip to
+   * true once the RouteExecutor is rebuilt with the venue's swap callback.
+   */
+  executable?: boolean;
 }
 
 export const CL_DEXES: ClDexInfo[] = [
@@ -119,6 +127,20 @@ export const CL_DEXES: ClDexInfo[] = [
     factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
     quoter: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
     poolKeys: [100, 500, 3000, 10000],
+  },
+  {
+    // PancakeSwap V3 (~$121M/day on Base): a Uniswap V3 fork. Same tick math and QuoterV2 interface,
+    // but its own Swap event (two extra protocol-fee fields) and fee tiers (2500 where Uni has 3000).
+    // Quote-only for now: the deployed RouteExecutor can't call its pancakeV3SwapCallback, so these pools
+    // are watched and priced (surfacing Pancake<->Uni/Aero spreads in paper) but never live-sent. Verified
+    // on-chain: factory 5151 bytes, QuoterV2 answers the Uni QuoterV2 interface, pools report this factory.
+    id: "pancakeswap-v3",
+    name: "PancakeSwap V3",
+    kind: "pancakev3",
+    factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+    quoter: "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+    poolKeys: [100, 500, 2500, 10000],
+    executable: false,
   },
   {
     id: "slipstream",

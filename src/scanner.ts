@@ -101,6 +101,15 @@ export const SIM_OVERRIDE_ADDRESS = "0x00000000000000000000000000000000a4b17e51"
 /** Same idea for the multi-hop RouteExecutor. */
 export const SIM_ROUTE_OVERRIDE_ADDRESS = "0x00000000000000000000000000000000a4b17e52";
 
+/**
+ * Pool kinds the deployed RouteExecutor cannot trade yet (no swap callback for them). Their pools are
+ * still watched, priced and scanned — so cross-venue spreads surface in paper, on the dashboard and in
+ * the value-score — but any route through them is verified by the DEX's own quoter rather than the
+ * executor simulation, so it is a real paper find (quoter-ok) and never reaches a live send (which
+ * requires executor-ok). Remove a kind here once the RouteExecutor is rebuilt with its callback.
+ */
+const QUOTE_ONLY_KINDS = new Set<string>(["pancakev3"]);
+
 const routeKeyOf = routeKey;
 
 export class Scanner {
@@ -386,7 +395,26 @@ export class Scanner {
 
   /** Verify multi-hop / CL routes: RouteExecutor.simulate() when available, else each hop against its DEX's quoter. */
   private async verifyRoutes(opps: Opportunity[], tag: number | "pending"): Promise<void> {
-    const mode = this.routeSimMode;
+    // Routes touching a quote-only venue (e.g. PancakeSwap V3) can't be executed by the deployed
+    // RouteExecutor, so verify them against the DEXes' own quoters instead of the executor sim: that marks
+    // them quoter-ok (a genuine paper find) rather than executor-reverted (which would mute them), and the
+    // live path still won't send them because it requires an executor-ok simulation.
+    const quoteOnly: Opportunity[] = [];
+    const executable: Opportunity[] = [];
+    for (const o of opps) (this.routeQuoteOnly(o) ? quoteOnly : executable).push(o);
+    await Promise.all([
+      executable.length ? this.verifyRoutesVia(executable, tag, this.routeSimMode) : undefined,
+      quoteOnly.length ? this.verifyRoutesVia(quoteOnly, tag, "quoter") : undefined,
+    ]);
+  }
+
+  /** A route the deployed RouteExecutor cannot trade (any hop is on a quote-only venue such as PancakeSwap V3). */
+  private routeQuoteOnly(o: Opportunity): boolean {
+    if (!o.route) return false;
+    return o.route.pools.some((a) => QUOTE_ONLY_KINDS.has(this.registry.pools.get(a)?.kind ?? ""));
+  }
+
+  private async verifyRoutesVia(opps: Opportunity[], tag: number | "pending", mode: "executor" | "override" | "quoter"): Promise<void> {
     if (mode !== "quoter") {
       await Promise.all(
         opps.map(async (o) => {
