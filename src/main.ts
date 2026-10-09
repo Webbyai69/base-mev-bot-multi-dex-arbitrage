@@ -33,6 +33,7 @@ import { runCheck } from "./check.js";
 import { log, setLogLevel } from "./log.js";
 import { formatUnits } from "./math.js";
 import { LiquidationMonitor, liquidationSummary } from "./liquidations.js";
+import { planLiquidation } from "./liquidate.js";
 import { FlashblockWatcher } from "./flashblocks.js";
 import { renderDigest, writeDigest } from "./digest.js";
 import { poolsOf, flashSourceId, routeKey, type Opportunity } from "./scanner.js";
@@ -402,6 +403,8 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
           useFlash: (process.env.USE_FLASH ?? "true") !== "false",
           // With a deployed RouteExecutor, concentrated-liquidity and multi-hop routes go live too.
           ...(s.routeExecutorAddress ? { routeExecutorAddress: s.routeExecutorAddress, routeGasLimit: s.routeGasLimit, routeFlashSource: flashSourceId(s.flashSource) } : {}),
+          // With a deployed LiquidationExecutor and LIQUIDATIONS_LIVE=true, Aave liquidations are sent live.
+          ...(s.liquidationsLive && s.liqExecutorAddress ? { liqExecutorAddress: s.liqExecutorAddress, liqGasLimit: s.liqGasLimit } : {}),
         })
       : undefined;
   if (live) log.warn(`LIVE MODE: sending from ${live.wallet.address} via executor ${s.executorAddress}${s.routeExecutorAddress ? ` and routes via ${s.routeExecutorAddress}` : ""}. Create ${store.path("STOP")} to halt.`);
@@ -472,6 +475,28 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     if (sent) log.info(`live${stage === "flashblock" ? " [flashblock]" : ""}: sending ${send.o.pairSymbols}${send.o.route ? ` (${send.o.route.pools.length}-hop route)` : ""} (net $${send.o.netUsd.toFixed(3)}): lands ${(send.ev.pLand * 100).toFixed(0)}% of the time on ${send.ev.evidence.toFixed(1)} outcomes, expected $${send.ev.evUsd.toFixed(3)}, bid ${send.ev.bidGwei} gwei (${send.ev.bidWhy})`);
   };
   if (live) extras.fb?.setLiveSend(considerLiveSend);
+
+  // Live Aave liquidations (opt-in: LIQUIDATIONS_LIVE + a deployed LiquidationExecutor). Latency-tolerant,
+  // so it suits a home PC; each one is simulated on-chain first and sent through the owner-controlled contract.
+  if (live && s.liquidationsLive && s.liqExecutorAddress && extras.liq) {
+    const liqSource = flashSourceId(s.flashSource);
+    const liqAddr = s.liqExecutorAddress;
+    extras.liq.onLiquidatable = (pos) => {
+      if (!live.liqReady) return;
+      void (async () => {
+        try {
+          const ethUsd = registry.ethPrice();
+          const plan = await planLiquidation(chain, registry, pos, { ethUsd, minProfitUsd: tuning.minProfitUsd, liqExecutorAddress: liqAddr, source: liqSource }, "latest");
+          if (plan && live.trySendLiquidation(plan, ethUsd)) {
+            log.warn(`live: sending liquidation of ${pos.user.slice(0, 10)} (${pos.debtSymbol}->${pos.collateralSymbol}), simulated profit $${plan.expectedProfitUsd.toFixed(2)}`);
+          }
+        } catch (err) {
+          log.warn("live liquidation failed:", (err as Error).message.slice(0, 140));
+        }
+      })();
+    };
+    log.warn(`LIVE: Aave liquidations will be sent through ${liqAddr} when positions become liquidatable`);
+  }
   const counts = poolCounts(registry);
   void alerts?.started({ version: version(), pools: counts.total, clPools: counts.cl, dashboard: s.cloudUrl || ui?.url || undefined });
   // Start the stall clock now, so a feed that never delivers a first block also alerts.

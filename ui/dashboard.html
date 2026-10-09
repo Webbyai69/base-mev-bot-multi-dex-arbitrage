@@ -600,12 +600,14 @@ details.optional[open] > summary { margin-bottom: 8px; }
     stopConfirm: false, stopError: null, tables: {}, reviewOpen: false,
     mirror: null, stopRequest: null, waiting: false, connLost: false, skew: 0,
   };
-  const W = { providers: new Map(), detail: null, provider: null, account: null, chainId: null, error: null, actions: {}, topUp: "0.002", deployed: null, deployedArb: null };
+  const W = { providers: new Map(), detail: null, provider: null, account: null, chainId: null, error: null, actions: {}, topUp: "0.002", deployed: null, deployedArb: null, deployedLiq: null };
   try {
     const d = JSON.parse(localStorage.getItem("bab.deployed") || "null");
     if (d && isAddr(d.address)) W.deployed = d.address;
     const a = JSON.parse(localStorage.getItem("bab.deployedArb") || "null");
     if (a && isAddr(a.address)) W.deployedArb = a.address;
+    const q = JSON.parse(localStorage.getItem("bab.deployedLiq") || "null");
+    if (q && isAddr(q.address)) W.deployedLiq = q.address;
   } catch {
     /* storage unavailable */
   }
@@ -1559,7 +1561,13 @@ details.optional[open] > summary { margin-bottom: 8px; }
           : lv.routeBlocked
             ? h("span", null, chip("warn", "Waiting for the RouteExecutor setup"), " ", h("span", { class: "muted" }, String(lv.routeBlocked).slice(0, 160)))
             : chip("good", "Live: sent through your RouteExecutor")],
-      ["Liquidations", "Watched and estimated; nothing is ever sent"],
+      ["Liquidations", !live
+        ? "Watched and estimated in paper mode"
+        : lv?.liqBlocked === undefined
+          ? "Watched only; deploy a LiquidationExecutor and set LIQUIDATIONS_LIVE=true to send them"
+          : lv.liqBlocked
+            ? h("span", null, chip("warn", "Waiting for the LiquidationExecutor setup"), " ", h("span", { class: "muted" }, String(lv.liqBlocked).slice(0, 160)))
+            : chip("good", "Live: sent through your LiquidationExecutor")],
     ]));
     if (live && !stopped) box.append(h("div", { class: "row", style: "margin-top:14px" }, stopControl()));
   }
@@ -1884,7 +1892,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     return W.provider.request({ method: "eth_sendTransaction", params: [{ from: W.account, ...full }] });
   }
   // Gas a deployment uses (measured: ArbExecutor 1,014,110, RouteExecutor 1,764,006), with headroom.
-  const DEPLOY_GAS = { arb: 1300000n, route: 2200000n };
+  const DEPLOY_GAS = { arb: 1300000n, route: 2200000n, liq: 2600000n };
   async function waitReceipt(hash, timeoutMs) {
     const until = Date.now() + (timeoutMs || 180000);
     while (Date.now() < until) {
@@ -1901,6 +1909,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     if (W.account) params.set("addresses", W.account);
     if (W.deployed && !S.state?.addresses?.routeExecutor) params.set("route", W.deployed);
     if (W.deployedArb && !S.state?.addresses?.executor) params.set("arb", W.deployedArb);
+    if (W.deployedLiq && !S.state?.addresses?.liqExecutor) params.set("liq", W.deployedLiq);
     api(`/api/wallet?${params}`).then((x) => {
       if (!x.error) {
         S.wallet = x;
@@ -1911,6 +1920,13 @@ details.optional[open] > summary { margin-bottom: 8px; }
   function saveDeployed() {
     try {
       localStorage.setItem("bab.deployed", JSON.stringify({ address: W.deployed, at: new Date().toISOString() }));
+    } catch {
+      /* the page also shows the address to copy */
+    }
+  }
+  function saveDeployedLiq() {
+    try {
+      localStorage.setItem("bab.deployedLiq", JSON.stringify({ address: W.deployedLiq, at: new Date().toISOString() }));
     } catch {
       /* the page also shows the address to copy */
     }
@@ -2118,6 +2134,46 @@ details.optional[open] > summary { margin-bottom: 8px; }
     }
     return b;
   }
+  function liqBlock() {
+    const b = h("div", { class: "vblock" }, h("h3", null, "LiquidationExecutor"), h("p", { class: "sub" }, "For Aave V3 liquidations — the latency-tolerant play that suits a home PC. Deploy it, authorise the bot, add its address to .env and set LIQUIDATIONS_LIVE=true. It flash-loans the debt, liquidates, swaps the seized collateral back and keeps the bonus; you own it, the bot's key can run liquidations but never withdraw."));
+    const envAddr = S.state?.addresses?.liqExecutor;
+    const addr = envAddr || W.deployedLiq;
+    if (!addr) {
+      const cb = S.contracts?.liqExecutor;
+      b.append(action("deploy-liq", {
+        label: "Deploy LiquidationExecutor",
+        disabled: !cb || !cb.creationBytecode,
+        confirm: () => `Deploy the LiquidationExecutor (${int(cb.bytes)} bytes, ${cb.compiler}) from ${shortAddr(W.account)}. You become its owner. Gas on Base is usually a few cents; your wallet shows the exact cost.`,
+        run: async (sent) => {
+          const hash = await sendTx({ data: cb.creationBytecode }, DEPLOY_GAS.liq);
+          sent(hash);
+          const r = await waitReceipt(hash, 300000);
+          if (r.status !== "0x1" || !isAddr(r.contractAddress)) throw new Error("The deployment failed on-chain.");
+          W.deployedLiq = r.contractAddress;
+          saveDeployedLiq();
+          return { msg: `Deployed at ${r.contractAddress}.`, hash };
+        },
+      }));
+      if (LIVE && !W.account) b.append(h("p", { class: "sub" }, "Connect your wallet first."));
+      return b;
+    }
+    const info = S.wallet?.contracts?.liqExecutor;
+    const isOwner = !!(W.account && info?.owner && info.owner.toLowerCase() === W.account.toLowerCase());
+    b.append(contractRows(addr, info, true, isOwner));
+    if (W.deployedLiq && !envAddr) {
+      const line = `LIQ_EXECUTOR_ADDRESS=${W.deployedLiq}`;
+      b.append(h("p", { class: "sub" }, "Authorise the bot wallet below, then add this line to .env, set LIQUIDATIONS_LIVE=true and restart the bot. The dashboard can't edit .env."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
+    }
+    if (info?.deployed && W.account && !isOwner) b.append(h("p", { class: "sub" }, "Only the owner can change it or withdraw. Connect the wallet that deployed it."));
+    if (isOwner) {
+      const bot = S.state?.addresses?.bot;
+      const opIsBot = bot && info.operator && info.operator.toLowerCase() === bot.toLowerCase();
+      if (bot && !opIsBot) b.append(action("operator-liq", { label: "Allow the bot key to run liquidations", confirm: () => `Let the bot wallet ${shortAddr(bot)} run liquidations through this contract? It still can't withdraw; only you can.`, run: txRun(addr, SEL.setOperator + encAddr(bot), "Done") }));
+      if (!bot) b.append(h("p", { class: "sub" }, "Set BOT_ADDRESS in .env to allow the bot's key here."));
+      b.append(...withdrawActions("liq", addr, info));
+    }
+    return b;
+  }
   function saveDeployedArb() {
     try {
       localStorage.setItem("bab.deployedArb", JSON.stringify({ address: W.deployedArb, at: new Date().toISOString() }));
@@ -2225,7 +2281,9 @@ details.optional[open] > summary { margin-bottom: 8px; }
       // away only when the two-pool ArbExecutor isn't set up yet, so the first deploy stays simple.
       const hasRoute = !!(S.state?.addresses?.routeExecutor || W.deployed);
       const route = hasRoute ? routeBlock() : h("details", { class: "optional" }, h("summary", null, "RouteExecutor: deploy to trade CL and multi-hop routes live too"), routeBlock());
-      const contracts = h("div", { class: "vcol" }, arbBlock(), route);
+      const hasLiq = !!(S.state?.addresses?.liqExecutor || W.deployedLiq);
+      const liq = hasLiq ? liqBlock() : h("details", { class: "optional" }, h("summary", null, "LiquidationExecutor: deploy to run Aave liquidations"), liqBlock());
+      const contracts = h("div", { class: "vcol" }, arbBlock(), route, liq);
       box.append(h("div", { class: "vgrid" }, accountBlock(), botBlock(), contracts), readinessBlock());
     });
     $("wallet-btn").textContent = W.account ? shortAddr(W.account) : "Connect wallet";

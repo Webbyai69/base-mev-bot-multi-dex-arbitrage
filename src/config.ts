@@ -212,6 +212,11 @@ export interface Settings {
   liqLookbackBlocks: number;
   liqCheckEvery: number;
   liqSwapCostBps: number;
+  /** 0.8: actually send liquidations live (needs LIQ_EXECUTOR_ADDRESS). Off by default. */
+  liquidationsLive: boolean;
+  /** Deployed LiquidationExecutor (contracts/LiquidationExecutor.sol). */
+  liqExecutorAddress: string | undefined;
+  liqGasLimit: number;
   // --- risk ---
   tokenBlacklist: Set<string>;
   // --- low-RPC mode ---
@@ -339,6 +344,9 @@ export function loadSettings(): Settings {
     liqLookbackBlocks: num("LIQ_LOOKBACK_BLOCKS", 1800),
     liqCheckEvery: num("LIQ_CHECK_EVERY", 5),
     liqSwapCostBps: num("LIQ_SWAP_COST_BPS", 30),
+    liquidationsLive: bool("LIQUIDATIONS_LIVE", false),
+    liqExecutorAddress: str("LIQ_EXECUTOR_ADDRESS"),
+    liqGasLimit: num("LIQ_GAS_LIMIT", 900_000),
     refreshMode: (str("REFRESH_MODE", "events") as Settings["refreshMode"]),
     fullRefreshBlocks: num("FULL_REFRESH_BLOCKS", 150),
     maxLogGap: num("MAX_LOG_GAP", 30),
@@ -398,7 +406,9 @@ export function loadSettings(): Settings {
     if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS (deploy the ArbExecutor from the dashboard, then copy its address into .env)");
     if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY (run: node dist/main.js new-wallet)");
     if (!/^0x[0-9a-fA-F]{40}$/.test(settings.executorAddress)) throw new Error("EXECUTOR_ADDRESS must be an address (0x + 40 hex characters)");
+    if (settings.liquidationsLive && !settings.liqExecutorAddress) throw new Error("LIQUIDATIONS_LIVE=true requires LIQ_EXECUTOR_ADDRESS (deploy the LiquidationExecutor from the dashboard, then copy its address into .env)");
   }
+  if (settings.liqExecutorAddress && !/^0x[0-9a-fA-F]{40}$/.test(settings.liqExecutorAddress)) throw new Error("LIQ_EXECUTOR_ADDRESS must be an address (0x + 40 hex characters)");
   if (settings.privateKey && settings.botAddress) {
     // A BOT_ADDRESS for another wallet would make the dashboard fund and authorise the wrong one.
     let derived = "";

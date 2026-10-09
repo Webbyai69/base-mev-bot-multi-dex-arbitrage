@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CHAIN_ID, MULTICALL3, TOKENS } from "../config.js";
 import type { Settings } from "../config.js";
-import { ARB_EXECUTOR_COMPILER, ARB_EXECUTOR_CREATION, ROUTE_EXECUTOR_COMPILER, ROUTE_EXECUTOR_CREATION } from "../deployBytecode.js";
+import { ARB_EXECUTOR_COMPILER, ARB_EXECUTOR_CREATION, ROUTE_EXECUTOR_COMPILER, ROUTE_EXECUTOR_CREATION, LIQ_EXECUTOR_CREATION, LIQ_EXECUTOR_COMPILER } from "../deployBytecode.js";
 import { bigintReplacer, log } from "../log.js";
 import type { Store } from "../store.js";
 import type { Call, CallResult, RpcUsage } from "../rpc.js";
@@ -377,7 +377,7 @@ export class UiServer {
       case "GET /api/contracts":
         return this.json(res, 200, this.contracts());
       case "GET /api/wallet":
-        return this.json(res, 200, await this.wallet(url.searchParams.get("addresses") ?? "", url.searchParams.get("route") ?? undefined, url.searchParams.get("arb") ?? undefined, url.searchParams.get("fresh") === "1"));
+        return this.json(res, 200, await this.wallet(url.searchParams.get("addresses") ?? "", url.searchParams.get("route") ?? undefined, url.searchParams.get("arb") ?? undefined, url.searchParams.get("fresh") === "1", url.searchParams.get("liq") ?? undefined));
       case "GET /api/review":
         return this.json(res, 200, this.review());
       case "POST /api/stop":
@@ -510,6 +510,7 @@ export class UiServer {
         bot: this.src.botAddress ?? null,
         executor: s.executorAddress ?? null,
         routeExecutor: s.routeExecutorAddress ?? null,
+        liqExecutor: s.liqExecutorAddress ?? null,
       },
       settings: {
         minProfitUsd: s.minProfitUsd,
@@ -606,6 +607,12 @@ export class UiServer {
         bytes: (ARB_EXECUTOR_CREATION.length - 2) / 2,
         compiler: ARB_EXECUTOR_COMPILER,
       },
+      liqExecutor: {
+        address: s.liqExecutorAddress ?? null,
+        creationBytecode: LIQ_EXECUTOR_CREATION,
+        bytes: (LIQ_EXECUTOR_CREATION.length - 2) / 2,
+        compiler: LIQ_EXECUTOR_COMPILER,
+      },
       tokens: {
         WETH: { address: WETH_ADDR, decimals: 18 },
         USDC: { address: USDC_ADDR, decimals: 6 },
@@ -618,13 +625,14 @@ export class UiServer {
    * executors' owner, operator and balances. One eth_call. `routeOverride` and
    * `arbOverride` are contracts the page just deployed that aren't in .env yet.
    */
-  async wallet(list: string, routeOverride?: string, arbOverride?: string, fresh = false): Promise<unknown> {
+  async wallet(list: string, routeOverride?: string, arbOverride?: string, fresh = false, liqOverride?: string): Promise<unknown> {
     if (!this.src.multicall) return { error: "balances are only available while the bot runs (node dist/main.js run) or with node dist/main.js ui" };
     const s = this.src.settings;
     const accounts = [...new Set([...list.split(","), this.src.botAddress ?? ""].map((a) => a.trim().toLowerCase()).filter(isAddress))].slice(0, 6);
     const contracts = [
       ["routeExecutor", s.routeExecutorAddress ?? (isAddress(routeOverride) ? routeOverride : undefined)],
       ["arbExecutor", s.executorAddress ?? (isAddress(arbOverride) ? arbOverride : undefined)],
+      ["liqExecutor", s.liqExecutorAddress ?? (isAddress(liqOverride) ? liqOverride : undefined)],
     ].filter((c): c is [string, string] => isAddress(c[1]));
     const key = [...accounts, ...contracts.map((c) => c[1])].join(",");
     const hit = this.walletCache.get(key);

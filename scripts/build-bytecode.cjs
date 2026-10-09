@@ -20,7 +20,7 @@ const { execFileSync } = require("node:child_process");
 
 const WANT = "0.8.26";
 const root = path.join(__dirname, "..");
-const names = ["ArbExecutor", "RouteExecutor"];
+const names = ["ArbExecutor", "RouteExecutor", "LiquidationExecutor"];
 const input = {
   language: "Solidity",
   sources: Object.fromEntries(names.map((n) => [`${n}.sol`, { content: fs.readFileSync(path.join(root, "contracts", `${n}.sol`), "utf8") }])),
@@ -63,6 +63,7 @@ const art = (n) => {
 };
 const arb = art("ArbExecutor");
 const route = art("RouteExecutor");
+const liq = art("LiquidationExecutor");
 const settings = `solc ${version}, optimizer 1000 runs, evm cancun`;
 const bytes = (hex) => (hex.length - 2) / 2;
 
@@ -91,24 +92,39 @@ export const ROUTE_EXECUTOR_RUNTIME = "${route.runtime}";
 `,
 );
 fs.writeFileSync(
+  path.join(root, "src", "simBytecodeLiquidation.ts"),
+  `/**
+ * LiquidationExecutor runtime bytecode for eth_call state-override simulation,
+ * and the code the live readiness check expects at LIQ_EXECUTOR_ADDRESS.
+ * Generated from contracts/LiquidationExecutor.sol with ${settings}.
+ * Do not edit by hand; rebuild with scripts/build-bytecode.cjs.
+ */
+export const LIQ_EXECUTOR_RUNTIME = "${liq.runtime}";
+`,
+);
+fs.writeFileSync(
   path.join(root, "src", "deployBytecode.ts"),
   `/**
  * Creation bytecode for the dashboard's Deploy buttons: your wallet sends it as
  * a contract-creation transaction and becomes the contract's owner.
  * Generated from contracts/*.sol with ${settings},
- * together with src/simBytecode.ts and src/simBytecodeRoute.ts. Rebuild with scripts/build-bytecode.cjs.
+ * together with src/simBytecode.ts, src/simBytecodeRoute.ts and src/simBytecodeLiquidation.ts.
+ * Rebuild with scripts/build-bytecode.cjs.
  */
 export const ROUTE_EXECUTOR_CREATION = "${route.creation}";
 export const ROUTE_EXECUTOR_COMPILER = "${settings}";
 export const ARB_EXECUTOR_CREATION = "${arb.creation}";
 export const ARB_EXECUTOR_COMPILER = "${settings}";
+export const LIQ_EXECUTOR_CREATION = "${liq.creation}";
+export const LIQ_EXECUTOR_COMPILER = "${settings}";
 `,
 );
 fs.mkdirSync(path.join(root, "build"), { recursive: true });
-for (const [n, a] of [["ArbExecutor", arb], ["RouteExecutor", route]]) {
+for (const [n, a] of [["ArbExecutor", arb], ["RouteExecutor", route], ["LiquidationExecutor", liq]]) {
   fs.writeFileSync(path.join(root, "build", `${n}.json`), JSON.stringify({ compiler: settings, abi: a.abi, bytecode: a.creation, deployedBytecode: a.runtime }, null, 2));
 }
 console.log(`${settings}`);
 console.log(`ArbExecutor: runtime ${bytes(arb.runtime)} bytes, creation ${bytes(arb.creation)} bytes`);
 console.log(`RouteExecutor: runtime ${bytes(route.runtime)} bytes, creation ${bytes(route.creation)} bytes`);
-console.log("wrote src/simBytecode.ts, src/simBytecodeRoute.ts, src/deployBytecode.ts and build/*.json; now run: npm run build");
+console.log(`LiquidationExecutor: runtime ${bytes(liq.runtime)} bytes, creation ${bytes(liq.creation)} bytes`);
+console.log("wrote src/simBytecode*.ts, src/deployBytecode.ts and build/*.json; now run: npm run build");

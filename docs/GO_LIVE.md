@@ -95,6 +95,28 @@ so you can deploy and authorise at your own pace. These routes are newer than th
 two-pool path and tested against mock pools rather than live Base liquidity, so
 start small and watch the first few in `data/live.jsonl`.
 
+## Running Aave liquidations (0.8)
+
+Arbitrage is a millisecond race a home PC loses to co-located bots. Liquidations
+are not — the window is seconds — so they're the better fit for this setup. To
+turn them on, deploy a third contract, the **LiquidationExecutor**:
+
+1. In *Wallet and contracts*, open **LiquidationExecutor** and press **Deploy**
+   (you become its owner).
+2. Press **Allow the bot key to run liquidations**.
+3. Copy the `LIQ_EXECUTOR_ADDRESS=0x…` line into `.env`, add `LIQUIDATIONS_LIVE=true`,
+   and restart.
+
+When a borrower's Aave position goes underwater, the bot flash-loans the debt,
+repays it via `liquidationCall`, swaps the seized collateral back to the debt
+asset and keeps the bonus — one transaction, no capital, gas only. Every one is
+simulated on-chain first, and the whole thing reverts unless it ends with more
+of the debt asset than it started, so a stale one or a leaked key costs gas, not
+principal. The log says `LIVE: LiquidationExecutor setup checks out`. It only
+fires when a position is actually liquidatable, which depends on the market —
+expect lumpy, occasional earnings on volatile days, not a steady stream, and
+watch the first few in `data/live.jsonl`.
+
 ## While it runs
 
 - **Stop sending:** the button on the dashboard, or create a file named `STOP`

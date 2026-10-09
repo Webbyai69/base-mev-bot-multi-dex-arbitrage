@@ -17,6 +17,31 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
               ──► every minute: reports/YYYY-MM-DD.html
 ```
 
+## What's new in 0.8: Aave liquidations go live
+
+The data made one thing clear (see [`docs/STRATEGY-0.8.md`](docs/STRATEGY-0.8.md)):
+the profitable arbs on Base are **same-block backruns** won on millisecond
+latency, which a home PC on a shared RPC cannot win. So 0.8 leans into the play
+that *does* suit a home setup — **Aave V3 liquidations**, where the window is
+seconds, not milliseconds, and it's permissionless (not front-running).
+
+The monitor was already watching borrowers on paper; now it can act. A new
+`contracts/LiquidationExecutor.sol` (you own it, the bot is only its operator)
+flash-loans the debt, calls `liquidationCall`, swaps the seized collateral back
+to the debt asset and keeps the bonus — all in one transaction, no capital, gas
+only. The whole thing reverts unless the debt-asset balance grew, so a stale
+opportunity or a leaked bot key costs gas, never principal (9 `forge` tests,
+incl. a leaked-operator drain attempt). Every liquidation is simulated on-chain
+before it's sent, and the usual rails apply (daily gas cap, STOP file, circuit
+breaker).
+
+It's **off by default.** To turn it on: deploy the LiquidationExecutor from the
+dashboard, authorise the bot, set `LIQ_EXECUTOR_ADDRESS` and
+`LIQUIDATIONS_LIVE=true` in `.env`, and restart. It only fires when a position
+actually goes underwater, so it earns in lumps on volatile days, not steadily.
+Honest expectation: this is a modest, real edge for a home PC — not the $3k/day
+of co-located professional operations.
+
 ## What's new in 0.7: faster, and routes trade live
 
 - **Concentrated-liquidity and multi-hop routes go live.** They used to be
@@ -357,6 +382,8 @@ Leave it running for a few days. `data\opportunities.jsonl` and
 | `src/executor.ts` | live sender for both contracts: setup checks, one tx in flight, STOP file, daily gas budget, circuit breaker; two-pool via ArbExecutor, CL/multi-hop via RouteExecutor |
 | `src/wallet.ts` | `new-wallet`: the bot's own gas wallet, key written straight into `.env` |
 | `src/learn.ts` | learning engine: decayed records of test runs, outcomes, rival bids and live sends (`data/learned.json`); skips, P(land), expected value, bids, pool pruning; bounded dashboard tuning (`data/tuning.json`) |
+| `contracts/LiquidationExecutor.sol` | Aave V3 liquidation: flash-loan debt, `liquidationCall`, swap collateral back, keep the bonus; owner/operator split, `simulate()` |
+| `src/liquidate.ts` | liquidation planner: find the collateral→debt swap, simulate the liquidation on-chain, build the sendable plan |
 | `contracts/ArbExecutor.sol` | on-chain executor: flash-swap or own-capital, min-profit check, `simulate()`, owner/operator roles |
 | `src/clmath.ts` | exact concentrated-liquidity maths (tick maths, single-range swaps, tick bitmap) |
 | `src/routes.ts` | cycle search over the pool graph + exact route optimiser |

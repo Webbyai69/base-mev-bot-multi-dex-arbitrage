@@ -23,12 +23,43 @@
  */
 import { writeFileSync } from "node:fs";
 import { Wallet, keccak256, type TransactionReceipt, type TransactionResponse } from "ethers";
-import { executorIface, routeExecutorIface } from "./abi.js";
+import { executorIface, routeExecutorIface, liquidationExecutorIface } from "./abi.js";
 import type { Chain } from "./rpc.js";
 import type { Opportunity } from "./scanner.js";
 import type { Store } from "./store.js";
 import { SIM_EXECUTOR_RUNTIME } from "./simBytecode.js";
 import { ROUTE_EXECUTOR_RUNTIME } from "./simBytecodeRoute.js";
+import { LIQ_EXECUTOR_RUNTIME } from "./simBytecodeLiquidation.js";
+
+/** A ready-to-send Aave liquidation: the on-chain call params plus the collateral->debt swap. */
+export interface LiquidationPlan {
+  id: string;
+  block: number;
+  label: string;
+  collateralAsset: string;
+  debtAsset: string;
+  user: string;
+  /** Debt to repay, in debt-token units. */
+  debtToCover: bigint;
+  /** Minimum debt-asset profit required on-chain (a stale one reverts instead of losing money). */
+  minProfit: bigint;
+  /** Swap path for the seized collateral: [collateralAsset, ..., debtAsset]. */
+  swapTokens: string[];
+  swapHops: Array<{ pool: string; kind: number; feePpm: number }>;
+  expectedProfitUsd: number;
+}
+
+/** What submit() needs to send and record a transaction, independent of arb vs liquidation. */
+interface SubmitJob {
+  id: string;
+  block: number;
+  expectedNetUsd: number;
+  label: string;
+  route: boolean;
+  liq?: boolean;
+  /** Called with the final status, for the arb learner (liquidations pass none). */
+  onResult?: (status: "success" | "reverted" | "dropped", gasUsd: number, bidGwei: number) => void;
+}
 import type { Evaluation, Learner } from "./learn.js";
 import { log } from "./log.js";
 
@@ -91,6 +122,7 @@ export interface ContractKind {
 }
 export const ARB_CONTRACT: ContractKind = { label: "ArbExecutor", envVar: "EXECUTOR_ADDRESS", expectedCodeHash: EXPECTED_CODE_HASH };
 export const ROUTE_CONTRACT: ContractKind = { label: "RouteExecutor", envVar: "ROUTE_EXECUTOR_ADDRESS", expectedCodeHash: ROUTE_EXPECTED_CODE_HASH };
+export const LIQ_CONTRACT: ContractKind = { label: "LiquidationExecutor", envVar: "LIQ_EXECUTOR_ADDRESS", expectedCodeHash: keccak256(LIQ_EXECUTOR_RUNTIME) };
 
 /**
  * Fee caps for a send: twice the latest base fee plus our tip. (ethers' getFeeData() adds a
@@ -154,6 +186,8 @@ export interface LiveRecord {
   status: "pending" | "success" | "reverted" | "dropped";
   /** A multi-hop / CL route sent through the RouteExecutor (vs a classic two-pool ArbExecutor trade). */
   route?: boolean;
+  /** An Aave liquidation sent through the LiquidationExecutor. */
+  liq?: boolean;
   /** Priority fee bid, in gwei. */
   priorityFeeGwei?: number;
   gasUsedWei?: bigint;
@@ -229,6 +263,9 @@ export interface LiveSafety {
   /** The RouteExecutor's status: undefined = routes not configured (CL/multi-hop stay paper-only). */
   routeBlocked?: string | null;
   routeCheck?: null | LiveCheckView;
+  /** The LiquidationExecutor's status: undefined = liquidations not configured for live sending. */
+  liqBlocked?: string | null;
+  liqCheck?: null | LiveCheckView;
   sent: number;
   succeeded: number;
 }
@@ -262,6 +299,9 @@ export class LiveExecutor {
   /** Same, for the multi-hop / CL RouteExecutor; null = ready, undefined = routes not configured. */
   routeBlocked: string | null | undefined;
   lastRouteCheck: LiveCheck | null = null;
+  /** Same, for the Aave LiquidationExecutor; null = ready, undefined = liquidations not configured. */
+  liqBlocked: string | null | undefined;
+  lastLiqCheck: LiveCheck | null = null;
   readonly wallet: Wallet;
   /** Called when the circuit breaker trips (alerts hook). */
   onTrip?: (reason: string) => void;
@@ -286,10 +326,14 @@ export class LiveExecutor {
       routeGasLimit?: number;
       /** Flash-loan source id for routes (0 own capital, 1 Morpho, 2 Balancer); must match the one simulation used. */
       routeFlashSource?: number;
+      /** The Aave LiquidationExecutor, deployed from the dashboard; when set, liquidations are sent live. */
+      liqExecutorAddress?: string;
+      liqGasLimit?: number;
     },
   ) {
     this.wallet = new Wallet(privateKey, chain.provider);
     this.routeBlocked = opts.routeExecutorAddress ? "Checking the live setup…" : undefined;
+    this.liqBlocked = opts.liqExecutorAddress ? "Checking the live setup…" : undefined;
   }
 
   get busy(): boolean {
@@ -299,6 +343,11 @@ export class LiveExecutor {
   /** True while verified route sending is possible (RouteExecutor configured and its setup checks out). */
   get routeReady(): boolean {
     return this.routeBlocked === null;
+  }
+
+  /** True while liquidation sending is possible (LiquidationExecutor configured and its setup checks out). */
+  get liqReady(): boolean {
+    return this.liqBlocked === null;
   }
 
   /** Re-run the live setup check(s) now. Sending is enabled only while it passes. */
@@ -315,6 +364,7 @@ export class LiveExecutor {
       this.onReadyChange?.(false, this.blocked);
     }
     if (this.opts.routeExecutorAddress) await this.verifyRoute();
+    if (this.opts.liqExecutorAddress) await this.verifyLiq();
     return c;
   }
 
@@ -326,6 +376,16 @@ export class LiveExecutor {
     this.routeBlocked = c.ok ? null : c.problems.join(" ");
     if (was !== null && this.routeBlocked === null) log.warn(`LIVE: RouteExecutor setup checks out (${this.opts.routeExecutorAddress}); multi-hop and CL routes will be sent too`);
     else if (this.routeBlocked !== null && this.routeBlocked !== was) log.warn(`LIVE: not sending routes yet. ${this.routeBlocked}`);
+  }
+
+  /** The LiquidationExecutor's own check. */
+  private async verifyLiq(): Promise<void> {
+    const c = await checkLiveSetup(this.chain, this.opts.liqExecutorAddress!, this.wallet.address, this.opts.liqGasLimit ?? 900_000, this.opts.priorityFeeGwei, LIQ_CONTRACT);
+    this.lastLiqCheck = c;
+    const was = this.liqBlocked;
+    this.liqBlocked = c.ok ? null : c.problems.join(" ");
+    if (was !== null && this.liqBlocked === null) log.warn(`LIVE: LiquidationExecutor setup checks out (${this.opts.liqExecutorAddress}); Aave liquidations will be sent`);
+    else if (this.liqBlocked !== null && this.liqBlocked !== was) log.warn(`LIVE: not sending liquidations yet. ${this.liqBlocked}`);
   }
 
   /** Check now, then every minute while blocked and every 5 minutes while ready (the gas money can run out). */
@@ -366,6 +426,7 @@ export class LiveExecutor {
       blocked: this.blocked,
       check: view(this.lastCheck),
       ...(this.opts.routeExecutorAddress ? { routeBlocked: this.routeBlocked ?? null, routeCheck: view(this.lastRouteCheck) } : {}),
+      ...(this.opts.liqExecutorAddress ? { liqBlocked: this.liqBlocked ?? null, liqCheck: view(this.lastLiqCheck) } : {}),
       sent: this.sent,
       succeeded: this.succeeded,
     };
@@ -376,7 +437,7 @@ export class LiveExecutor {
   }
 
   /** Shared pre-flight for a send; returns null to proceed or a reason it won't. `blocked` is the relevant readiness. */
-  private gate(o: Opportunity, blocked: string | null | undefined): string | null {
+  private gate(blocked: string | null | undefined, simState?: string): string | null {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== this.day) {
       this.day = today;
@@ -386,24 +447,28 @@ export class LiveExecutor {
     if (this.stopped()) return "STOP file present";
     if (this.inFlight) return "another transaction is in flight";
     if (this.gasSpentTodayUsd > this.opts.maxDailyGasUsd) return `daily gas budget exhausted ($${this.gasSpentTodayUsd.toFixed(2)})`;
-    if (o.sim !== "executor-ok") return `simulation state is ${o.sim}`;
+    if (simState !== undefined && simState !== "executor-ok") return `simulation state is ${simState}`;
     return null;
+  }
+
+  private bidFor(priorityFeeGwei?: number): number {
+    return priorityFeeGwei !== undefined && Number.isFinite(priorityFeeGwei) && priorityFeeGwei >= 0 ? priorityFeeGwei : this.opts.priorityFeeGwei;
   }
 
   /** Fire-and-track a classic two-pool trade through the ArbExecutor. Returns false if it was not sent. */
   trySend(o: Opportunity, ethUsd: number, priorityFeeGwei?: number): boolean {
     if (o.route) return false; // routes go through trySendRoute
-    const no = this.gate(o, this.blocked);
+    const no = this.gate(this.blocked, o.sim);
     if (no) {
       log.debug(`not sending ${o.id}: ${no}`);
       return false;
     }
-    const bid = priorityFeeGwei !== undefined && Number.isFinite(priorityFeeGwei) && priorityFeeGwei >= 0 ? priorityFeeGwei : this.opts.priorityFeeGwei;
     // Give up 5% of the modelled profit to reserve slack for reserve drift within the block.
     const minProfit = (o.profit * 95n) / 100n;
     const fn = this.opts.useFlash ? "executeFlash" : "executeWithCapital";
     const data = executorIface.encodeFunctionData(fn, [o.buyPool, o.sellPool, o.tokenIn, o.amountIn, o.amountMid, o.amountOut, minProfit]);
-    this.inFlight = this.submit(o, ethUsd, bid, this.executorAddress, this.opts.gasLimit, data).finally(() => {
+    const job: SubmitJob = { id: o.id, block: o.block, expectedNetUsd: o.netUsd, label: o.pairSymbols, route: false, onResult: (s, g, b) => this.report(o, s, g, b) };
+    this.inFlight = this.submit(job, ethUsd, this.bidFor(priorityFeeGwei), this.executorAddress, this.opts.gasLimit, data).finally(() => {
       this.inFlight = null;
     });
     return true;
@@ -412,24 +477,50 @@ export class LiveExecutor {
   /** Fire-and-track a multi-hop / concentrated-liquidity route through the RouteExecutor. Returns false if it was not sent. */
   trySendRoute(o: Opportunity, ethUsd: number, priorityFeeGwei?: number): boolean {
     if (!o.route || !this.opts.routeExecutorAddress) return false;
-    const no = this.gate(o, this.routeBlocked);
+    const no = this.gate(this.routeBlocked, o.sim);
     if (no) {
       log.debug(`not sending route ${o.id}: ${no}`);
       return false;
     }
-    const bid = priorityFeeGwei !== undefined && Number.isFinite(priorityFeeGwei) && priorityFeeGwei >= 0 ? priorityFeeGwei : this.opts.priorityFeeGwei;
     const minProfit = (o.profit * 95n) / 100n;
     const source = this.opts.routeFlashSource ?? 1;
     const hops = o.route.executorHops.map((h) => [h.pool, h.kind, h.feePpm] as const);
     const data = routeExecutorIface.encodeFunctionData("execute", [o.route.tokens, hops, o.amountIn, minProfit, source]);
-    this.inFlight = this.submit(o, ethUsd, bid, this.opts.routeExecutorAddress, this.opts.routeGasLimit ?? this.opts.gasLimit, data).finally(() => {
+    const job: SubmitJob = { id: o.id, block: o.block, expectedNetUsd: o.netUsd, label: `${o.pairSymbols} (${o.route.pools.length}-hop route)`, route: true, onResult: (s, g, b) => this.report(o, s, g, b) };
+    this.inFlight = this.submit(job, ethUsd, this.bidFor(priorityFeeGwei), this.opts.routeExecutorAddress, this.opts.routeGasLimit ?? this.opts.gasLimit, data).finally(() => {
       this.inFlight = null;
     });
     return true;
   }
 
-  /** Sign, send and track one transaction to `target`, whichever contract it is. */
-  private async submit(o: Opportunity, ethUsd: number, bidGwei: number, target: string, gasLimit: number, data: string): Promise<void> {
+  /**
+   * Fire-and-track an Aave liquidation through the LiquidationExecutor. The plan is already simulated
+   * (so no sim gate here); minProfit on-chain still makes a stale one revert, costing gas not principal.
+   */
+  trySendLiquidation(plan: LiquidationPlan, ethUsd: number, priorityFeeGwei?: number): boolean {
+    if (!this.opts.liqExecutorAddress) return false;
+    const no = this.gate(this.liqBlocked);
+    if (no) {
+      log.debug(`not sending liquidation ${plan.id}: ${no}`);
+      return false;
+    }
+    const source = this.opts.routeFlashSource ?? 1;
+    const data = liquidationExecutorIface.encodeFunctionData("liquidate", [
+      [plan.collateralAsset, plan.debtAsset, plan.user, plan.debtToCover],
+      plan.swapTokens,
+      plan.swapHops.map((h) => [h.pool, h.kind, h.feePpm] as const),
+      plan.minProfit,
+      source,
+    ]);
+    const job: SubmitJob = { id: plan.id, block: plan.block, expectedNetUsd: plan.expectedProfitUsd, label: plan.label, route: false, liq: true };
+    this.inFlight = this.submit(job, ethUsd, this.bidFor(priorityFeeGwei), this.opts.liqExecutorAddress, this.opts.liqGasLimit ?? 900_000, data).finally(() => {
+      this.inFlight = null;
+    });
+    return true;
+  }
+
+  /** Sign, send and track one transaction to `target` (an arb or a liquidation). */
+  private async submit(job: SubmitJob, ethUsd: number, bidGwei: number, target: string, gasLimit: number, data: string): Promise<void> {
     // Re-bind to whichever RPC endpoint is active now (the client fails over between endpoints).
     const wallet = this.wallet.connect(this.chain.provider);
     let tx: TransactionResponse;
@@ -453,9 +544,9 @@ export class LiveExecutor {
       return;
     }
     this.sent++;
-    const rec: LiveRecord = { kind: "live", id: o.id, block: o.block, sentAt: new Date().toISOString(), txHash: tx.hash, status: "pending", priorityFeeGwei: bidGwei, expectedProfitUsd: o.netUsd, ...(o.route ? { route: true } : {}) };
+    const rec: LiveRecord = { kind: "live", id: job.id, block: job.block, sentAt: new Date().toISOString(), txHash: tx.hash, status: "pending", priorityFeeGwei: bidGwei, expectedProfitUsd: job.expectedNetUsd, ...(job.route ? { route: true } : {}), ...(job.liq ? { liq: true } : {}) };
     this.store.append("live.jsonl", rec);
-    log.info(`live: sent ${tx.hash} for ${o.pairSymbols}${o.route ? ` (${o.route.pools.length}-hop route)` : ""} expecting net $${o.netUsd.toFixed(3)}`);
+    log.info(`live: sent ${tx.hash} for ${job.label}${job.liq ? " (liquidation)" : ""} expecting net $${job.expectedNetUsd.toFixed(3)}`);
     let receipt: TransactionReceipt | null = null;
     try {
       receipt = await tx.wait(1, 60_000);
@@ -470,7 +561,7 @@ export class LiveExecutor {
       this.store.append("live.jsonl", { ...rec, status: "dropped" });
       this.nextNonce = 0; // a dropped transaction leaves its nonce unused
       this.recordFailure("dropped");
-      this.report(o, "dropped", 0, bidGwei);
+      job.onResult?.("dropped", 0, bidGwei);
       return;
     }
     // On Base the fee is L2 gas plus an L1 data fee, which only the raw receipt carries.
@@ -490,7 +581,7 @@ export class LiveExecutor {
       void this.verify().catch(() => undefined);
     }
     log[status === "success" ? "info" : "warn"](`live: ${tx.hash} ${status} in block ${receipt.blockNumber}, gas $${gasUsd.toFixed(3)}`);
-    this.report(o, status, gasUsd, bidGwei);
+    job.onResult?.(status, gasUsd, bidGwei);
   }
 
   private report(o: Opportunity, status: "success" | "reverted" | "dropped", gasUsd: number, bidGwei: number): void {
