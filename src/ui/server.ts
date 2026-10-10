@@ -789,45 +789,67 @@ function gitInfo(root: string): { branch: string | null; commit: string | null }
  */
 export function capabilities(s: Settings): Array<{ name: string; built: "yes" | "partly" | "no"; tested: string; paper: "on" | "off" | "n/a"; live: "allowed" | "blocked" | "n/a" }> {
   const on = (b: boolean): "on" | "off" => (b ? "on" : "off");
+  // Live state follows the actual wiring, not a hand-set flag: two-pool trades need the ArbExecutor,
+  // CL / multi-hop / V4 go through the RouteExecutor, and liquidations need LIQUIDATIONS_LIVE + its
+  // executor. So the table tracks reality as .env changes instead of going stale.
+  const liveMode = s.mode === "live";
+  const yn = (ok: boolean): "allowed" | "blocked" => (ok ? "allowed" : "blocked");
+  const twoPoolLive = yn(liveMode && !!s.executorAddress);
+  const routeLive = yn(liveMode && !!s.routeExecutorAddress);
+  const flashLive = yn(liveMode && s.flashblocks && !!s.routeExecutorAddress);
+  const liqLive: "allowed" | "n/a" = liveMode && s.liquidationsLive && !!s.liqExecutorAddress ? "allowed" : "n/a";
   return [
     {
       name: "Two-pool trades on V2-style pools (Uniswap V2, SushiSwap, BaseSwap, Aerodrome)",
       built: "yes",
       tested: "Maths unit tests and a full paper run on a mock chain; ArbExecutor EVM tests need solc",
       paper: "on",
-      live: "allowed",
+      live: twoPoolLive,
     },
     {
-      name: "Concentrated-liquidity pools (Uniswap V3, Aerodrome Slipstream)",
+      name: "Concentrated-liquidity pools (Uniswap V3, Aerodrome Slipstream, PancakeSwap V3)",
       built: "yes",
       tested: "Tick maths checked against reference values; every find re-checked by the DEX's own quoter or a simulation",
       paper: on(s.clPools),
-      live: "blocked",
+      live: routeLive,
     },
     {
       name: "Triangular and multi-hop routes (RouteExecutor)",
       built: "yes",
-      tested: "Route engine unit tests; RouteExecutor EVM tests (forge, 9 passing)",
+      tested: "Route engine unit tests; RouteExecutor EVM tests (forge)",
       paper: on(s.multiHop),
-      live: "blocked",
+      live: routeLive,
+    },
+    {
+      name: "Uniswap V4 (hookless pools)",
+      built: "yes",
+      tested: "poolId / quoter unit tests and RouteExecutor V4 unlock/settle/take EVM tests (forge); self-validates live behind the executor sim",
+      paper: on(s.clPools),
+      live: routeLive,
     },
     {
       name: "Reacting to Flashblocks (pre-confirmed state)",
       built: "yes",
       tested: "Not covered by automated tests",
       paper: on(s.flashblocks),
-      live: "blocked",
+      live: flashLive,
     },
     {
       name: "Aave V3 liquidations",
       built: "partly",
-      tested: "Monitor only: profit is an estimate, not simulated; not covered by automated tests",
+      tested: "Monitor + LiquidationExecutor EVM tests; profit is an estimate, not a full simulation",
       paper: on(s.liquidations),
-      live: "n/a",
+      live: liqLive,
     },
-    { name: "Uniswap V4, Curve and Balancer pools", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
+    {
+      name: "Liquidation executor contract",
+      built: "yes",
+      tested: "Deployed and bot-authorised; flash-loans the debt, liquidates and swaps the collateral back (forge EVM tests)",
+      paper: "n/a",
+      live: liqLive,
+    },
+    { name: "Curve and Balancer pools", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
     { name: "Splitting a trade across several pools", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
-    { name: "Liquidation executor contract", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
     { name: "Encrypted key store (instead of PRIVATE_KEY in .env)", built: "no", tested: "Helper-agent task", paper: "n/a", live: "n/a" },
   ];
 }

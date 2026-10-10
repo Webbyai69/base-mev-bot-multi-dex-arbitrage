@@ -263,3 +263,25 @@ export function virtualReserves(s: ClState): { reserve0: bigint; reserve1: bigin
     reserve1: (s.liquidity * s.sqrtPriceX96) / Q96,
   };
 }
+
+/**
+ * Real token amounts held within ±bandTicks of the current price, from the active
+ * liquidity (getAmount0/1Delta over [tick-band, tick+band]). Unlike virtualReserves —
+ * which describe the whole constant-product curve and overstate a concentrated pool's
+ * usable depth by orders of magnitude (a deep stablecoin CL pool otherwise reports tens
+ * of millions of WETH) — this is a bounded, near-price depth measure for ranking pools.
+ * ~±1% at the default band (1.0001^100 ≈ 1.01). Assumes L is constant across the band,
+ * which is exact within the current tick and a safe over-estimate across a few ticks.
+ */
+export function bandReserves(s: ClState, bandTicks = 100): { reserve0: bigint; reserve1: bigint } {
+  if (s.sqrtPriceX96 <= 0n || s.liquidity <= 0n) return { reserve0: 0n, reserve1: 0n };
+  const lo = Math.max(MIN_TICK, s.tick - bandTicks);
+  const hi = Math.min(MAX_TICK, s.tick + bandTicks);
+  const cur = s.sqrtPriceX96;
+  const sLo = getSqrtRatioAtTick(lo);
+  const sHi = getSqrtRatioAtTick(hi);
+  return {
+    reserve0: sHi > cur ? getAmount0Delta(cur, sHi, s.liquidity, false) : 0n,
+    reserve1: cur > sLo ? getAmount1Delta(sLo, cur, s.liquidity, false) : 0n,
+  };
+}
