@@ -134,8 +134,8 @@ sudo -u "${BOT_USER}" bash -lc "
 cat <<EOF
 
 Provisioned. Next (see README for detail):
-  1. scp your home .env up, then: sudo -u ${BOT_USER} bash ${APP_DIR}/deploy/ashburn/make-server-env.sh /tmp/home.env
-     (writes ${APP_DIR}/.env in paper mode with no wallet key; never prints it)
+  1. on the PC: bash deploy/ashburn/make-server-env.sh .env server.env   (paper mode, no wallet key)
+     then upload only server.env to ${APP_DIR}/.env (owner ${BOT_USER}, mode 600)
   2. upload data/ (the learning history) into ${APP_DIR}/data
   3. sudo cp ${APP_DIR}/deploy/ashburn/arb-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload
      sudo systemctl enable --now arb-bot && journalctl -u arb-bot -n 50

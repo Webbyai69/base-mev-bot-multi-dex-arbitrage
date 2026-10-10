@@ -12,7 +12,7 @@ can't sign anything until you deliberately set it up for live (bottom of this fi
 | File | What it does |
 |---|---|
 | `provision.sh` | Ubuntu 22.04/24.04 setup: apt upgrade, Node 24, build tools, jq, chrony + UTC, 4 GB swap, fq + BBR, TCP fast open, no slow start after idle, nofile 65535, non-root `bot` user, read-only GitHub deploy key, clone, `npm ci`, build. Idempotent. |
-| `make-server-env.sh` | Turns a copy of your home `.env` into the server's: `MODE=paper`, `LIQUIDATIONS_LIVE=false`, `UI_PORT=8788`, no `PRIVATE_KEY`/`KEYSTORE_FILE`, everything else verbatim. Prints no values and deletes the uploaded copy. |
+| `make-server-env.sh` | Run on the PC: turns your home `.env` into the server's (`MODE=paper`, `LIQUIDATIONS_LIVE=false`, `UI_PORT=8788`, no `PRIVATE_KEY`/`KEYSTORE_FILE`, everything else verbatim). Prints no values, never modifies the source, and refuses to write anything that looks like a private key. |
 | `arb-bot.service` | systemd unit: same command as `run-24h.ps1` (`node --max-old-space-size=256 dist/main.js run`), `Restart=always`, `RestartSec=5`, `LimitNOFILE=65535`, hardened. |
 | `latency.sh` | TCP connect / TLS / first-byte times to the sequencer, the public RPC and Alchemy. Same script on the server and the PC (Git Bash). |
 | `.env.ashburn.example` | What differs on the server, for reference. |
@@ -31,10 +31,11 @@ ssh -i $KEY ubuntu@$IP 'BRANCH=<branch> bash /tmp/provision.sh'
 #    No GitHub access? Ship the code as a bundle instead:
 #    git bundle create /tmp/arb.bundle <branch>; scp it to /tmp; REPO=/tmp/arb.bundle BRANCH=<branch> bash /tmp/provision.sh
 
-# 2. .env (never printed)
-scp -i $KEY .env ubuntu@$IP:/tmp/home.env
-ssh -i $KEY ubuntu@$IP 'sudo install -o bot -m 600 /tmp/home.env /home/bot/home.env && rm /tmp/home.env &&
-  sudo -u bot bash /home/bot/base-arb-bot/deploy/ashburn/make-server-env.sh /home/bot/home.env'
+# 2. .env: convert ON THE PC, upload only the result (the wallet key never reaches the server, not even /tmp)
+bash deploy/ashburn/make-server-env.sh .env "$TMPDIR/server.env" [NEW_RPC_URL]   # prints no values
+scp -i $KEY "$TMPDIR/server.env" ubuntu@$IP:/tmp/server.env
+ssh -i $KEY ubuntu@$IP 'sudo install -o bot -g bot -m 600 /tmp/server.env /home/bot/base-arb-bot/.env && rm /tmp/server.env'
+rm "$TMPDIR/server.env"
 
 # 3. data/ (the learning history; snapshot first, because the running bot rewrites learned.json in place)
 #    copy data/ to a temp folder, check every .json parses, tar it, scp, extract into /home/bot/base-arb-bot/data

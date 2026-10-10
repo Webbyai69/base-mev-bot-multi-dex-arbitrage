@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 #
-# Turn a copy of the home PC's .env into the server's .env, in paper mode with no wallet key, without
-# printing any value. Run on the server as the bot user:
+# Turn the home PC's .env into the server's .env, in paper mode with no wallet key, without printing any
+# value. Run it on the PC (Git Bash), so the wallet key never reaches the server, then upload OUT only:
 #
-#   bash deploy/ashburn/make-server-env.sh /tmp/home.env [RPC_URL]
+#   bash deploy/ashburn/make-server-env.sh .env /path/to/server.env [RPC_URL]
 #
-# Everything else (RPC settings, executor addresses, gas caps, bidding, learning) is copied verbatim, so
-# both copies scan the same way and the comparison is fair. Pass a second argument to replace RPC_URL.
-# The source file is shredded afterwards.
+# Everything else (executor addresses, gas caps, bidding, learning) is copied verbatim, so both copies
+# scan the same way. Pass a third argument to replace RPC_URL. SRC is only read, never changed or deleted.
 set -euo pipefail
 
-SRC="${1:?usage: make-server-env.sh /path/to/home.env [RPC_URL]}"
-NEW_RPC="${2:-}"
-APP_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="${APP_DIR}/.env"
+SRC="${1:?usage: make-server-env.sh SRC_ENV OUT_ENV [RPC_URL]}"
+OUT="${2:?usage: make-server-env.sh SRC_ENV OUT_ENV [RPC_URL]}"
+NEW_RPC="${3:-}"
+[ -f "${SRC}" ] || { echo "no such file: ${SRC}" >&2; exit 1; }
+[ "$(cd "$(dirname "${SRC}")" && pwd)/$(basename "${SRC}")" != "$(cd "$(dirname "${OUT}")" && pwd)/$(basename "${OUT}")" ] || { echo "OUT must not be SRC" >&2; exit 1; }
 
 umask 077
-tmp="$(mktemp "${APP_DIR}/.env.XXXXXX")"
+tmp="$(mktemp "$(dirname "${OUT}")/.env.XXXXXX")"
 # grep -v exits 1 when it filters out every line; that's still success here.
 drop() { grep -vE "^[[:space:]]*($1)[[:space:]]*=" || [ $? -eq 1 ]; }
 # Strip CRLF, drop every line that could sign or send, and drop the lines this script sets itself.
@@ -43,10 +43,15 @@ REPORT_DIR=./reports
 EOF
 mv "${tmp}" "${OUT}"
 chmod 600 "${OUT}"
-shred -u "${SRC}" 2>/dev/null || rm -f "${SRC}"
 
 # Report what's set, never the values.
 echo "wrote ${OUT} ($(grep -cE '^[A-Z0-9_]+=' "${OUT}") settings, mode 600)"
 for k in MODE LIQUIDATIONS_LIVE UI_PORT; do grep -E "^${k}=" "${OUT}"; done
-grep -qE '^(PRIVATE_KEY|KEYSTORE_FILE)=' "${OUT}" && { echo "ERROR: a key line survived" >&2; exit 1; } || echo "no wallet key in .env"
+# Also catch a private key stored under any other name: 64 hex digits, with or without 0x.
+if grep -qE '^(PRIVATE_KEY|KEYSTORE_FILE)=|(^|[^0-9a-fA-Fx])(0x)?[0-9a-fA-F]{64}([^0-9a-fA-F]|$)' "${OUT}"; then
+  rm -f "${OUT}"
+  echo "ERROR: something that looks like a private key survived; ${OUT} deleted" >&2
+  exit 1
+fi
+echo "no wallet key in .env"
 for k in RPC_URL RPC_FALLBACK_URLS EXECUTOR_ADDRESS ROUTE_EXECUTOR_ADDRESS; do grep -qE "^${k}=." "${OUT}" && echo "${k}: set" || echo "${k}: missing"; done
