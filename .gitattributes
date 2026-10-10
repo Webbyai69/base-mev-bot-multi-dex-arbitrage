@@ -1,0 +1,5 @@
+# Scripts and units that run on Linux keep LF even in a Windows checkout (core.autocrlf), so they work
+# when copied straight from the PC to the server.
+*.sh        text eol=lf
+*.service   text eol=lf
+deploy/**   text eol=lf

@@ -1,55 +1,57 @@
-# Ashburn send-path deploy kit
+# Ashburn deploy kit
 
-Tier-0 of the roadmap: run **only** the latency-critical send-path on a box in Ashburn, VA (next to
-Base's sequencer metro), and keep the home PC as the paper/learning brain. Strategy, costs, risks and
-the go/no-go are in **`ashburn-plan.md`** (sent in chat) — read that first. This folder is the
-mechanical kit to stand the box up once you've created the account.
+Runs a second copy of the bot on a box in Ashburn, VA, next to Base's sequencer metro, **in paper mode**,
+so it can be compared with the home PC. Strategy, costs and the go/no-go are in `ashburn-plan.md` (sent
+in chat).
 
-Constraints unchanged: backrun/liquidations only; owner/operator model (gas-only key, no withdraw);
-`.env` edited only by you; bot wallet holds only gas.
+**Only one copy may ever send live transactions.** The server's `.env` has no wallet key at all, so it
+can't sign anything until you deliberately set it up for live (bottom of this file).
 
-## What you do vs. what's scripted
+## Files
 
-**You (an AI can't create accounts or enter payment):**
-1. **Create the server.** Oracle Cloud Always Free, **home region `US East (Ashburn) — us-ashburn-1`** (permanent — pick it right), shape `VM.Standard.A1.Flex` 4 OCPU / 24 GB, Ubuntu 22.04/24.04 (aarch64), upload your SSH key. If Arm shows *"Out of host capacity,"* retry the 3 Ashburn ADs / off-peak, or use the Hetzner `ash` fallback (see plan §6b). Verify-only card; Always Free stays $0.
-2. **Give the box GitHub read access** to the private repo — add a read-only **deploy key** (an SSH key on the box, added under the repo's Deploy keys), or a fine-scoped token. `provision.sh` clones over SSH by default.
-3. **Fill in `.env`** on the box from `.env.ashburn.example`, copying your executor addresses, gas cap and bidding settings **verbatim from your home `.env`**.
-4. **Encrypt the key** on the box: `node dist/main.js encrypt-wallet`, then add `KEYSTORE_FILE` and remove `PRIVATE_KEY` from `.env` yourself.
-5. **Set the systemd passphrase credential** (one command, below) and start the service.
+| File | What it does |
+|---|---|
+| `provision.sh` | Ubuntu 22.04/24.04 setup: apt upgrade, Node 24, build tools, jq, chrony + UTC, 4 GB swap, fq + BBR, TCP fast open, no slow start after idle, nofile 65535, non-root `bot` user, read-only GitHub deploy key, clone, `npm ci`, build. Idempotent. |
+| `make-server-env.sh` | Turns a copy of your home `.env` into the server's: `MODE=paper`, `LIQUIDATIONS_LIVE=false`, `UI_PORT=8788`, no `PRIVATE_KEY`/`KEYSTORE_FILE`, everything else verbatim. Prints no values and deletes the uploaded copy. |
+| `arb-bot.service` | systemd unit: same command as `run-24h.ps1` (`node --max-old-space-size=256 dist/main.js run`), `Restart=always`, `RestartSec=5`, `LimitNOFILE=65535`, hardened. |
+| `latency.sh` | TCP connect / TLS / first-byte times to the sequencer, the public RPC and Alchemy. Same script on the server and the PC (Git Bash). |
+| `.env.ashburn.example` | What differs on the server, for reference. |
 
-**Scripted (take no outward action by themselves):** `provision.sh` (Node 20, firewall, non-root `bot` user, clone, `npm ci`, build), `arb-bot.service` (systemd, auto-restart, passphrase via encrypted credential), `.env.ashburn.example`.
-
-## Steps on the box
+## Steps (run from the home PC unless noted)
 
 ```bash
-# as a sudo user, after SSHing in and configuring the deploy key for the bot user:
-curl -fsSLO https://raw.githubusercontent.com/Webbyai69/base-mev-bot-multi-dex-arbitrage/upgrade/v3-multihop-flashblocks-liquidations/deploy/ashburn/provision.sh
-# (or scp it up) — review it, then:
-bash provision.sh
+IP=<server ip>; KEY=~/.ssh/oci_arb
+ssh -i $KEY ubuntu@$IP 'uname -m; lsb_release -ds'          # expect aarch64, Ubuntu 24.04
 
-# configure the bot:
-sudo -u bot -i
-cd ~/base-arb-bot
-cp deploy/ashburn/.env.ashburn.example .env
-nano .env                      # fill in RPC_URL (US-East), executor addresses, etc. MODE stays "paper".
-node dist/main.js encrypt-wallet   # type a passphrase; it writes data/keystore.json, prints the address
-nano .env                      # add KEYSTORE_FILE=./data/keystore.json ; remove the PRIVATE_KEY line
-exit
+# 1. provision (twice on a fresh box: the first run prints the deploy key and stops)
+scp -i $KEY deploy/ashburn/provision.sh ubuntu@$IP:/tmp/
+ssh -i $KEY ubuntu@$IP 'bash /tmp/provision.sh'
+#    -> add the printed key under GitHub > repo > Settings > Deploy keys, read-only
+ssh -i $KEY ubuntu@$IP 'BRANCH=<branch> bash /tmp/provision.sh'
+#    No GitHub access? Ship the code as a bundle instead:
+#    git bundle create /tmp/arb.bundle <branch>; scp it to /tmp; REPO=/tmp/arb.bundle BRANCH=<branch> bash /tmp/provision.sh
 
-# wire the passphrase as an encrypted systemd credential (prompts for the passphrase, nothing on disk in clear):
-sudo mkdir -p /etc/arb-bot
-printf '%s' 'YOUR-KEYSTORE-PASSPHRASE' | sudo systemd-creds encrypt --name=keystore-pass - /etc/arb-bot/keystore-pass.cred
-sudo cp deploy/ashburn/arb-bot.service /etc/systemd/system/arb-bot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now arb-bot
-journalctl -u arb-bot -f        # watch it boot in paper mode and start scanning
+# 2. .env (never printed)
+scp -i $KEY .env ubuntu@$IP:/tmp/home.env
+ssh -i $KEY ubuntu@$IP 'sudo install -o bot -m 600 /tmp/home.env /home/bot/home.env && rm /tmp/home.env &&
+  sudo -u bot bash /home/bot/base-arb-bot/deploy/ashburn/make-server-env.sh /home/bot/home.env'
+
+# 3. data/ (the learning history; snapshot first, because the running bot rewrites learned.json in place)
+#    copy data/ to a temp folder, check every .json parses, tar it, scp, extract into /home/bot/base-arb-bot/data
+
+# 4. service
+ssh -i $KEY ubuntu@$IP 'sudo cp /home/bot/base-arb-bot/deploy/ashburn/arb-bot.service /etc/systemd/system/ &&
+  sudo systemctl daemon-reload && sudo systemctl enable --now arb-bot && journalctl -u arb-bot -n 50 --no-pager'
+
+# 5. dashboard on this PC at http://localhost:8788
+ssh -i $KEY -N -L 8788:127.0.0.1:8788 ubuntu@$IP
 ```
 
-Fund the keystore address with a little gas only when you're ready to flip to live — **not** before the
-paper week passes the plan's GO/NO-GO. Keep the home PC running in paper the whole week as the baseline.
+## Going live on the server (only after you've compared, and only after the PC stops sending)
 
-## Going live (only after GO/NO-GO in the plan passes)
-
-Edit `.env` on the box: `MODE=live`. Confirm the executor addresses match your deployed contracts, the
-`$1` daily gas cap is set, and the circuit breaker is armed. `sudo systemctl restart arb-bot`. Leave home
-in paper as the control.
+1. Stop the PC sending first (`data\STOP` or `MODE=paper` + restart there). Never both live at once.
+2. On the box as `bot`: put the key in temporarily, `node dist/main.js encrypt-wallet`, then remove
+   `PRIVATE_KEY` and add `KEYSTORE_FILE=./data/keystore.json` to `.env`.
+3. `printf '%s' 'PASSPHRASE' | sudo systemd-creds encrypt --name=keystore-pass - /etc/arb-bot/keystore-pass.cred`,
+   then `sudo systemctl edit arb-bot` and add the two credential lines shown at the bottom of `arb-bot.service`.
+4. `MODE=live` (and `LIQUIDATIONS_LIVE=true` if wanted) in the server `.env`, `sudo systemctl restart arb-bot`.
