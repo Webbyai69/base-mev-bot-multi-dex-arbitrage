@@ -587,9 +587,8 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
         }
       }
     }
-    // V4 pools are read from StateView (there is no pool contract), isolated from the address-based refresh
-    // above and wrapped so a V4 error can never break the block loop.
-    await registry.refreshV4(n).catch((e: Error) => log.warn("V4 refresh:", e.message.slice(0, 120)));
+    // V4 pools are no longer re-read every block: applyLogs takes them from the PoolManager's Swap and
+    // ModifyLiquidity logs (one StateView read only when liquidity changed), and refreshAll re-reads them.
     const baseFee = blk?.baseFeePerGas ? BigInt(blk.baseFeePerGas) : null;
     const ethUsd = registry.ethPrice();
     // Run the MEV classifier (which fetches transaction receipts) concurrently with the trade path, so its RPC
@@ -825,6 +824,7 @@ async function main(): Promise<void> {
       ...(s.rpcConcurrency !== undefined ? { concurrency: s.rpcConcurrency } : {}),
       ...(s.rpcMinIntervalMs !== undefined ? { minIntervalMs: s.rpcMinIntervalMs } : {}),
       ...(s.rpcBatchMaxCount !== undefined ? { batchMaxCount: s.rpcBatchMaxCount } : {}),
+      ...(s.rpcChunkSize !== undefined ? { chunkSize: s.rpcChunkSize } : {}),
     },
     s.rpcFallbackUrls,
   );

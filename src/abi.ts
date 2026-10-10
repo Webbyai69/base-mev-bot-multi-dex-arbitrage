@@ -204,6 +204,16 @@ export const stateViewIface = new Interface([
   "function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)",
   "function getTickBitmap(bytes32 poolId, int16 wordPos) view returns (uint256)",
 ]);
+/**
+ * PoolManager events. Every V4 pool lives in the one PoolManager contract, so the log's address is the
+ * PoolManager and the pool is topics[1] (its poolId). Swap carries the state after the swap, like V3's.
+ */
+export const v4PoolManagerIface = new Interface([
+  "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)",
+  "event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)",
+]);
+export const TOPIC_SWAP_V4 = v4PoolManagerIface.getEvent("Swap")!.topicHash;
+export const TOPIC_MODIFY_LIQUIDITY_V4 = v4PoolManagerIface.getEvent("ModifyLiquidity")!.topicHash;
 export const v4QuoterIface = new Interface([
   "function quoteExactInputSingle(((address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) poolKey, bool zeroForOne, uint128 exactAmount, bytes hookData) params) returns (uint256 amountOut, uint256 gasEstimate)",
 ]);
