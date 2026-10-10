@@ -597,7 +597,21 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), []))
       : Promise.resolve([]);
     const gasQuote = await gas.quote(n, baseFee);
-    const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block" });
+    // Incremental scan: re-score only the pools this block's events actually touched, plus every pool
+    // sharing their token pair (the other side of a spread), instead of all ~1,900 pools every block.
+    // The full scan was taking over Base's 2s block budget (the "Lagging" badge) and starving the
+    // Flashblocks loop, which is paused while this runs. A full scan still runs on the periodic refresh
+    // block and whenever we can't derive a touched set (non-events mode), as a safety net. Persistence is
+    // measured by the paper engine re-pricing tracked opps directly, so a narrower find set never distorts
+    // the still-there/taken/closed outcomes.
+    let scanOnly: Set<string> | undefined;
+    if (canEvents && !periodic) {
+      const touched = new Set<string>();
+      for (const l of logs) if (registry.pools.has(l.address)) touched.add(l.address);
+      for (const p of registry.pools.values()) if (p.v4) touched.add(p.address); // V4 is read from StateView, not in logs
+      scanOnly = registry.siblings(touched);
+    }
+    const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block", only: scanOnly });
     // Send first: it needs only the refreshed pools and the gas quote, not the classifier's output.
     if (live && learner) {
       considerLiveSend(opps, ethUsd, "block");
