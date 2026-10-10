@@ -134,16 +134,16 @@ export const CL_DEXES: ClDexInfo[] = [
   {
     // PancakeSwap V3 (~$121M/day on Base): a Uniswap V3 fork. Same tick math and QuoterV2 interface,
     // but its own Swap event (two extra protocol-fee fields) and fee tiers (2500 where Uni has 3000).
-    // Quote-only for now: the deployed RouteExecutor can't call its pancakeV3SwapCallback, so these pools
-    // are watched and priced (surfacing Pancake<->Uni/Aero spreads in paper) but never live-sent. Verified
-    // on-chain: factory 5151 bytes, QuoterV2 answers the Uni QuoterV2 interface, pools report this factory.
+    // Executable: the deployed RouteExecutor (0xb6be…) now has its pancakeV3SwapCallback, so these pools
+    // are watched, priced AND traded live when the executor sim passes. Verified on-chain: factory 5151
+    // bytes, QuoterV2 answers the Uni QuoterV2 interface, pools report this factory.
     id: "pancakeswap-v3",
     name: "PancakeSwap V3",
     kind: "pancakev3",
     factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
     quoter: "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
     poolKeys: [100, 500, 2500, 10000],
-    executable: false,
+    executable: true,
   },
   {
     id: "slipstream",
