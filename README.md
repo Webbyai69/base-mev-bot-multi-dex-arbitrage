@@ -19,6 +19,9 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
 
 ## What's new in 0.9.1: every Flashblock, less repeated work, fewer RPC calls
 
+To run the bot 24/7 on a free Oracle Cloud server instead of your PC, see
+[`deploy/README.md`](deploy/README.md).
+
 Fixes from the 10 Oct monitoring run.
 
 - **Flashblocks on every Flashblock.** The loop now follows Base's Flashblocks

@@ -1,0 +1,165 @@
+#cloud-config
+# Base arb bot server: Oracle Cloud Always Free, Ampere A1 (Arm), Ubuntu 24.04.
+#
+# Paste this whole file into Create instance > Advanced options > Management >
+# "Paste cloud-init script". It runs once, on first boot, and takes about 5 minutes.
+# It installs no keys and no bot code: you add those yourself (deploy/README.md).
+#
+# What it sets up:
+#   - an "arb" user that runs the bot. It has no sudo and no SSH login: if the
+#     bot were ever compromised, the attacker would not get root on the machine
+#     that holds PRIVATE_KEY. You log in as "ubuntu" and use "sudo -u arb".
+#   - Node.js 22, git and build tools; chrony for accurate time; unattended
+#     security updates; 4 GB swap
+#   - network tuning for many small RPC and websocket messages (BBR, no slow
+#     start after idle, short keepalives)
+#   - arb-bot.service (not started: it waits for the code and .env)
+#   - arb-bot-update: pull, install, build, test, restart, in one command
+#   - base-latency: TCP and TLS times from this server to Base endpoints,
+#     first run saved in /home/ubuntu/latency-check.txt
+
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - build-essential
+  - curl
+  - jq
+  - chrony
+  - unattended-upgrades
+  - htop
+
+timezone: UTC
+
+users:
+  - default
+  # Runs the bot. No password, no SSH keys, no sudo.
+  - name: arb
+    gecos: Base arb bot
+    shell: /bin/bash
+    lock_passwd: true
+
+# 4 GB swap as a safety margin on the 12 GB free shape
+swap:
+  filename: /swapfile
+  size: 4G
+  maxsize: 4G
+
+# Note: write_files runs before the "arb" user exists, so nothing here is owned by
+# it or written under /home/arb; runcmd does that.
+write_files:
+  # Lower latency for many small RPC and websocket messages
+  - path: /etc/sysctl.d/99-arb-bot.conf
+    content: |
+      net.core.default_qdisc = fq
+      net.ipv4.tcp_congestion_control = bbr
+      net.ipv4.tcp_fastopen = 3
+      net.ipv4.tcp_slow_start_after_idle = 0
+      net.ipv4.tcp_keepalive_time = 60
+      net.ipv4.tcp_keepalive_intvl = 10
+      net.ipv4.tcp_keepalive_probes = 6
+      net.core.rmem_max = 16777216
+      net.core.wmem_max = 16777216
+      net.ipv4.tcp_rmem = 4096 87380 16777216
+      net.ipv4.tcp_wmem = 4096 65536 16777216
+      net.core.somaxconn = 4096
+      vm.swappiness = 10
+      fs.file-max = 1048576
+
+  # BBR is a kernel module: load it on every boot so the sysctl above always applies
+  - path: /etc/modules-load.d/bbr.conf
+    content: |
+      tcp_bbr
+
+  # Keep the journal (the bot's console output) from filling the boot disk
+  - path: /etc/systemd/journald.conf.d/arb-bot.conf
+    content: |
+      [Journal]
+      SystemMaxUse=500M
+
+  # The bot as a service: starts on boot, restarts 5 s after any crash.
+  # Not enabled yet: enable it once the code and .env are in place.
+  - path: /etc/systemd/system/arb-bot.service
+    content: |
+      [Unit]
+      Description=Base arb bot
+      After=network-online.target time-sync.target
+      Wants=network-online.target
+      # Never starts half-installed: needs the built code and the .env
+      ConditionPathExists=/home/arb/base-arb-bot/dist/main.js
+      ConditionPathExists=/home/arb/base-arb-bot/.env
+
+      [Service]
+      Type=simple
+      User=arb
+      Group=arb
+      WorkingDirectory=/home/arb/base-arb-bot
+      ExecStart=/usr/bin/node dist/main.js run
+      Restart=always
+      RestartSec=5
+      # Room for its shutdown work (final report, digest, learned.json, alerts)
+      TimeoutStopSec=60
+      LimitNOFILE=65535
+      Nice=-5
+      Environment=NODE_ENV=production
+      # Containment: the bot can write only its own folder and can't gain privileges
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ReadWritePaths=/home/arb/base-arb-bot
+      ProtectKernelTunables=yes
+      ProtectKernelModules=yes
+      ProtectControlGroups=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Update in one step: pull, install, build, test, restart (only if the tests pass)
+  - path: /usr/local/bin/arb-bot-update
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Usage: sudo arb-bot-update [branch]   (default: the branch already checked out)
+      set -euo pipefail
+      dir=/home/arb/base-arb-bot
+      as_arb() { sudo -u arb -H bash -c "cd '$dir' && $1"; }
+      if [ -n "${1:-}" ]; then as_arb "git fetch origin '$1' && git checkout '$1'"; fi
+      as_arb "git pull --ff-only"
+      as_arb "npm ci --no-audit --no-fund"
+      as_arb "npm run build"
+      as_arb "npm test" || { echo "Tests failed: the running bot was left as it was."; exit 1; }
+      systemctl restart arb-bot
+      sleep 3
+      systemctl --no-pager --lines=15 status arb-bot || true
+
+  # Measures how fast this server reaches Base (TCP connect and TLS handshake).
+  # These hosts sit behind CDN/anycast front ends, so this shows the distance to
+  # the nearest edge, not to Base's sequencer: use it to compare regions.
+  # (Alchemy answers an error without a key; its timings are still valid.)
+  - path: /usr/local/bin/base-latency
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      for url in https://mainnet-sequencer.base.org https://mainnet.base.org https://mainnet.flashblocks.base.org https://base-mainnet.g.alchemy.com; do
+        for i in 1 2 3; do
+          curl -o /dev/null -s -m 10 -w "%{time_connect} %{time_appconnect}\n" "$url"
+        done | awk -v u="$url" '{c+=$1; t+=$2; n++} END {printf "%-45s connect %6.1f ms   tls %6.1f ms\n", u, 1000*c/n, 1000*t/n}'
+      done
+
+runcmd:
+  - modprobe tcp_bbr
+  - sysctl --system
+  - systemctl restart systemd-journald
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+  - systemctl enable --now chrony
+  # Makes time-sync.target (in the service's After=) actually wait for a synced clock
+  - systemctl enable chrony-wait.service
+  - mkdir -p /home/arb/base-arb-bot
+  - chown -R arb:arb /home/arb
+  - chmod 700 /home/arb
+  - systemctl daemon-reload
+  - /usr/local/bin/base-latency > /home/ubuntu/latency-check.txt 2>&1
+  - chown ubuntu:ubuntu /home/ubuntu/latency-check.txt
+
+final_message: "Base arb bot server ready after $UPTIME seconds"
