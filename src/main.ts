@@ -17,7 +17,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Wallet } from "ethers";
-import { loadSettings, type Settings } from "./config.js";
+import { loadSettings, loadDotEnv, type Settings } from "./config.js";
 import { Chain, redactUrl } from "./rpc.js";
 import { PoolRegistry, type PoolSnapshot } from "./pools.js";
 import { Scanner, type RouteOptions } from "./scanner.js";
@@ -29,6 +29,7 @@ import { renderReport, writeReport } from "./report.js";
 import { LiveExecutor, pickLiveSend, summarizeLive } from "./executor.js";
 import { Learner, Tuning } from "./learn.js";
 import { addBotWalletToEnv } from "./wallet.js";
+import { encryptWalletToKeystore, loadKeystoreIntoEnv, resolvePassphrase, newPassphrase } from "./keystore.js";
 import { runCheck } from "./check.js";
 import { log, setLogLevel } from "./log.js";
 import { formatUnits } from "./math.js";
@@ -778,6 +779,7 @@ async function printSummary(s: Settings, store: Store, registry: PoolRegistry): 
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? "run";
+  loadDotEnv(); // populate process.env from .env so the keystore boot and wallet commands can read it (idempotent)
   if (cmd === "new-wallet") {
     // Before loadSettings: live-mode validation must not stop you creating the wallet live mode needs.
     const r = addBotWalletToEnv(".env");
@@ -792,6 +794,26 @@ async function main(): Promise<void> {
     if (r.botAddressUpdated) console.log("BOT_ADDRESS in .env pointed at a different wallet; it now matches the new one.");
     console.log("Next: restart the bot, open http://localhost:8787, connect your own wallet, and use Live setup.");
     return;
+  }
+  if (cmd === "encrypt-wallet") {
+    // Encrypt the operator key into data/keystore.json so a plaintext key need not live in .env or be
+    // copied to a remote box. Never edits .env — you add KEYSTORE_FILE and remove PRIVATE_KEY yourself.
+    const pass = await newPassphrase();
+    const r = await encryptWalletToKeystore({ passphrase: pass, overwrite: process.argv.includes("--force") });
+    console.log(`Keystore written: ${r.path}`);
+    console.log(`Bot wallet: ${r.address}${r.createdKey ? "  (a NEW key was generated — fund this address with gas before live use)" : ""}`);
+    console.log("Then, in .env yourself (this tool never edits .env):");
+    console.log("  1. add   KEYSTORE_FILE=./data/keystore.json");
+    console.log("  2. remove the  PRIVATE_KEY=...  line");
+    console.log("At boot the passphrase comes from KEYSTORE_PASSPHRASE, KEYSTORE_PASSPHRASE_FILE (e.g. a systemd credential), or a prompt.");
+    return;
+  }
+  // Encrypted key store: if configured and no plaintext key is present, decrypt it into memory before
+  // settings load, so config.ts and executor.ts stay unchanged. No silent fallback to a plaintext key.
+  if (process.env.KEYSTORE_FILE && !process.env.PRIVATE_KEY) {
+    const pass = await resolvePassphrase(`Passphrase for ${process.env.KEYSTORE_FILE}: `);
+    await loadKeystoreIntoEnv({ keystoreFile: process.env.KEYSTORE_FILE, passphrase: pass });
+    log.info("operator key loaded from the encrypted keystore");
   }
   const s = loadSettings();
   setLogLevel(s.logLevel);
@@ -883,7 +905,7 @@ async function main(): Promise<void> {
         process.exitCode = await telegramSetup(s.telegramBotToken, s.telegramChatId);
         break;
       default:
-        console.log("usage: node dist/main.js [check|discover|scan|run|report|summary|digest|ui|telegram|new-wallet]");
+        console.log("usage: node dist/main.js [check|discover|scan|run|report|summary|digest|ui|telegram|new-wallet|encrypt-wallet]");
     }
   } finally {
     if (cmd !== "run" && cmd !== "ui") await chain.destroy();
