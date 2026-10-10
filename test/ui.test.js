@@ -192,3 +192,16 @@ test("opportunity details carry hop-by-hop amounts with token decimals", async (
   assert.deepEqual([legs[0].from.symbol, legs[0].from.decimals, legs[0].amountIn, legs[0].feePpm], ["WETH", 18, "1000000000000000000", 500]);
   assert.equal(legs[1].amountOut, "1001000000000000000");
 });
+
+test("the dashboard's script parses, keeps refreshing in a background tab and shows when each panel's data is from", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { Script } = await import("node:vm");
+  const html = readFileSync(new URL("../ui/dashboard.html", import.meta.url), "utf8");
+  const code = /<script>([\s\S]*)<\/script>/.exec(html)?.[1];
+  assert.ok(code, "inline script found");
+  assert.doesNotThrow(() => new Script(code), "script has no syntax error");
+  assert.ok(!/document\.hidden && !S\.stale && fn\(\)/.test(code), "refresh timers no longer stop in a hidden tab");
+  assert.ok(/class="asof"|"asof"/.test(html) && /Data as of/.test(code), "panels carry a data-as-of line");
+  assert.ok(/AbortController/.test(code), "dashboard requests time out");
+  for (const id of ["fig-speed", "fig-fb"]) assert.ok(html.includes(`id="${id}"`), `${id} figure present`);
+});

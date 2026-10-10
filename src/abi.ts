@@ -212,5 +212,15 @@ const v4Abi = AbiCoder.defaultAbiCoder();
 export function v4PoolId(currency0: string, currency1: string, fee: number, tickSpacing: number, hooks: string): string {
   return keccak256(v4Abi.encode(["address", "address", "uint24", "int24", "address"], [currency0, currency1, fee, tickSpacing, hooks]));
 }
+/**
+ * PoolManager events (v4-core IPoolManager). PoolId is a bytes32 alias, so it appears as bytes32 in the
+ * signature. Swap carries the pool's price, in-range liquidity and tick after the swap, exactly like V3.
+ */
+export const v4PoolManagerIface = new Interface([
+  "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)",
+  "event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)",
+]);
+export const TOPIC_SWAP_V4 = v4PoolManagerIface.getEvent("Swap")!.topicHash;
+export const TOPIC_MODIFY_LIQUIDITY_V4 = v4PoolManagerIface.getEvent("ModifyLiquidity")!.topicHash;
 export const TOPIC_AAVE_BORROW = aavePoolIface.getEvent("Borrow")!.topicHash;
 export const TOPIC_AAVE_LIQUIDATION = aavePoolIface.getEvent("LiquidationCall")!.topicHash;

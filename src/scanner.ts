@@ -5,14 +5,14 @@
  */
 import type { Learner } from "./learn.js";
 import { AbiCoder } from "ethers";
-import { DEXES, USDC, WETH, V4, NATIVE } from "./config.js";
+import { DEXES, TOKENS, USDC, WETH, V4, NATIVE } from "./config.js";
 import { blocksFor } from "./blocktime.js";
 import { aeroPoolIface, univ2RouterIface, executorIface, routeExecutorIface, univ3QuoterIface, slipstreamQuoterIface, v4QuoterIface } from "./abi.js";
 import { quoteArb, type ArbQuote } from "./math.js";
 import { findCycles, optimizeRoute, routeLabel, type RouteQuote } from "./routes.js";
 import { SIM_EXECUTOR_RUNTIME } from "./simBytecode.js";
 import { ROUTE_EXECUTOR_RUNTIME } from "./simBytecodeRoute.js";
-import type { Pool, PoolRegistry } from "./pools.js";
+import { pairKey, poolStateSig, type Pool, type PoolRegistry } from "./pools.js";
 import type { Chain, Call } from "./rpc.js";
 import type { GasQuote } from "./gas.js";
 import { weiToUsd } from "./gas.js";
@@ -114,6 +114,54 @@ const QUOTE_ONLY_KINDS = new Set<string>(["pancakev3", "univ4"]);
 
 const routeKeyOf = routeKey;
 
+/** Tokens a classic two-pool route prefers to start (and take its profit) in, best first. */
+const START_PREFERENCE = [WETH, USDC, ...Object.values(TOKENS).map((t) => t.address.toLowerCase())];
+
+/** The token a classic route between two pools starts in: one rotation per cycle, preferring base tokens. */
+export function preferredStart(token0: string, token1: string): string {
+  const r0 = START_PREFERENCE.indexOf(token0);
+  const r1 = START_PREFERENCE.indexOf(token1);
+  if (r0 < 0 && r1 < 0) return token0;
+  if (r0 < 0) return token1;
+  if (r1 < 0) return token0;
+  return r0 <= r1 ? token0 : token1;
+}
+
+export interface ScanOptions {
+  blockTag?: number | "pending";
+  /** Restrict the search to these pools (and nothing else). */
+  only?: Set<string>;
+  stage?: "block" | "flashblock";
+  msIntoBlock?: number;
+  /**
+   * Pools whose state changed since the last scan. Only routes through at least one of them are
+   * re-scored; a route whose pools are all unchanged has the same answer as last time. When absent,
+   * the scanner works it out itself by comparing every pool's state with what it saw last time.
+   */
+  changed?: Set<string>;
+  /** Re-score every route regardless of what changed (periodic, and the first scan). */
+  full?: boolean;
+  /** Pre-confirmed copies of pools (Flashblocks), used instead of the registry's confirmed state. */
+  overlay?: Map<string, Pool>;
+  /** Pools to leave out entirely this scan (their pending state is unknown). */
+  exclude?: Set<string>;
+}
+
+/** Where one scan's time went, for the per-block timing on the dashboard. */
+export interface ScanTiming {
+  /** Pool-state comparison, cycle search and size optimisation (CPU). */
+  findMs: number;
+  /** On-chain verification of the survivors (RPC). */
+  verifyMs: number;
+  /** Routes re-scored, and routes skipped because none of their pools changed. */
+  scored: number;
+  unchanged: number;
+  /** Positive-spread routes after swap fees (the funnel's "route checks"). */
+  candidates: number;
+  changedPools: number;
+  full: boolean;
+}
+
 export class Scanner {
   /**
    * How opportunities are verified on-chain:
@@ -136,9 +184,27 @@ export class Scanner {
   failureMuteBlocks = blocksFor(20 * 60_000);
   /** After this many revert failures the token pair's pools are dropped from the watch list. */
   failuresBeforeDrop = 3;
+  /** Re-score every route every N scans of confirmed blocks, whatever changed (FULL_RESCAN_BLOCKS). */
+  fullRescanBlocks = 30;
+  /** A find worth more than this (USD) is a pricing error, not an opportunity (SANITY_MAX_PROFIT_USD). */
+  sanityMaxProfitUsd = Infinity;
 
   /** Routes found in the last scan before the profit floor (used to pick "hot" pools for Flashblocks). */
   lastCandidatePools = new Set<string>();
+  /** Timing and work of the last scan. */
+  lastTiming: ScanTiming = { findMs: 0, verifyMs: 0, scored: 0, unchanged: 0, candidates: 0, changedPools: 0, full: true };
+  /** Route checks per venue since start (a route counts once for each DEX it touches). */
+  readonly venues: Record<string, number> = {};
+
+  /** Each pool's state at the last scan, to tell which pools changed. */
+  private sigs = new Map<string, string>();
+  private lastFullScan = -Infinity;
+  /**
+   * Routes that cleared the profit floor and whose pools haven't changed since: still open even
+   * though they aren't re-scored (or re-reported) every block. The paper engine reads this so a
+   * spread that sits open stays one trade.
+   */
+  private open = new Map<string, string[]>();
 
   constructor(
     readonly chain: Chain,
@@ -157,19 +223,36 @@ export class Scanner {
     return "quoter";
   }
 
+  /** Keys of routes still open (cleared the floor, pools unchanged since). */
+  openRouteKeys(): Set<string> {
+    return new Set(this.open.keys());
+  }
+
   /**
    * Multi-hop and concentrated-liquidity routes. Pure V2 two-pool routes are
    * left to findRaw() (they run through the original ArbExecutor).
+   *
+   * With `changed`, only cycles through a changed pool are sized (the expensive part); MAX_CYCLES
+   * then caps the cycles actually re-scored, so a stale high-edge cycle can't crowd out fresh ones.
    */
-  findRoutes(pools?: Iterable<Pool>): RouteQuote<Pool>[] {
+  findRoutes(pools?: Iterable<Pool>, changed?: Set<string>, stats?: { cycles: number; unchanged: number; rotations: number }): RouteQuote<Pool>[] {
     const o = this.routeOpts;
     if (!o || !o.multiHop) return [];
-    const cycles = findCycles<Pool>(pools ?? this.registry.pools.values(), {
+    const st = { rotations: 0 };
+    let cycles = findCycles<Pool>(pools ?? this.registry.pools.values(), {
       startTokens: [WETH, USDC],
       maxHops: o.maxHops,
       exclude: (ps) => ps.length === 2 && ps.every((p) => !(p as Pool).cl),
-      maxCycles: o.maxCycles,
+      stats: st,
     });
+    const total = cycles.length;
+    if (changed) cycles = cycles.filter((c) => c.pools.some((p) => changed.has(p.address)));
+    if (stats) {
+      stats.cycles += total;
+      stats.unchanged += total - cycles.length;
+      stats.rotations += st.rotations;
+    }
+    if (o.maxCycles && cycles.length > o.maxCycles) cycles = cycles.slice(0, o.maxCycles);
     const out: RouteQuote<Pool>[] = [];
     for (const c of cycles) {
       const q = optimizeRoute(c);
@@ -184,60 +267,115 @@ export class Scanner {
     return o.gasRouteBase + pools.reduce((sum, p) => sum + (p.cl ? o.gasHopCl : o.gasHopV2), 0);
   }
 
-  /** All positive-profit routes at the current reserve snapshot, before gas. */
-  findRaw(maxAmountInWeth?: bigint, only?: Set<string>): ArbQuote[] {
+  /**
+   * All positive-profit classic routes at the current reserve snapshot, before gas. Each cycle is
+   * quoted once, starting in its preferred token (WETH first): "buy on A with WETH, sell on B" and
+   * "buy on B with X, sell on A" are the same trade read from a different token.
+   */
+  findRaw(maxAmountInWeth?: bigint, only?: Set<string>, changed?: Set<string>, pools?: Iterable<Pool>, stats?: { cycles: number; unchanged: number }): ArbQuote[] {
     const quotes: ArbQuote[] = [];
-    for (const [, all] of this.registry.groups()) {
-      const pools = all.filter((p) => !p.cl && (!only || only.has(p.address)));
-      if (pools.length < 2) continue;
-      for (let i = 0; i < pools.length; i++) {
-        for (let j = 0; j < pools.length; j++) {
+    const groups = pools ? groupByPair(pools) : this.registry.groups();
+    for (const [, all] of groups) {
+      const ps = all.filter((p) => !p.cl && (!only || only.has(p.address)));
+      if (ps.length < 2) continue;
+      for (let i = 0; i < ps.length; i++) {
+        for (let j = 0; j < ps.length; j++) {
           if (i === j) continue;
-          const buy = pools[i]!;
-          const sell = pools[j]!;
+          const buy = ps[i]!;
+          const sell = ps[j]!;
           if (buy.reserve0 === 0n || sell.reserve0 === 0n) continue;
-          for (const tokenIn of [buy.token0, buy.token1]) {
-            const cap = tokenIn === WETH ? maxAmountInWeth : undefined;
-            const q = quoteArb(buy, sell, tokenIn, cap);
-            if (q) quotes.push(q);
+          if (stats) stats.cycles++;
+          if (changed && !changed.has(buy.address) && !changed.has(sell.address)) {
+            if (stats) stats.unchanged++;
+            continue;
           }
+          const tokenIn = preferredStart(buy.token0, buy.token1);
+          const cap = tokenIn === WETH ? maxAmountInWeth : undefined;
+          const q = quoteArb(buy, sell, tokenIn, cap);
+          if (q) quotes.push(q);
         }
       }
     }
     return quotes;
   }
 
+  /** Which pools changed since the last scan (by state), remembering the current state for next time. */
+  private changedPools(pools: Iterable<Pool>): Set<string> {
+    const changed = new Set<string>();
+    const seen = new Set<string>();
+    for (const p of pools) {
+      seen.add(p.address);
+      const sig = poolStateSig(p);
+      if (this.sigs.get(p.address) !== sig) {
+        changed.add(p.address);
+        this.sigs.set(p.address, sig);
+      }
+    }
+    for (const a of this.sigs.keys()) if (!seen.has(a)) this.sigs.delete(a);
+    return changed;
+  }
+
   /** Price, gas-adjust and rank; returns opportunities above `minNetUsd`. */
-  async scan(
-    block: number,
-    gas: GasQuote,
-    ethUsd: number,
-    minNetUsd: number,
-    opts: { blockTag?: number | "pending"; only?: Set<string>; stage?: "block" | "flashblock"; msIntoBlock?: number } = {},
-  ): Promise<Opportunity[]> {
-    const raw = this.findRaw(undefined, opts.only);
-    const subset = opts.only ? [...opts.only].map((a) => this.registry.pools.get(a)).filter((p): p is Pool => !!p) : undefined;
-    const routes = this.findRoutes(subset);
+  async scan(block: number, gas: GasQuote, ethUsd: number, minNetUsd: number, opts: ScanOptions = {}): Promise<Opportunity[]> {
+    const t0 = Date.now();
+    const F = this.funnel;
+    // The pools this scan sees: the registry's, with pre-confirmed copies swapped in and unknowns left out.
+    let pools: Pool[] | undefined;
+    if (opts.overlay || opts.exclude || opts.only) {
+      pools = [];
+      for (const p of this.registry.pools.values()) {
+        if (opts.exclude?.has(p.address) || (opts.only && !opts.only.has(p.address))) continue;
+        pools.push(opts.overlay?.get(p.address) ?? p);
+      }
+    }
+    // What to re-score: everything on a full scan, else only routes through a changed pool.
+    let changed: Set<string> | undefined;
+    let full = !!opts.full;
+    if (!full && !opts.changed) {
+      const ch = this.changedPools(pools ?? this.registry.pools.values());
+      if (block - this.lastFullScan >= this.fullRescanBlocks) full = true;
+      else changed = ch;
+    } else if (!full) {
+      changed = opts.changed;
+    }
+    if (full) {
+      this.lastFullScan = block;
+      if (!opts.changed && !opts.overlay) this.changedPools(pools ?? this.registry.pools.values());
+    }
+    const stats = { cycles: 0, unchanged: 0, rotations: 0 };
+    const raw = this.findRaw(undefined, undefined, changed, pools, stats);
+    const routes = this.findRoutes(pools, changed, stats);
     const gasUsd = weiToUsd(gas.totalWei, ethUsd);
     const gasPrice = gas.baseFeeWei + gas.priorityFeeWei;
     const opps: Opportunity[] = [];
-    const F = this.funnel;
     F.scans++;
     F.candidates += raw.length + routes.length;
+    F.unchanged += stats.unchanged;
+    F.rotations += stats.rotations;
     const priceOut = (netUsd: number): boolean => {
       if (netUsd >= minNetUsd) return false;
       if (netUsd < 0) F.gasAteIt++;
       else F.belowMin++;
       return true;
     };
+    const tooGood = (profitUsd: number): boolean => {
+      if (profitUsd <= this.sanityMaxProfitUsd) return false;
+      F.outlier++;
+      return true;
+    };
+    const countVenues = (dexes: string[]) => {
+      for (const d of new Set(dexes)) this.venues[d] = (this.venues[d] ?? 0) + 1;
+    };
     this.lastCandidatePools = new Set([...raw.flatMap((q) => [q.buyPool.address, q.sellPool.address]), ...routes.flatMap((r) => r.pools.map((p) => p.address))]);
     for (const r of routes) {
+      countVenues(r.pools.map((p) => p.dex));
       const tokenIn = r.tokens[0]!;
       const profitUsd = this.registry.usdValue(tokenIn, r.profit, ethUsd);
       if (profitUsd === null) {
         F.unpriced++;
         continue;
       }
+      if (tooGood(profitUsd)) continue;
       const routeGasUsd = weiToUsd(BigInt(this.routeGasUnits(r.pools)) * gasPrice + gas.l1FeeWei, ethUsd);
       const netUsd = profitUsd - routeGasUsd;
       if (priceOut(netUsd)) continue;
@@ -281,18 +419,20 @@ export class Scanner {
       });
     }
     for (const q of raw) {
+      const buy = q.buyPool as Pool;
+      const sell = q.sellPool as Pool;
+      countVenues([buy.dex, sell.dex]);
       const profitUsd = this.registry.usdValue(q.tokenIn, q.profit, ethUsd);
       if (profitUsd === null) {
         F.unpriced++; // cannot price -> cannot judge; skip
         continue;
       }
+      if (tooGood(profitUsd)) continue;
       const netUsd = profitUsd - gasUsd;
       if (priceOut(netUsd)) continue;
-      const buy = q.buyPool as Pool;
-      const sell = q.sellPool as Pool;
       const pair = [buy.token0, buy.token1].sort().join("-");
       opps.push({
-        id: `${block}-${buy.address.slice(2, 10)}-${sell.address.slice(2, 10)}-${q.tokenIn.slice(2, 8)}`,
+        id: `${block}-${opts.stage === "flashblock" ? "fb-" : ""}${buy.address.slice(2, 10)}-${sell.address.slice(2, 10)}-${q.tokenIn.slice(2, 8)}`,
         block,
         foundAt: new Date().toISOString(),
         pair,
@@ -316,6 +456,13 @@ export class Scanner {
         stage: opts.stage ?? "block",
         ...(opts.msIntoBlock !== undefined ? { msIntoBlock: opts.msIntoBlock } : {}),
       });
+    }
+    // Still-open routes: the confirmed-block scan keeps the set, so an unchanged spread isn't
+    // re-reported (or re-simulated) every block yet still counts as one open trade.
+    if ((opts.stage ?? "block") === "block" && !opts.overlay) {
+      const passing = new Set(opps.map(routeKeyOf));
+      for (const [k, ps] of this.open) if (!passing.has(k) && (full || ps.some((p) => changed!.has(p)))) this.open.delete(k);
+      for (const o of opps) this.open.set(routeKeyOf(o), poolsOf(o));
     }
     opps.sort((a, b) => b.netUsd - a.netUsd);
     // Routes that share a pool compete for the same reserves, so only one of them can be
@@ -350,6 +497,7 @@ export class Scanner {
       for (const p of ps) usedPools.add(p);
       return true;
     });
+    const t1 = Date.now();
     const tag = opts.blockTag ?? block;
     const classic = unique.filter((o) => !o.route);
     const multi = unique.filter((o) => o.route);
@@ -365,6 +513,7 @@ export class Scanner {
       else if (o.sim === "quoter-mismatch") F.quoteMismatch++;
       else F.unverified++;
     }
+    this.lastTiming = { findMs: t1 - t0, verifyMs: Date.now() - t1, scored: stats.cycles - stats.unchanged, unchanged: stats.unchanged, candidates: raw.length + routes.length, changedPools: changed?.size ?? (pools ?? [...this.registry.pools.values()]).length, full };
     return unique;
   }
 
@@ -377,8 +526,14 @@ export class Scanner {
     scans: 0,
     /** Positive spread after swap fees, before gas (NET_PROFIT not yet known). */
     candidates: 0,
+    /** Routes not re-scored because none of their pools changed since the last scan (repeated work avoided). */
+    unchanged: 0,
+    /** The same cycle reached again from another start token (WETH>…>USDC>WETH vs USDC>…>WETH>USDC); scored once. */
+    rotations: 0,
     /** Profit token has no USD price. */
     unpriced: 0,
+    /** Valued above SANITY_MAX_PROFIT_USD: a pricing error, not an opportunity. */
+    outlier: 0,
     /** Gas cost more than the spread (net < 0). */
     gasAteIt: 0,
     /** Net positive but below MIN_PROFIT_USD. */
@@ -418,12 +573,56 @@ export class Scanner {
     return o.route.pools.some((a) => QUOTE_ONLY_KINDS.has(this.registry.pools.get(a)?.kind ?? ""));
   }
 
+  /**
+   * Run every simulate() call of a scan in one Multicall3 request (with the state override, when
+   * the bytecode is injected) instead of one eth_call each. Each sub-call reverts on purpose; its
+   * revert data comes back as returnData. Returns false when the batch itself failed, so the
+   * caller falls back to one call per opportunity.
+   */
+  private async simulateBatch(
+    items: Array<{ o: Opportunity; target: string; data: string }>,
+    tag: number | "pending",
+    overrides: Record<string, { code: string }> | undefined,
+    iface: typeof executorIface,
+  ): Promise<boolean> {
+    let res: Array<{ success: boolean; returnData: string }>;
+    try {
+      res = await this.chain.multicall(
+        items.map((x) => ({ target: x.target, callData: x.data, allowFailure: true })),
+        tag,
+        overrides,
+        SIM_BATCH,
+      );
+    } catch (err) {
+      log.debug("batched simulation failed, simulating one by one:", (err as Error).message.slice(0, 120));
+      return false;
+    }
+    // Every sub-call "succeeding" with no data means the target has no code: the RPC ignored the
+    // state override. Let the one-by-one path detect that and switch to quoters.
+    if (overrides && res.every((r) => r.success && (r.returnData === "0x" || r.returnData === ""))) return false;
+    // simulate() always reverts with data (Simulated or a reason). A batch where every call reverted
+    // empty-handed says more about the batch (gas cap, a provider quirk) than about the routes: check
+    // them one by one rather than muting them all.
+    if (res.every((r) => !r.success && (r.returnData === "0x" || r.returnData === ""))) return false;
+    items.forEach(({ o }, i) => {
+      const r = res[i]!;
+      if (r.success) {
+        o.sim = "executor-revert";
+        o.simDetail = "simulate() returned instead of reverting with Simulated(profit)";
+        return;
+      }
+      applySimRevert(o, r.returnData, iface);
+    });
+    return true;
+  }
+
   private async verifyRoutesVia(opps: Opportunity[], tag: number | "pending", mode: "executor" | "override" | "quoter"): Promise<void> {
     if (mode !== "quoter") {
+      const target = mode === "executor" ? this.routeOpts!.routeExecutorAddress! : SIM_ROUTE_OVERRIDE_ADDRESS;
+      const items = opps.map((o) => ({ o, target, data: routeExecutorIface.encodeFunctionData("simulate", [o.route!.tokens, this.hopStructs(o), o.amountIn, flashSourceId(this.routeOpts!.flashSource)]) }));
+      if (await this.simulateBatch(items, tag, mode === "override" ? { [target]: { code: ROUTE_EXECUTOR_RUNTIME } } : undefined, routeExecutorIface)) return;
       await Promise.all(
-        opps.map(async (o) => {
-          const target = mode === "executor" ? this.routeOpts!.routeExecutorAddress! : SIM_ROUTE_OVERRIDE_ADDRESS;
-          const data = routeExecutorIface.encodeFunctionData("simulate", [o.route!.tokens, this.hopStructs(o), o.amountIn, flashSourceId(this.routeOpts!.flashSource)]);
+        items.map(async ({ o, data }) => {
           try {
             if (mode === "override") await this.chain.callWithOverrides(target, data, tag, { [target]: { code: ROUTE_EXECUTOR_RUNTIME } });
             else await this.chain.call(target, data, tag);
@@ -433,19 +632,8 @@ export class Scanner {
             const e = err as { data?: string; message?: string; error?: { data?: string }; info?: { error?: { data?: string } } };
             const revertData = e.data ?? e.error?.data ?? e.info?.error?.data;
             if (typeof revertData === "string") {
-              try {
-                const parsed = routeExecutorIface.parseError(revertData);
-                if (parsed?.name === "Simulated") {
-                  o.sim = "executor-ok";
-                  o.simDetail = `on-chain profit ${parsed.args[0]}${parsed.args[0] !== o.profit ? ` (local ${o.profit})` : ""}`;
-                  return;
-                }
-                o.sim = "executor-revert";
-                o.simDetail = parsed ? `${parsed.name}(${parsed.args.map(String).join(",")})` : revertData.slice(0, 20);
-                return;
-              } catch {
-                /* fall through */
-              }
+              applySimRevert(o, revertData, routeExecutorIface);
+              return;
             }
             o.sim = "executor-revert";
             o.simDetail = (e.message ?? "unknown revert").slice(0, 160);
@@ -519,6 +707,12 @@ export class Scanner {
    * otherwise ask each DEX's own quoter for the two hops.
    */
   private async verify(opps: Opportunity[], block: number | "pending"): Promise<void> {
+    if (this.simMode === "executor" || this.simMode === "override") {
+      const override = this.simMode === "override";
+      const target = override ? SIM_OVERRIDE_ADDRESS : this.executorAddress!;
+      const items = opps.map((o) => ({ o, target, data: executorIface.encodeFunctionData("simulate", [o.buyPool, o.sellPool, o.tokenIn, o.amountIn, o.amountMid, o.amountOut, true]) }));
+      if (await this.simulateBatch(items, block, override ? { [target]: { code: SIM_EXECUTOR_RUNTIME } } : undefined, executorIface)) return;
+    }
     if (this.simMode === "executor") {
       await Promise.all(opps.map((o) => this.verifyWithExecutor(o, block, this.executorAddress!)));
       return;
@@ -585,26 +779,46 @@ export class Scanner {
         }
       }
       if (typeof revertData === "string") {
-        try {
-          const parsed = executorIface.parseError(revertData);
-          if (parsed?.name === "Simulated") {
-            const profit = parsed.args[0] as bigint;
-            o.sim = "executor-ok";
-            o.simDetail = `on-chain profit ${profit}`;
-            if (profit !== o.profit) o.simDetail += ` (local ${o.profit})`;
-            return;
-          }
-          o.sim = "executor-revert";
-          o.simDetail = parsed ? `${parsed.name}(${parsed.args.map(String).join(",")})` : revertData.slice(0, 20);
-          return;
-        } catch {
-          /* fall through */
-        }
+        applySimRevert(o, revertData, executorIface);
+        return;
       }
       o.sim = "executor-revert";
       o.simDetail = (e.message ?? "unknown revert").slice(0, 160);
     }
   }
+}
+
+/** simulate() calls per batched eth_call (each runs a full flash-loan route, so keep the gas per request sane). */
+const SIM_BATCH = 20;
+
+/** Read a simulate() revert: Simulated(profit) means it would have worked; anything else is why it wouldn't. */
+function applySimRevert(o: Opportunity, revertData: string, iface: typeof executorIface): void {
+  try {
+    const parsed = iface.parseError(revertData);
+    if (parsed?.name === "Simulated") {
+      const profit = parsed.args[0] as bigint;
+      o.sim = "executor-ok";
+      o.simDetail = `on-chain profit ${profit}${profit !== o.profit ? ` (local ${o.profit})` : ""}`;
+      return;
+    }
+    o.sim = "executor-revert";
+    o.simDetail = parsed ? `${parsed.name}(${parsed.args.map(String).join(",")})` : revertData.slice(0, 20) || "reverted without data";
+  } catch {
+    o.sim = "executor-revert";
+    o.simDetail = revertData && revertData !== "0x" ? revertData.slice(0, 20) : "reverted without data";
+  }
+}
+
+/** Pools grouped by unordered token pair (like PoolRegistry.groups, over any list). */
+function groupByPair(pools: Iterable<Pool>): Map<string, Pool[]> {
+  const g = new Map<string, Pool[]>();
+  for (const p of pools) {
+    const k = pairKey(p.token0, p.token1);
+    const arr = g.get(k);
+    if (arr) arr.push(p);
+    else g.set(k, [p]);
+  }
+  return g;
 }
 
 function quoterCall(pool: Pool, tokenIn: string, amountIn: bigint): Call {

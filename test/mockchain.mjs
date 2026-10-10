@@ -246,14 +246,41 @@ export class MockChain {
     };
   }
 
-  multicall(data) {
+  /**
+   * Emulate an ArbExecutor.simulate() call made through a state override: the real bot injects the
+   * contract's bytecode; this mock has no EVM, so it reproduces the contract's arithmetic with its own
+   * pool formulas (and a fee-on-transfer trap). Always throws, like the contract: a revert with data.
+   */
+  simulateOverride(data) {
+    if (data.slice(0, 10) !== SIMULATE_SELECTOR) throw Object.assign(new Error("execution reverted"), { code: 3, data: "0x" });
+    const [buyPool, sellPool, tokenIn, amountIn, amountMid, amountOut] = abi.decode(["address", "address", "address", "uint256", "uint256", "uint256", "bool"], "0x" + data.slice(10));
+    const buy = this.pools.get(buyPool.toLowerCase()), sell = this.pools.get(sellPool.toLowerCase());
+    const revert = (payload) => { throw Object.assign(new Error("execution reverted"), { code: 3, data: payload }); };
+    if (!buy || !sell) revert("0x");
+    const tin = tokenIn.toLowerCase();
+    const tokenMid = tin === buy.token0 ? buy.token1 : buy.token0;
+    // fee-on-transfer tokens deliver less than the pool paid out -> hop 2 breaks the K check
+    const taxed = (tok, amt) => (this.feeOnTransfer.has(tok) ? amt - amt / 20n : amt);
+    const mid = this.quote(buy, tin, taxed(tin, amountIn));
+    if (mid < amountMid) revert("0x" + "08c379a0" + abi.encode(["string"], ["K"]).slice(2));
+    const out = this.quote(sell, tokenMid, taxed(tokenMid, amountMid));
+    if (out < amountOut) revert("0x" + "08c379a0" + abi.encode(["string"], ["K"]).slice(2));
+    const received = taxed(tin, amountOut);
+    const profit = received - amountIn;
+    if (profit <= 0n) revert("0x4e88422a" + abi.encode(["uint256", "uint256"], [0n, 1n]).slice(2));
+    revert("0x6f149831" + abi.encode(["uint256"], [profit]).slice(2));
+  }
+
+  multicall(data, overrides) {
     const [calls] = ifaces.multicall.decodeFunctionData("aggregate3", data);
     const results = calls.map((c) => {
+      const target = c.target.toLowerCase();
       try {
-        return { success: true, returnData: this.dispatch(c.target.toLowerCase(), c.callData) };
+        if (overrides && overrides[target] && overrides[target].code && !this.contracts.has(target)) this.simulateOverride(c.callData);
+        return { success: true, returnData: this.dispatch(target, c.callData) };
       } catch (err) {
         if (!c.allowFailure) throw err;
-        return { success: false, returnData: "0x" };
+        return { success: false, returnData: typeof err.data === "string" ? err.data : "0x" };
       }
     });
     return ifaces.multicall.encodeFunctionResult("aggregate3", [results]);
@@ -279,29 +306,10 @@ export class MockChain {
       case "eth_call": {
         const [tx, , overrides] = params;
         const to = tx.to.toLowerCase();
-        // Emulate an ArbExecutor.simulate() call made through a state override: the real
-        // bot injects the contract's bytecode; this mock has no EVM, so it reproduces the
-        // contract's arithmetic with its own pool formulas (and a fee-on-transfer trap).
-        if (overrides && overrides[to] && overrides[to].code && !this.contracts.has(to)) {
-          const data = tx.data ?? tx.input;
-          if (data.slice(0, 10) !== SIMULATE_SELECTOR) throw Object.assign(new Error("execution reverted"), { code: 3, data: "0x" });
-          const [buyPool, sellPool, tokenIn, amountIn, amountMid, amountOut] = abi.decode(["address", "address", "address", "uint256", "uint256", "uint256", "bool"], "0x" + data.slice(10));
-          const buy = this.pools.get(buyPool.toLowerCase()), sell = this.pools.get(sellPool.toLowerCase());
-          const revert = (payload) => { throw Object.assign(new Error("execution reverted"), { code: 3, data: payload }); };
-          if (!buy || !sell) revert("0x");
-          const tin = tokenIn.toLowerCase();
-          const tokenMid = tin === buy.token0 ? buy.token1 : buy.token0;
-          // fee-on-transfer tokens deliver less than the pool paid out -> hop 2 breaks the K check
-          const taxed = (tok, amt) => (this.feeOnTransfer.has(tok) ? amt - amt / 20n : amt);
-          const mid = this.quote(buy, tin, taxed(tin, amountIn));
-          if (mid < amountMid) revert("0x" + "08c379a0" + abi.encode(["string"], ["K"]).slice(2));
-          const out = this.quote(sell, tokenMid, taxed(tokenMid, amountMid));
-          if (out < amountOut) revert("0x" + "08c379a0" + abi.encode(["string"], ["K"]).slice(2));
-          const received = taxed(tin, amountOut);
-          const profit = received - amountIn;
-          if (profit <= 0n) revert("0x4e88422a" + abi.encode(["uint256", "uint256"], [0n, 1n]).slice(2));
-          revert("0x6f149831" + abi.encode(["uint256"], [profit]).slice(2));
-        }
+        // Emulate an ArbExecutor.simulate() call made through a state override (see simulateOverride).
+        if (overrides && overrides[to] && overrides[to].code && !this.contracts.has(to)) this.simulateOverride(tx.data ?? tx.input);
+        // A batch of simulations: Multicall3 under the same state override, as a real node runs it.
+        if (overrides && to === MULTICALL3) return this.multicall(tx.data ?? tx.input, overrides);
         return this.dispatch(to, tx.data ?? tx.input);
       }
       case "eth_getBlockByNumber": {

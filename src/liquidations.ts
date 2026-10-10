@@ -10,9 +10,10 @@
  *      block: new borrowers join the watch list (persisted to
  *      data/aave-borrowers.json so it grows across runs); liquidations by
  *      other bots resolve our pending candidates as "taken".
- *   2. Checks health factors with getUserAccountData in one multicall —
- *      borrowers near the line (HF < 1.10) every LIQ_CHECK_EVERY blocks,
- *      everyone else 12x less often.
+ *   2. Every LIQ_CHECK_EVERY blocks (not every block: the RPC budget), checks
+ *      health factors with getUserAccountData in one multicall — borrowers
+ *      near the line (HF < 1.10) on every run, everyone else every 12th run.
+ *      Events are still read every block, from the shared log fetch.
  *   3. For each HF < 1 position, reads the user's per-reserve balances and
  *      oracle prices, picks the most valuable debt and collateral reserves and
  *      estimates the profit of liquidating:
@@ -116,6 +117,8 @@ export class LiquidationMonitor {
   private lastLogBlock = 0;
   private logRange = 500;
   private dirtyBorrowers = false;
+  /** Block of the last health-check run. */
+  private lastStep = -Infinity;
   stats = { checks: 0, liquidatable: 0, recorded: 0 };
   /** Live sender hook: called with each profitable liquidatable position (set by main only when live). */
   onLiquidatable?: (pos: LiquidatablePosition) => void;
@@ -241,7 +244,11 @@ export class LiquidationMonitor {
    */
   async onBlock(block: number, ethUsd: number, gasPriceWei: bigint, logs?: Log[]): Promise<void> {
     if (logs) this.ingest(logs, block);
+    // Health checks run every LIQ_CHECK_EVERY blocks, all due borrowers in one batch: the same
+    // sub-calls as checking a slice every block, in a fifth of the requests.
+    if (block - this.lastStep < this.opts.checkEvery) return;
     if (this.busy) return;
+    this.lastStep = block;
     this.busy = true;
     try {
       await this.step(block, ethUsd, gasPriceWei);
@@ -262,9 +269,11 @@ export class LiquidationMonitor {
 
     const nearEvery = this.opts.checkEvery;
     const farEvery = this.opts.checkEvery * 12;
+    // A borrower checked on the last run (exactly checkEvery ago) is due again; allow a block of slack
+    // since runs land on whichever block the loop processes.
     const due = [...this.borrowers.entries()].filter(([, b]) => {
       const every = b.hf !== null && b.hf < 1.1 ? nearEvery : farEvery;
-      return block - b.lastChecked >= every;
+      return block - b.lastChecked >= every - 1;
     });
     if (due.length) {
       const calls: Call[] = due.map(([u]) => ({ target: AAVE_V3.pool, callData: aavePoolIface.encodeFunctionData("getUserAccountData", [u]) }));
@@ -292,10 +301,13 @@ export class LiquidationMonitor {
         for (const u of underwater.slice(0, 10)) await this.evaluate(block, u.user, u.hf, ethUsd, gasPriceWei).catch((e: Error) => log.warn("liquidation evaluate failed:", e.message.slice(0, 120)));
       }
     }
-    if (this.dirtyBorrowers && block % 100 === 0) this.saveBorrowers(block);
+    if (this.dirtyBorrowers && block - this.lastSave >= 100) this.saveBorrowers(block);
   }
 
+  private lastSave = 0;
+
   saveBorrowers(block: number): void {
+    this.lastSave = block;
     this.store.writeJson(BORROWERS_FILE, { lastBlock: block, borrowers: [...this.borrowers.keys()] });
     this.dirtyBorrowers = false;
   }
@@ -400,7 +412,8 @@ export class LiquidationMonitor {
       const b = this.borrowers.get(user);
       // Gone from the watch list = debt fully repaid by the borrower.
       if (!b || (b.hf !== null && b.hf >= 1 && b.lastChecked > p.rec.block)) this.finish(user, p, "recovered");
-      else if (p.checks >= this.opts.outcomeBlocks) this.finish(user, p, "open");
+      // By blocks, not runs: health checks now run every LIQ_CHECK_EVERY blocks.
+      else if (block - p.rec.block >= this.opts.outcomeBlocks) this.finish(user, p, "open");
     }
   }
 

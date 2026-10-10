@@ -3,7 +3,8 @@
  * batching, typed helpers and a block feed that uses WebSocket push when a
  * WS_URL is configured and polling otherwise.
  */
-import { JsonRpcProvider, Network, WebSocketProvider, type Log } from "ethers";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { FetchRequest, JsonRpcProvider, Network, WebSocketProvider, type Log } from "ethers";
 import { MULTICALL3, CHAIN_ID } from "./config.js";
 import { multicall3Iface } from "./abi.js";
 import { log } from "./log.js";
@@ -20,6 +21,23 @@ export interface CallResult {
 }
 
 export type BlockTag = number | "latest" | "pending";
+
+/**
+ * What a request is for ("refresh", "verify", "liquidations", ...), so the RPC panel can show
+ * where the eth_call budget goes. Set with withPurpose(); requests outside one count as "other".
+ */
+const purposeStore = new AsyncLocalStorage<string>();
+export function withPurpose<T>(purpose: string, fn: () => Promise<T>): Promise<T> {
+  return purposeStore.run(purpose, fn);
+}
+
+/** Thrown when a request (retries included) runs past its deadline. Counts as transient. */
+export class RpcDeadlineError extends Error {
+  readonly code = "TIMEOUT";
+  constructor(method: string, ms: number) {
+    super(`${method} timed out after ${ms} ms`);
+  }
+}
 
 /**
  * Retry transient RPC failures (rate limits, timeouts, resets); never retry a
@@ -99,16 +117,18 @@ export interface ChainOptions {
   batchMaxCount?: number;
   /** Sub-calls per aggregate3. */
   chunkSize?: number;
+  /** One HTTP request may take this long before it is abandoned (and retried). */
+  timeoutMs?: number;
 }
 
 /** Conservative defaults for the free public endpoint, generous ones for a real provider. */
 export function defaultChainOptions(rpcUrl: string): Required<ChainOptions> {
   const isPublic = /mainnet\.base\.org|base\.blockpi|publicnode|llamarpc|drpc\.org\/public|1rpc\.io/.test(rpcUrl);
-  if (isPublic) return { concurrency: 1, minIntervalMs: 350, batchMaxCount: 4, chunkSize: 120 };
+  if (isPublic) return { concurrency: 1, minIntervalMs: 350, batchMaxCount: 4, chunkSize: 120, timeoutMs: 10_000 };
   // Alchemy's free tier meters throughput in compute units per second; a
   // handful of requests in flight keeps discovery fast without tripping it.
-  if (/alchemy\.com/.test(rpcUrl)) return { concurrency: 2, minIntervalMs: 60, batchMaxCount: 8, chunkSize: 150 };
-  return { concurrency: 6, minIntervalMs: 0, batchMaxCount: 20, chunkSize: 150 };
+  if (/alchemy\.com/.test(rpcUrl)) return { concurrency: 2, minIntervalMs: 60, batchMaxCount: 8, chunkSize: 150, timeoutMs: 10_000 };
+  return { concurrency: 6, minIntervalMs: 0, batchMaxCount: 20, chunkSize: 150, timeoutMs: 10_000 };
 }
 
 /**
@@ -146,6 +166,10 @@ export interface RpcUsage {
   /** Transient failures (timeouts, resets, 5xx) and, among them, rate-limit answers (429 and similar). */
   transientErrors: number;
   rateLimited: number;
+  /** Requests that hit their deadline (RPC_TIMEOUT_MS) instead of answering. */
+  timeouts: number;
+  /** eth_call requests by what they were for (refresh, verify, liquidations, ...). */
+  callsByPurpose: Record<string, number>;
 }
 
 interface Endpoint {
@@ -155,6 +179,13 @@ interface Endpoint {
   pacer: Pacer;
   /** Not used again before this time after it failed. */
   coolUntil: number;
+}
+
+/** An ethers FetchRequest with our per-request timeout (ethers' default is five minutes). */
+function fetchRequest(url: string, timeoutMs: number): FetchRequest {
+  const req = new FetchRequest(url);
+  req.timeout = timeoutMs;
+  return req;
 }
 
 /** Hide API keys when an endpoint is logged or shown in the dashboard. */
@@ -186,7 +217,7 @@ export class Chain {
         opts,
         pacer: new Pacer(opts.minIntervalMs),
         coolUntil: 0,
-        provider: new JsonRpcProvider(url, network, {
+        provider: new JsonRpcProvider(fetchRequest(url, opts.timeoutMs), network, {
           staticNetwork: network,
           batchMaxCount: opts.batchMaxCount,
           batchStallTime: 5,
@@ -230,8 +261,15 @@ export class Chain {
     log.warn(`rpc: ${redactUrl(from.url)} keeps failing (${describeError(err).slice(0, 80)}); switching to ${redactUrl(this.endpoints[next]!.url)}`);
   }
 
+  private purposeCounts = new Map<string, number>();
+  private timeoutCount = 0;
+
   private count(method: string, n = 1): void {
     this.counts.set(method, (this.counts.get(method) ?? 0) + n);
+    if (method === "eth_call") {
+      const p = purposeStore.getStore() ?? "other";
+      this.purposeCounts.set(p, (this.purposeCounts.get(p) ?? 0) + n);
+    }
   }
 
   /** Requests made so far, by method, with an Alchemy compute-unit estimate. */
@@ -255,6 +293,8 @@ export class Chain {
       failovers: this.failoverCount,
       transientErrors: this.transientCount,
       rateLimited: this.rateLimitCount,
+      timeouts: this.timeoutCount,
+      callsByPurpose: Object.fromEntries(this.purposeCounts),
     };
   }
 
@@ -262,6 +302,7 @@ export class Chain {
   private rateLimitCount = 0;
   private noteTransient = (err: unknown): void => {
     this.transientCount++;
+    if ((err as { code?: string }).code === "TIMEOUT") this.timeoutCount++;
     if (/429|rate limit|too many requests|limit exceeded|capacity|-32005|-32016/i.test(describeError(err))) this.rateLimitCount++;
   };
 
@@ -270,6 +311,25 @@ export class Chain {
    * retry; if the endpoint still fails, the next configured endpoint takes over.
    */
   private async rpc<T>(method: string, fn: (p: JsonRpcProvider) => Promise<T>): Promise<T> {
+    // The provider's own timeout covers one HTTP request; this bounds a whole call including its
+    // retries and failovers, so nothing upstream (block handler, dashboard) can hang on a dead socket.
+    const ms = this.opts.timeoutMs * 3;
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.timeoutCount++;
+        reject(new RpcDeadlineError(method, ms));
+      }, ms);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([this.rpcInner(method, fn), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async rpcInner<T>(method: string, fn: (p: JsonRpcProvider) => Promise<T>): Promise<T> {
     let lastErr: unknown;
     const tries = Math.max(1, this.endpoints.length);
     for (let t = 0; t < tries; t++) {
@@ -316,10 +376,17 @@ export class Chain {
     return this.rpc("eth_call", async (p) => (await p.send("eth_call", [{ to, data }, tag, overrides])) as string);
   }
 
-  /** Execute many view calls in as few round trips as possible. Order is preserved. */
-  async multicall(calls: Call[], blockTag: BlockTag = "latest"): Promise<CallResult[]> {
+  /**
+   * Execute many view calls in as few round trips as possible. Order is preserved.
+   *
+   * With `overrides` the whole aggregate3 runs under that eth_call state override, which is how
+   * simulations of injected bytecode are batched: one request for every candidate in a block
+   * instead of one each. A sub-call that reverts comes back as success=false with its revert data.
+   */
+  async multicall(calls: Call[], blockTag: BlockTag = "latest", overrides?: Record<string, { code?: string; balance?: string }>, chunkSizeOverride?: number): Promise<CallResult[]> {
     const out: CallResult[] = new Array(calls.length);
-    const { chunkSize, concurrency } = this.opts;
+    const { concurrency } = this.opts;
+    const chunkSize = chunkSizeOverride ?? this.opts.chunkSize;
     const chunks: Array<{ start: number; calls: Call[] }> = [];
     for (let i = 0; i < calls.length; i += chunkSize) {
       chunks.push({ start: i, calls: calls.slice(i, i + chunkSize) });
@@ -333,7 +400,10 @@ export class Chain {
         const data = multicall3Iface.encodeFunctionData("aggregate3", [
           chunk.map((c) => ({ target: c.target, allowFailure: c.allowFailure ?? true, callData: c.callData })),
         ]);
-        const raw = await this.rpc("eth_call", (p) => p.call({ to: MULTICALL3, data, blockTag }));
+        const tag = typeof blockTag === "number" ? "0x" + blockTag.toString(16) : blockTag;
+        const raw = overrides
+          ? await this.rpc("eth_call", async (p) => (await p.send("eth_call", [{ to: MULTICALL3, data }, tag, overrides])) as string)
+          : await this.rpc("eth_call", (p) => p.call({ to: MULTICALL3, data, blockTag }));
         const [results] = multicall3Iface.decodeFunctionResult("aggregate3", raw) as unknown as [
           Array<{ success: boolean; returnData: string }>,
         ];
@@ -367,11 +437,25 @@ export class Chain {
    * quickly. That is ~1.5 eth_blockNumber calls per block instead of 4 at a fixed
    * 500ms, which matters on metered RPC plans.
    */
-  async subscribeBlocks(onBlock: (blockNumber: number) => Promise<void>, fastPollMs = 250): Promise<() => void> {
+  async subscribeBlocks(
+    onBlock: (blockNumber: number) => Promise<void>,
+    fastPollMs = 250,
+    watchdog?: { maxHandlerMs: number; onStall: (block: number, ms: number) => void },
+  ): Promise<() => void> {
     let last = 0;
     let running = false;
     let pending: number | null = null;
+    // Bumped when the watchdog gives up on a handler, so a handler that finally returns after
+    // being abandoned can't clear the flag of the one that replaced it.
+    let generation = 0;
 
+    const next = () => {
+      if (pending !== null && pending > last) {
+        const n = pending;
+        pending = null;
+        void handle(n);
+      }
+    };
     const handle = async (n: number) => {
       if (n <= last) return;
       if (running) {
@@ -379,17 +463,30 @@ export class Chain {
         return;
       }
       running = true;
+      const gen = ++generation;
+      const startedAt = Date.now();
+      // Scan-loop watchdog: a block handler stuck on something without a timeout would stop the
+      // bot from seeing any later block. After maxHandlerMs, report it and let the next block run.
+      const dog = watchdog
+        ? setTimeout(() => {
+            if (gen !== generation || !running) return;
+            generation++;
+            running = false;
+            watchdog.onStall(n, Date.now() - startedAt);
+            next();
+          }, watchdog.maxHandlerMs)
+        : undefined;
+      dog?.unref?.();
       try {
         last = n;
         await onBlock(n);
       } catch (err) {
         log.error("block handler failed", n, (err as Error).message);
       } finally {
-        running = false;
-        if (pending !== null && pending > last) {
-          const next = pending;
-          pending = null;
-          void handle(next);
+        clearTimeout(dog);
+        if (gen === generation) {
+          running = false;
+          next();
         }
       }
     };

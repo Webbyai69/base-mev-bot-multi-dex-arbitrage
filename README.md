@@ -17,6 +17,45 @@ competitor leaderboard, most-arbed pairs and a daily HTML report.
               ──► every minute: reports/YYYY-MM-DD.html
 ```
 
+## What's new in 0.9.1: every Flashblock, less repeated work, fewer RPC calls
+
+Fixes from the 10 Oct monitoring run.
+
+- **Flashblocks on every Flashblock.** The loop now follows Base's Flashblocks
+  websocket (`FLASHBLOCKS_WS_URL`, default `wss://mainnet.flashblocks.base.org/ws`).
+  Each ~200 ms Flashblock carries its transactions' logs. Those logs update
+  *copies* of the pools they touch with no RPC call, and only routes through those
+  pools are re-scored. The old loop paused for the whole confirmed-block handler
+  (about 2 s, so almost always) and re-read 120 pools through the public endpoint
+  every 400 ms. That read took longer than a block, so it was thrown away: 16 scans
+  in 78 minutes. With the stream down, the poll still runs as a fallback.
+- **Only changed routes are re-scored.** A route whose pools all kept their state
+  gives the same answer, so it isn't sized, priced or simulated again. Everything is
+  re-checked every `FULL_RESCAN_BLOCKS` (30). Each cycle is scored once whichever
+  token it's read from (WETH>…>USDC>WETH and USDC>…>WETH>USDC were scored twice),
+  and the size search stops at about one part in a million of the range (about 3×
+  faster per route, same profit to within about 1e-14).
+- **Time per block** is logged (with a phase breakdown for any block over 2 s) and
+  shown on the dashboard, next to **Flashblocks scans per minute**.
+- **RPC:** every simulation in a scan goes out in one Multicall3 call under the
+  state override, not one `eth_call` each. Uniswap V4 pools follow the
+  PoolManager's Swap/ModifyLiquidity events instead of a StateView read of every
+  V4 pool every block. Aave health checks run every `LIQ_CHECK_EVERY` blocks in one
+  batch. `eth_call` is counted by purpose on the dashboard and in the digest.
+- **Insurance:** RPC requests time out (`RPC_TIMEOUT_MS`), and a scan-loop watchdog
+  (`BLOCK_WATCHDOG_MS`) reports a stuck block and moves on. The dashboard keeps
+  refreshing in a background tab, its requests time out, and every panel shows
+  "Data as of".
+- **Data:** prices come from the deepest pool with at least `PRICE_MIN_DEPTH_WETH` of
+  real tokens. Depth is real tokens, not a concentrated position's virtual
+  reserves (a WETH/wstETH range showed as 113,967 WETH). Anything valued over
+  `SANITY_MAX_PROFIT_USD` is treated as a pricing error. The rival leaderboard
+  credits arbitrage profit only.
+- Uniswap V4 pools are now kept in `data/pools.json`. A normal restart used to
+  drop them until the next `discover`.
+- `LIVE_ACT_ALWAYS` defaults to **false** (expected-value gating), and the bot
+  states the setting in force when it starts.
+
 ## What's new in 0.8: Aave liquidations go live
 
 The data made one thing clear (see [`docs/STRATEGY-0.8.md`](docs/STRATEGY-0.8.md)):

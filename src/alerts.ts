@@ -177,6 +177,15 @@ export class Alerts {
     }
   }
 
+  /** The scan-loop watchdog gave up waiting on a block handler (something hung past BLOCK_WATCHDOG_MS). */
+  handlerStalled(block: number, ms: number): Promise<boolean> {
+    return this.send(
+      `⚠️ <b>Block #${block} was still being processed after ${Math.round(ms / 1000)} s.</b> The watchdog moved on to the next block. If this repeats, the RPC endpoint is probably hanging.`,
+      "handler-stall",
+      30 * 60_000,
+    );
+  }
+
   blockProcessed(n: number): void {
     if (!this.stalled) return;
     this.stalled = false;

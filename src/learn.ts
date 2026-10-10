@@ -56,7 +56,15 @@ export interface LearnOptions {
   revertGasShare: number;
   /** Never bid more than this many gwei of priority fee. */
   maxBidGwei: number;
+  /** A trade valued above this (USD) is mispriced: it teaches nothing (SANITY_MAX_PROFIT_USD). */
+  maxUsd: number;
 }
+
+/**
+ * Most one trade adds to a pool's "edge seen" (USD). One mispriced trade used to put thousands of
+ * dollars of edge on a pool for days ($2,018, $1,722 on 10 Oct); a real spread still counts in full.
+ */
+export const EDGE_EVENT_CAP_USD = 50;
 
 export const DEFAULT_LEARN: LearnOptions = {
   halfLifeMs: 72 * HOUR,
@@ -64,6 +72,7 @@ export const DEFAULT_LEARN: LearnOptions = {
   pruneAfterMs: 3 * DAY,
   revertGasShare: 0.6,
   maxBidGwei: 2,
+  maxUsd: Infinity,
 };
 
 interface Rel {
@@ -147,6 +156,8 @@ interface Memory {
   rivals: Record<string, RivalRec>;
   prunedTotal: number;
   counts: { sims: number; outcomes: number; rivalArbs: number; liveSends: number };
+  /** 1 once edge sums built from mispriced trades were cleared (0.9.1); they rebuild with the caps. */
+  edgeRules?: number;
 }
 
 export interface Evaluation {
@@ -255,7 +266,7 @@ export class Learner {
   }
 
   private fresh(now: number): Memory {
-    return { v: 2, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, rivals: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 } };
+    return { v: 2, since: now, tokens: {}, pools: {}, routes: {}, poolSeen: {}, rivalFees: {}, rivals: {}, prunedTotal: 0, counts: { sims: 0, outcomes: 0, rivalArbs: 0, liveSends: 0 }, edgeRules: 1 };
   }
 
   // ------------------------------------------------------------- decayed counts
@@ -282,6 +293,13 @@ export class Learner {
       if (saved && saved.v === 2) {
         this.m = { ...this.fresh(saved.since ?? now), ...(saved as Memory) };
         this.pauseClock(now - (saved.savedAt ?? now));
+        if (!this.m.edgeRules) {
+          // Edge sums from before the price and sanity fixes include mispriced trades worth thousands;
+          // they're a decayed signal, so clearing them once costs little and they rebuild correctly.
+          for (const p of Object.values(this.m.poolSeen)) p.edgeUsd = dc();
+          this.m.edgeRules = 1;
+          this.dirty = true;
+        }
         return "loaded";
       }
       // An older memory was built with rules since corrected: learn it again from the data files.
@@ -440,7 +458,9 @@ export class Learner {
   onFound(o: Opportunity, now = Date.now()): void {
     const r = this.route(o, now);
     this.add(r.found, 1, now);
-    const edge = Math.max(0, o.profitUsd); // gross spread before gas — "how much money moved here"
+    // Gross spread before gas — "how much money moved here" — capped per trade, and nothing at all
+    // from a find valued past the sanity cap (a pricing error).
+    const edge = o.profitUsd > this.opts.maxUsd ? 0 : Math.min(EDGE_EVENT_CAP_USD, Math.max(0, o.profitUsd));
     for (const p of r.pools) {
       const rec = this.seen(p, now);
       rec.candidate = now;
@@ -511,7 +531,9 @@ export class Learner {
       if (d.type !== "arbitrage") continue;
       // Our own trades would teach it to bid against itself.
       if (d.bot && this.self.has(String(d.bot).toLowerCase())) continue;
-      const rivalEdge = typeof d.profitUsd === "number" && d.profitUsd > 0 ? d.profitUsd : 0;
+      // A rival profit past the sanity cap was mispriced (thin-pool price): it counts as unpriced.
+      const profitUsd = typeof d.profitUsd === "number" && d.profitUsd > 0 && d.profitUsd <= this.opts.maxUsd ? d.profitUsd : 0;
+      const rivalEdge = Math.min(EDGE_EVENT_CAP_USD, profitUsd);
       for (const p of d.pools) {
         const rec = this.seen(p.toLowerCase(), now);
         rec.rival = now;
@@ -519,7 +541,7 @@ export class Learner {
         if (rivalEdge > 0) this.bumpPool(rec, "edgeUsd", rivalEdge, now);
       }
       if (typeof d.priorityGwei === "number" && d.priorityGwei >= 0) {
-        const b = bucketOf(typeof d.profitUsd === "number" ? d.profitUsd : 0);
+        const b = bucketOf(profitUsd);
         const ring = (this.m.rivalFees[b] ??= []);
         ring.push(Math.round(d.priorityGwei * 1e6) / 1e6);
         if (ring.length > FEE_RING) ring.splice(0, ring.length - FEE_RING);
@@ -530,7 +552,7 @@ export class Learner {
         const r = (this.m.rivals[bot] ??= { firstSeen: now, lastSeen: now, arbs: 0, profitUsd: 0, pools: {}, tokens: {}, dexes: {}, senders: {}, hours: new Array(24).fill(0) as number[], fees: [] });
         r.lastSeen = now;
         r.arbs++;
-        r.profitUsd += typeof d.profitUsd === "number" ? d.profitUsd : 0;
+        r.profitUsd += profitUsd;
         for (const p of d.pools) bumpCapped(r.pools, p.toLowerCase(), RIVAL_MAP_CAP);
         for (const t of d.tokens) bumpCapped(r.tokens, t.toLowerCase(), RIVAL_MAP_CAP);
         for (const x of d.dexes) bumpCapped(r.dexes, x, RIVAL_MAP_CAP);

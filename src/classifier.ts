@@ -101,6 +101,13 @@ export class Classifier {
   private poolMeta = new Map<string, PoolMeta>();
   /** Max transaction receipts fetched per block for bot gas costs (15 CU each on Alchemy). */
   maxReceiptsPerBlock = 4;
+  /** A profit valued above this (USD) is a pricing error: recorded as unpriced (SANITY_MAX_PROFIT_USD). */
+  maxUsd = Infinity;
+
+  private priced(token: string, amount: bigint, ethUsd: number): number | null {
+    const v = this.registry.usdValue(token, amount, ethUsd);
+    return v !== null && v <= this.maxUsd ? v : null;
+  }
 
   constructor(readonly chain: Chain, readonly registry: PoolRegistry, readonly store: Store) {}
 
@@ -249,7 +256,7 @@ export class Classifier {
         profitToken,
         profitTokenSymbol: this.registry.symbol(profitToken),
         profitAmount,
-        profitUsd: this.registry.usdValue(profitToken, profitAmount, ethUsd),
+        profitUsd: this.priced(profitToken, profitAmount, ethUsd),
       });
     }
     return out;
@@ -280,6 +287,9 @@ export class Classifier {
           const profitToken = front.tokenIn;
           const profitAmount = back.amountOut - front.amountIn;
           if (profitAmount <= 0n) continue; // two-way flow that lost money is not a sandwich (market making, retries)
+          // The back-run must sell what the front-run bought. When the amounts differ (a market maker
+          // trading inventory both ways), "out minus in" is not a profit: keep the record, unpriced.
+          const matched = front.amountOut > 0n && (back.amountIn > front.amountOut ? back.amountIn - front.amountOut : front.amountOut - back.amountIn) * 100n <= front.amountOut;
           out.push({
             kind: "mev",
             type: "sandwich",
@@ -295,7 +305,7 @@ export class Classifier {
             profitToken,
             profitTokenSymbol: this.registry.symbol(profitToken),
             profitAmount,
-            profitUsd: profitAmount > 0n ? this.registry.usdValue(profitToken, profitAmount, ethUsd) : 0,
+            profitUsd: matched ? this.priced(profitToken, profitAmount, ethUsd) : null,
             victimTx: victims[0]!.txHash,
             backrunTx: back.txHash,
           });
@@ -423,7 +433,9 @@ export interface BotStats {
   txs: number;
   arbitrage: number;
   sandwich: number;
+  /** Arbitrage profit only (sandwiches are counted separately): a bot with no arbitrage has none. */
   profitUsd: number;
+  sandwichProfitUsd: number;
   costUsd: number;
   unpricedTxs: number;
   lastSeenBlock: number;
@@ -456,7 +468,11 @@ function quantile(sorted: number[], q: number): number | null {
   return sorted[i]!;
 }
 
-export async function marketSummary(store: Store, symbolOf: (a: string) => string, watchBots: string[] = [], days?: string[]): Promise<MarketSummary[]> {
+/**
+ * Daily market aggregates from data/mev.jsonl. `maxUsd` (SANITY_MAX_PROFIT_USD) drops values past the
+ * sanity cap even in records written before the cap existed: they count as unpriced, not as profit.
+ */
+export async function marketSummary(store: Store, symbolOf: (a: string) => string, watchBots: string[] = [], days?: string[], maxUsd = Infinity): Promise<MarketSummary[]> {
   const byDay = new Map<string, MarketSummary>();
   const bots = new Map<string, Map<string, BotStats>>();
   const senders = new Map<string, Map<string, Set<string>>>();
@@ -473,7 +489,8 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
       s = { day, arbitrageTxs: 0, sandwichTxs: 0, arbitrageProfitUsd: 0, sandwichProfitUsd: 0, bots: [], routers: [], topPairs: [], topDexRoutes: [], hourly: [], watched: [], arbPriority: { samples: 0, medianGwei: null, p90Gwei: null, maxGwei: null } };
       byDay.set(day, s);
     }
-    const usd = d.profitUsd ?? 0;
+    const sane = typeof d.profitUsd === "number" && d.profitUsd <= maxUsd;
+    const usd = sane ? (d.profitUsd as number) : 0;
     if (d.type === "arbitrage" && typeof d.priorityGwei === "number") {
       const t = tips.get(day) ?? [];
       t.push(d.priorityGwei);
@@ -487,12 +504,13 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
       s.sandwichProfitUsd += usd;
     }
     const bm = bots.get(day) ?? new Map<string, BotStats>();
-    const b = bm.get(d.bot) ?? { bot: d.bot, txs: 0, arbitrage: 0, sandwich: 0, profitUsd: 0, costUsd: 0, unpricedTxs: 0, lastSeenBlock: 0, senders: 0, shared: false };
+    const b = bm.get(d.bot) ?? { bot: d.bot, txs: 0, arbitrage: 0, sandwich: 0, profitUsd: 0, sandwichProfitUsd: 0, costUsd: 0, unpricedTxs: 0, lastSeenBlock: 0, senders: 0, shared: false };
     b.txs++;
     b[d.type]++;
-    b.profitUsd += usd;
+    if (d.type === "arbitrage") b.profitUsd += usd;
+    else b.sandwichProfitUsd += usd;
     b.costUsd += d.costUsd ?? 0;
-    if (d.profitUsd === null) b.unpricedTxs++;
+    if (!sane) b.unpricedTxs++;
     b.lastSeenBlock = Math.max(b.lastSeenBlock, d.block);
     bm.set(d.bot, b);
     bots.set(day, bm);
@@ -533,12 +551,13 @@ export async function marketSummary(store: Store, symbolOf: (a: string) => strin
   }
   for (const s of byDay.values()) {
     const senderMap = senders.get(s.day) ?? new Map<string, Set<string>>();
-    const all = [...(bots.get(s.day)?.values() ?? [])].sort((a, b) => b.profitUsd - a.profitUsd);
+    const all = [...(bots.get(s.day)?.values() ?? [])].sort((a, b) => b.profitUsd - a.profitUsd || b.arbitrage - a.arbitrage);
     for (const b of all) {
       b.senders = senderMap.get(b.bot)?.size ?? 0;
       b.shared = b.senders >= SHARED_SENDER_MIN;
     }
-    s.bots = all.filter((b) => !b.shared).slice(0, 20);
+    // The leaderboard is arbitrage bots: a sandwich-only address (0 arbitrages) isn't a rival here.
+    s.bots = all.filter((b) => !b.shared && b.arbitrage > 0).slice(0, 20);
     s.routers = all.filter((b) => b.shared).slice(0, 10);
     s.watched = all.filter((b) => watchBots.includes(b.bot));
     s.topPairs = [...(pairs.get(s.day) ?? new Map()).entries()].map(([pair, v]) => ({ pair, ...v })).sort((a, b) => b.txs - a.txs).slice(0, 15);

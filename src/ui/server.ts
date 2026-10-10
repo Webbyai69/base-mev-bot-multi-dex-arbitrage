@@ -63,6 +63,8 @@ export interface BlockEvent {
   arbs: number;
   gasUsd: number;
   ethUsd: number;
+  /** Where the block's time went (src/speed.ts BlockPhases). */
+  phases?: Record<string, number>;
 }
 
 export interface Summaries {
@@ -88,6 +90,10 @@ export interface UiSources {
   tune?: (action: string, id?: string) => { ok: boolean; error?: string };
   extras?: () => {
     flashblocks?: Record<string, number> | undefined;
+    /** Time per block over the last 30 blocks (src/speed.ts). */
+    speed?: unknown;
+    /** Route checks per venue since start. */
+    venues?: Record<string, number> | undefined;
     liquidations?: { watched: number; stats: Record<string, number> } | undefined;
     refresh?: { checks: number; driftedPools: number; lastCheckBlock?: number; lastDrift?: Array<{ pool: string; dex: string; block: number }> } | undefined;
     /** Scanner funnel since start (src/scanner.ts `funnel`). */
@@ -488,6 +494,8 @@ export class UiServer {
       rpc: this.src.usage?.() ?? null,
       refresh: x.refresh ?? null,
       flashblocks: x.flashblocks ?? null,
+      speed: x.speed ?? null,
+      venues: x.venues ?? null,
       liquidations: x.liquidations ?? null,
       stop: this.stopState(),
       funnel: x.funnel ?? null,
@@ -521,6 +529,10 @@ export class UiServer {
         maxHops: s.maxHops,
         flashSource: s.flashSource,
         flashblocks: s.flashblocks,
+        flashblocksStream: !!s.flashblocksWsUrl,
+        liveActAlways: s.liveActAlways,
+        fullRescanBlocks: s.fullRescanBlocks,
+        sanityMaxProfitUsd: s.sanityMaxProfitUsd,
         liquidations: s.liquidations,
         refreshMode: s.refreshMode,
         fullRefreshBlocks: s.fullRefreshBlocks,

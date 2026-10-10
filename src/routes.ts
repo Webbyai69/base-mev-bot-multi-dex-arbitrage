@@ -97,6 +97,12 @@ function initialUpperBound(route: Route): bigint {
  * (feasibility is monotone in size), then ternary search on the profit, which
  * is concave in the input for a chain of constant-product/in-range CL hops.
  * Returns null when no positive-profit size exists.
+ *
+ * Both searches stop at about one part in a million of the size range instead
+ * of narrowing to the wei: near the optimum profit is flat (the loss is of the
+ * order of the square of the size error), so the last ~20 halvings changed
+ * nothing but cost most of the BigInt work. Whatever size is chosen, the
+ * amounts returned are the exact on-chain outputs at that size.
  */
 export function optimizeRoute<P extends RoutePool>(route: Route<P>, maxAmountIn?: bigint): RouteQuote<P> | null {
   let hi = initialUpperBound(route);
@@ -105,7 +111,8 @@ export function optimizeRoute<P extends RoutePool>(route: Route<P>, maxAmountIn?
   if (!evaluateRoute(route, hi)) {
     let lo = 0n;
     let top = hi;
-    for (let i = 0; i < 128 && top - lo > 1n; i++) {
+    const step = hi >> 24n > 1n ? hi >> 24n : 1n;
+    for (let i = 0; i < 128 && top - lo > step; i++) {
       const mid = (lo + top) / 2n;
       if (evaluateRoute(route, mid)) lo = mid;
       else top = mid;
@@ -117,16 +124,17 @@ export function optimizeRoute<P extends RoutePool>(route: Route<P>, maxAmountIn?
     const q = evaluateRoute(route, x);
     return q ? q.profit : -(1n << 255n);
   };
+  const tol = hi >> 20n > 2n ? hi >> 20n : 2n;
   let lo = 1n;
   let top = hi;
-  for (let i = 0; i < 300 && top - lo > 2n; i++) {
+  for (let i = 0; i < 300 && top - lo > tol; i++) {
     const m1 = lo + (top - lo) / 3n;
     const m2 = top - (top - lo) / 3n;
     if (profitAt(m1) < profitAt(m2)) lo = m1;
     else top = m2;
   }
   let best: RouteQuote<P> | null = null;
-  for (let x = lo; x <= top; x++) {
+  for (const x of new Set([lo, (lo + top) / 2n, top])) {
     const q = evaluateRoute(route, x);
     if (q && (!best || q.profit > best.profit)) best = q;
   }
@@ -150,6 +158,20 @@ export interface CycleSearchOptions {
   minLogEdge?: number;
   /** Cap on cycles returned (best marginal edge first). */
   maxCycles?: number;
+  /** Counts what the search skipped: the same cycle reached again from another start token. */
+  stats?: { rotations: number };
+}
+
+/**
+ * One key per directed cycle, whichever token it is read from: WETH>USDC>X>WETH and
+ * USDC>X>WETH>USDC are the same trade through the same pools in the same direction.
+ * Each hop is (pool, token in); the list is rotated to start at the smallest pool address.
+ */
+export function cycleKey(pools: Array<{ address: string }>, tokens: string[]): string {
+  const hops = pools.map((p, i) => `${p.address}:${tokens[i]}`);
+  let k = 0;
+  for (let i = 1; i < hops.length; i++) if (hops[i]! < hops[k]!) k = i;
+  return [...hops.slice(k), ...hops.slice(0, k)].join(">");
 }
 
 /**
@@ -212,8 +234,11 @@ export function findCycles<P extends RoutePool>(pools: Iterable<P>, opts: CycleS
 
   function push(ps: P[], tokens: string[], logEdge: number): void {
     if (opts.exclude?.(ps)) return;
-    const key = ps.map((p) => p.address).join(">") + "|" + tokens[0];
-    if (seen.has(key)) return;
+    const key = cycleKey(ps, tokens);
+    if (seen.has(key)) {
+      if (opts.stats) opts.stats.rotations++;
+      return;
+    }
     seen.add(key);
     out.push({ pools: ps, tokens, logEdge });
   }

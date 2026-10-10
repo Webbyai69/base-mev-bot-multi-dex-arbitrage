@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Wallet } from "ethers";
 import { loadSettings, type Settings } from "./config.js";
-import { Chain, redactUrl } from "./rpc.js";
+import { Chain, redactUrl, withPurpose } from "./rpc.js";
 import { PoolRegistry, type PoolSnapshot } from "./pools.js";
 import { Scanner, type RouteOptions } from "./scanner.js";
 import { GasEstimator } from "./gas.js";
@@ -35,6 +35,7 @@ import { formatUnits } from "./math.js";
 import { LiquidationMonitor, liquidationSummary } from "./liquidations.js";
 import { planLiquidation } from "./liquidate.js";
 import { FlashblockWatcher } from "./flashblocks.js";
+import { BlockTimer } from "./speed.js";
 import { renderDigest, writeDigest } from "./digest.js";
 import { poolsOf, flashSourceId, routeKey, type Opportunity } from "./scanner.js";
 import { BlockLogFetcher } from "./blocklogs.js";
@@ -85,7 +86,7 @@ function safeEthUsd(registry: PoolRegistry): number {
 
 async function dashboardSummaries(store: Store, registry: PoolRegistry, s: Settings): Promise<Summaries> {
   const day = new Date().toISOString().slice(0, 10);
-  const [paperDays, market, liq] = await Promise.all([summarize(store), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]), liquidationSummary(store, [day])]);
+  const [paperDays, market, liq] = await Promise.all([summarize(store), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day], s.sanityMaxProfitUsd), liquidationSummary(store, [day])]);
   return { paperDays, market: market[0], liq: liq[0] };
 }
 
@@ -103,7 +104,9 @@ function dashboardSources(s: Settings, chain: Chain, registry: PoolRegistry, sto
     pools: () => poolCounts(registry),
     ethUsd: () => safeEthUsd(registry),
     extras: () => ({
-      flashblocks: extras?.fb?.stats,
+      flashblocks: extras?.fb ? { ...extras.fb.stats } : undefined,
+      speed: extras?.timer?.summary(),
+      venues: extras?.scanner ? { ...extras.scanner.venues } : undefined,
       liquidations: extras?.liq ? { watched: extras.liq.watched, stats: extras.liq.stats } : undefined,
       refresh: extras?.refreshStats,
       funnel: extras?.scanner ? { ...extras.scanner.funnel } : undefined,
@@ -140,9 +143,24 @@ function topPoolsView(registry: PoolRegistry, learner: Learner, n = 12) {
   };
   return learner.topPools(liqOf, n).map((t) => {
     const p = registry.pools.get(t.pool);
-    return { ...t, dex: p?.dex ?? "?", pair: p ? `${registry.symbol(p.token0)}/${registry.symbol(p.token1)}` : "", watched: !!p };
+    // Sanity caps for display: no pool on Base holds this much, so a bigger number is a bad read.
+    const liqSuspect = !(t.liqWeth <= DISPLAY_MAX_LIQ_WETH);
+    return {
+      ...t,
+      liqWeth: liqSuspect ? DISPLAY_MAX_LIQ_WETH : t.liqWeth,
+      liqSuspect,
+      edgeUsd: Math.min(t.edgeUsd, DISPLAY_MAX_EDGE_USD),
+      edgeCapped: t.edgeUsd > DISPLAY_MAX_EDGE_USD,
+      dex: p?.dex ?? "?",
+      pair: p ? `${registry.symbol(p.token0)}/${registry.symbol(p.token1)}` : "",
+      watched: !!p,
+    };
   });
 }
+
+/** Display ceilings: deeper than any Base pool / more edge than the score uses — shown as capped, never as fact. */
+const DISPLAY_MAX_LIQ_WETH = 50_000;
+const DISPLAY_MAX_EDGE_USD = 500;
 
 /** The newest reports/ai-review-*.md (written by the daily AI review), or null. */
 function latestReviewText(reportDir: string): string | null {
@@ -158,7 +176,7 @@ function latestReviewText(reportDir: string): string | null {
 /** Yesterday's numbers to Telegram when the UTC day rolls over. */
 async function sendDailyAlert(store: Store, registry: PoolRegistry, s: Settings, day: string): Promise<void> {
   if (!alerts?.enabled) return;
-  const [paper, market, liq] = await Promise.all([summarize(store, [day]), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]), liquidationSummary(store, [day])]);
+  const [paper, market, liq] = await Promise.all([summarize(store, [day]), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day], s.sanityMaxProfitUsd), liquidationSummary(store, [day])]);
   const p = paper[0];
   await alerts.daily({
     day,
@@ -216,6 +234,7 @@ interface RefreshStats {
 }
 
 interface Extras {
+  timer?: BlockTimer;
   liq?: LiquidationMonitor;
   fb?: FlashblockWatcher;
   chain?: Chain;
@@ -232,7 +251,7 @@ interface Extras {
 }
 
 async function writeDailyReport(store: Store, registry: PoolRegistry, s: Settings, day = new Date().toISOString().slice(0, 10), extras: Extras = {}): Promise<string> {
-  const [paper, market, liq] = await Promise.all([summarize(store, [day]), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]), liquidationSummary(store, [day])]);
+  const [paper, market, liq] = await Promise.all([summarize(store, [day]), marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day], s.sanityMaxProfitUsd), liquidationSummary(store, [day])]);
   const html = renderReport(
     day,
     paper[0],
@@ -253,7 +272,7 @@ async function writeDailyReport(store: Store, registry: PoolRegistry, s: Setting
 async function writeDailyDigest(store: Store, registry: PoolRegistry, s: Settings, day = new Date().toISOString().slice(0, 10), extras: Extras = {}): Promise<string> {
   const [paperDays, market, liq, liveDays] = await Promise.all([
     summarize(store),
-    marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day]),
+    marketSummary(store, (a) => registry.symbol(a), s.watchBots, [day], s.sanityMaxProfitUsd),
     liquidationSummary(store, [day]),
     summarizeLive(store, registry.ethPrice()),
   ]);
@@ -270,6 +289,8 @@ async function writeDailyDigest(store: Store, registry: PoolRegistry, s: Setting
     ...(market[0] ? { market: market[0] } : {}),
     ...(liq[0] ? { liq: liq[0] } : {}),
     ...(extras.fb ? { flashblockStats: extras.fb.stats } : {}),
+    ...(extras.timer ? { speed: extras.timer.summary() } : {}),
+    ...(extras.scanner ? { venues: { ...extras.scanner.venues } } : {}),
     ...(extras.chain ? { rpc: extras.chain.usage() } : {}),
     ...(extras.refreshStats ? { refreshStats: extras.refreshStats } : {}),
     ...(extras.scanner ? { funnel: { ...extras.scanner.funnel }, recorded: extras.paper ? { ...extras.paper.stats } : undefined } : {}),
@@ -302,11 +323,14 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   await loadOrDiscover(registry, store, s);
   const routeOpts = routeOptions(s);
   const scanner = new Scanner(chain, registry, s.executorAddress, s.simOverride, routeOpts);
+  scanner.fullRescanBlocks = s.fullRescanBlocks;
+  scanner.sanityMaxProfitUsd = s.sanityMaxProfitUsd;
   log.info(`on-chain verification: ${scanner.simMode}${scanner.simMode === "override" ? " (ArbExecutor bytecode injected via eth_call state override; no deployment needed)" : ""}`);
   if (s.multiHop) log.info(`multi-hop and CL routes: up to ${s.maxHops} hops, verified by ${scanner.routeSimMode === "quoter" ? "each DEX's quoter" : `RouteExecutor.simulate() (${scanner.routeSimMode})`}; ${s.mode === "live" && s.routeExecutorAddress ? "sent live through your RouteExecutor" : "paper only (set ROUTE_EXECUTOR_ADDRESS to trade them live)"}`);
   const gas = new GasEstimator(chain, s.arbGasLimit, s.priorityFeeGwei);
   const paper = new PaperEngine(store, registry);
   const classifier = s.mevFeed ? new Classifier(chain, registry, store) : undefined;
+  if (classifier) classifier.maxUsd = s.sanityMaxProfitUsd;
   const extras: Extras = {};
   if (s.liquidations) {
     const liq = new LiquidationMonitor(chain, store, {
@@ -325,13 +349,15 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     }
   }
   if (s.flashblocks) {
-    const fbChain = new Chain(s.flashblocksRpcUrl);
+    const fbChain = new Chain(s.flashblocksRpcUrl, undefined, { timeoutMs: s.rpcTimeoutMs });
     const fbScanner = new Scanner(fbChain, registry, s.executorAddress, s.simOverride, routeOpts);
+    fbScanner.sanityMaxProfitUsd = s.sanityMaxProfitUsd;
     extras.fbScanner = fbScanner;
     extras.fb = new FlashblockWatcher(fbChain, registry, fbScanner, paper, {
       pollMs: s.flashblockPollMs,
       maxPools: s.flashblockMaxPools,
       minProfitUsd: s.minProfitUsd,
+      wsUrl: s.flashblocksWsUrl,
     });
   }
   // The learning engine: remembers what keeps failing, where rivals win and what they pay,
@@ -339,7 +365,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   const tuning = new Tuning(store, { minProfitUsd: s.minProfitUsd, maxBidShare: s.liveMaxBidShare, evMinUsd: s.liveMinEvUsd });
   extras.tuning = tuning;
   const learner = s.learning
-    ? new Learner(store, { halfLifeMs: s.learnHalfLifeHours * 3_600_000, pruneAfterMs: s.learnPruneDays * 86_400_000, maxBidGwei: s.liveMaxBidGwei }, (a) => registry.symbol(a))
+    ? new Learner(store, { halfLifeMs: s.learnHalfLifeHours * 3_600_000, pruneAfterMs: s.learnPruneDays * 86_400_000, maxBidGwei: s.liveMaxBidGwei, maxUsd: s.sanityMaxProfitUsd }, (a) => registry.symbol(a))
     : undefined;
   if (learner) {
     // Trades by the bot's own wallet or contract are its own results, never a rival's.
@@ -424,7 +450,9 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
         })
       : undefined;
   if (live) log.warn(`LIVE MODE: sending from ${live.wallet.address} via executor ${s.executorAddress}${s.routeExecutorAddress ? ` and routes via ${s.routeExecutorAddress}` : ""}. Create ${store.path("STOP")} to halt.`);
-  if (live && s.liveActAlways) log.warn("LIVE: act mode ON — sending every simulated-profitable find (bid sized by the learning), bounded by the daily gas cap and circuit breaker. Set LIVE_ACT_ALWAYS=false for expected-value gating.");
+  // Stated on every start, paper or live, so the setting in force is never a guess.
+  if (s.liveActAlways) log.warn(`LIVE_ACT_ALWAYS=true: act mode${live ? " ON" : " (applies once MODE=live)"} — every simulated-profitable find is sent (bid sized by the learning), bounded by the daily gas cap and circuit breaker. Set LIVE_ACT_ALWAYS=false in .env for expected-value gating.`);
+  else log.info(`LIVE_ACT_ALWAYS=false: expected-value gating${live ? "" : " (applies once MODE=live)"} — a find is sent only when its expected value (landing chance × profit − cost) is at least $${tuning.evMinUsd}`);
 
   let lastReport = 0;
   let blocksSeen = 0;
@@ -438,6 +466,8 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
   let lastFullRefresh = 0;
   const refreshStats: RefreshStats = { checks: 0, driftedPools: 0, lastCheckBlock: 0, lastDrift: [] };
   extras.refreshStats = refreshStats;
+  const timer = new BlockTimer();
+  extras.timer = timer;
   extras.scanner = scanner;
   extras.paper = paper;
   if (live) extras.live = live;
@@ -537,38 +567,30 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     }
   }, 30_000);
   watchdog.unref();
-  const logsFetcher = new BlockLogFetcher(chain, { liquidations: !!extras.liq });
+  const logsFetcher = new BlockLogFetcher(chain, { liquidations: !!extras.liq, v4: s.clPools });
   log.info(
     s.refreshMode === "events"
       ? `pool refresh: event-driven (one eth_getLogs per block, re-reading only pools that changed; full re-read every ${s.fullRefreshBlocks} blocks)`
       : "pool refresh: full re-read of every pool every block (REFRESH_MODE=full)",
   );
-  const onBlock = async (n: number): Promise<void> => {
-    try {
-      await handleBlock(n);
-    } finally {
-      // Whatever happened in this block, never leave the Flashblocks loop paused.
-      if (extras.fb) extras.fb.paused = false;
-    }
-  };
+  const onBlock = (n: number): Promise<void> => handleBlock(n);
   const handleBlock = async (n: number): Promise<void> => {
     const started = Date.now();
-    // The Flashblocks loop shares pool objects with us: pause it and let any in-flight read finish.
-    if (extras.fb) {
-      extras.fb.paused = true;
-      await extras.fb.idle;
-    }
+    // The Flashblocks loop keeps its pending state in copies of the pools, so it never has to pause
+    // for this handler (it used to, for the whole ~2 s, which is why it rarely ran).
     // One block fetch serves the gas estimator (base fee) and the classifier (tx senders);
     // one log fetch serves the pool refresh, the classifier and the liquidation monitor.
     const canEvents = s.refreshMode === "events" && registry.syncedBlock > 0 && n - registry.syncedBlock <= s.maxLogGap;
     const periodic = n - lastFullRefresh >= s.fullRefreshBlocks;
-    const [blk, logs] = await Promise.all([fetchFullBlock(chain, n), logsFetcher.fetch(canEvents ? registry.syncedBlock + 1 : n, n)]);
-    if (canEvents) await registry.applyLogs(logs, n);
+    const [blk, logs] = await withPurpose("block+logs", () => Promise.all([fetchFullBlock(chain, n), logsFetcher.fetch(canEvents ? registry.syncedBlock + 1 : n, n)]));
+    const tFetched = Date.now();
+    if (canEvents) await withPurpose("refresh", () => registry.applyLogs(logs, n));
     learner?.onPoolActivity(logs.map((l) => l.address));
     if (!canEvents || periodic) {
-      // Periodic full re-read; in events mode it doubles as a self-check of the log-driven state.
+      // Periodic full re-read (V4 pools and CL pool balances included); in events mode it doubles as a
+      // self-check of the log-driven state.
       const snap = canEvents ? registry.stateSnapshot() : null;
-      await registry.refreshAll(n);
+      await withPurpose("full-refresh", () => registry.refreshAll(n));
       lastFullRefresh = n;
       if (snap) {
         const drift = registry.driftAgainst(snap);
@@ -586,18 +608,20 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
         }
       }
     }
-    // V4 pools are read from StateView (there is no pool contract), isolated from the address-based refresh
-    // above and wrapped so a V4 error can never break the block loop.
-    await registry.refreshV4(n).catch((e: Error) => log.warn("V4 refresh:", e.message.slice(0, 120)));
+    // V4 pools now follow the PoolManager's Swap/ModifyLiquidity events in applyLogs (and are fully
+    // re-read with everything else in refreshAll), instead of a StateView read of every V4 pool each block.
+    const tRefreshed = Date.now();
     const baseFee = blk?.baseFeePerGas ? BigInt(blk.baseFeePerGas) : null;
     const ethUsd = registry.ethPrice();
     // Run the MEV classifier (which fetches transaction receipts) concurrently with the trade path, so its RPC
     // latency hides under the scan + send instead of adding to the block time that trips the "Lagging" badge.
     const detectedP = classifier
-      ? classifier.classifyBlock(n, ethUsd, blk, logs).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), []))
+      ? withPurpose("classifier", () => classifier.classifyBlock(n, ethUsd, blk, logs)).catch((e: Error) => (log.warn("classifier failed:", e.message.slice(0, 120)), []))
       : Promise.resolve([]);
-    const gasQuote = await gas.quote(n, baseFee);
-    const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block" });
+    const gasQuote = await withPurpose("gas", () => gas.quote(n, baseFee));
+    const tScan = Date.now();
+    const opps = await withPurpose("verify", () => scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block" }));
+    const scanT = scanner.lastTiming;
     // Send first: it needs only the refreshed pools and the gas quote, not the classifier's output.
     if (live && learner) {
       considerLiveSend(opps, ethUsd, "block");
@@ -608,25 +632,25 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     // Then the measurement, with the classifier result (already in flight) now awaited.
     const detected = await detectedP;
     learner?.onRivalArbs(detected);
-    paper.onBlock(n, opps, detected, ethUsd);
+    const tClassified = Date.now();
+    paper.onBlock(n, opps, detected, ethUsd, scanner.openRouteKeys());
     if (extras.fb) {
-      // Hot pools for the next ~2s: anything that showed a spread or was arbed by another bot.
+      // Hot pools for the poll fallback: anything that showed a spread or was arbed by another bot.
       const interesting = new Set<string>([...scanner.lastCandidatePools, ...detected.filter((d) => d.type === "arbitrage").flatMap((d) => d.pools)]);
       for (const o of opps) for (const p of poolsOf(o)) interesting.add(p);
       extras.fb.onConfirmedBlock({ block: n, seenAt: Date.now(), gas: gasQuote, ethUsd }, [...interesting].filter((a) => registry.pools.has(a)));
-      extras.fb.paused = false;
       extras.fb.start();
     }
     if (extras.liq) {
       const gasPrice = gasQuote.baseFeeWei + gasQuote.priorityFeeWei;
-      extras.liq.onBlock(n, ethUsd, gasPrice, logs).catch((e: Error) => log.warn("liquidation monitor:", e.message.slice(0, 120)));
+      withPurpose("liquidations", () => extras.liq!.onBlock(n, ethUsd, gasPrice, logs)).catch((e: Error) => log.warn("liquidation monitor:", e.message.slice(0, 120)));
     }
 
     // Learn pools that real bots trade on, a few per block so discovery stays cheap.
     if (classifier && registry.pools.size < s.maxWatchedPools) {
       const cands = classifier.candidatePoolsToWatch(detected).slice(0, Math.min(5, s.maxWatchedPools - registry.pools.size));
       if (cands.length) {
-        const added = await registry.addPoolsByAddress(cands.map((c) => c.address)).catch((e: Error) => (log.warn("watch-list add failed:", e.message.slice(0, 100)), []));
+        const added = await withPurpose("watch-list", () => registry.addPoolsByAddress(cands.map((c) => c.address))).catch((e: Error) => (log.warn("watch-list add failed:", e.message.slice(0, 100)), []));
         for (const p of added) log.info(`watch list: added ${p.dex} pool ${p.address} (${registry.symbol(p.token0)}/${registry.symbol(p.token1)}) seen in an arbitrage`);
         learner?.track(added.map((p) => p.address));
       }
@@ -638,6 +662,18 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
 
     blocksSeen++;
     const ms = Date.now() - started;
+    const phases = {
+      fetchMs: tFetched - started,
+      refreshMs: tRefreshed - tFetched,
+      gasMs: tScan - tRefreshed,
+      findMs: scanT.findMs,
+      verifyMs: scanT.verifyMs,
+      // The classifier runs alongside the scan; this is only the part of it the block had to wait for.
+      waitMs: Math.max(0, tClassified - tScan - scanT.findMs - scanT.verifyMs),
+      restMs: 0,
+    };
+    phases.restMs = Math.max(0, ms - phases.fetchMs - phases.refreshMs - phases.gasMs - phases.findMs - phases.verifyMs - phases.waitMs);
+    timer.add(n, ms, phases, { scored: scanT.scored, unchanged: scanT.unchanged, candidates: scanT.candidates, changedPools: scanT.changedPools, full: scanT.full });
     lastBlockAt = Date.now();
     lastBlockN = n;
     alerts?.blockProcessed(n);
@@ -645,6 +681,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       n,
       at: lastBlockAt,
       ms,
+      phases,
       opps: opps.length,
       bestNetUsd: opps.length ? Math.max(...opps.map((o) => o.netUsd)) : null,
       mev: detected.length,
@@ -658,12 +695,22 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
       currentDay = today;
       sendDailyAlert(store, registry, s, finished).catch((e: Error) => log.warn("daily alert failed:", e.message.slice(0, 120)));
     }
-    if (blocksSeen % 30 === 0 || ms > 1800) {
-      const fb = extras.fb ? `, flashblocks ${extras.fb.stats.scans} scans/${extras.fb.stats.opps} opps` : "";
+    if (ms > 2000) {
+      log.info(
+        `block ${n} took ${ms}ms (target < 2000): fetch ${phases.fetchMs}, refresh ${phases.refreshMs}, gas ${phases.gasMs}, find ${phases.findMs} (${scanT.scored} routes re-scored, ${scanT.unchanged} unchanged${scanT.full ? ", full rescan" : ""}), verify ${phases.verifyMs}, classifier wait ${phases.waitMs}, rest ${phases.restMs}`,
+      );
+    }
+    if (blocksSeen % 30 === 0) {
+      const sp = timer.summary();
+      const fbs = extras.fb?.stats;
+      const fb = fbs ? `, flashblocks ${fbs.flashblocksPerMin}/min received, ${fbs.scansPerMin} scans/min (${fbs.scans} scans, ${fbs.opps} finds since start${fbs.streaming ? "" : "; stream down, polling"})` : "";
       const lq = extras.liq ? `, ${extras.liq.watched} borrowers` : "";
       const u = chain.usage();
-      const rpcNote = `, rpc ${u.requests} calls (~${(u.alchemyCuPerDay / 1e6).toFixed(1)}M Alchemy CU/day at this pace)`;
-      log.info(`block ${n}: ${registry.pools.size} pools, ${opps.length} opps, ${detected.length} mev txs, ${ms}ms, gas/tx $${((Number(gasQuote.totalWei) / 1e18) * ethUsd).toFixed(4)}${fb}${lq}${rpcNote}, uptime ${((Date.now() - t0) / 60000).toFixed(0)}m`);
+      const ec = u.byMethod.eth_call ?? 0;
+      const rpcNote = `, rpc ${u.requests} calls, eth_call ${u.requests ? Math.round((ec / u.requests) * 100) : 0}% (~${(u.alchemyCuPerDay / 1e6).toFixed(1)}M Alchemy CU/day at this pace)`;
+      log.info(
+        `block ${n}: ${registry.pools.size} pools, ${opps.length} opps, ${detected.length} mev txs; time per block median ${sp.p50Ms}ms, p95 ${sp.p95Ms}ms, ${sp.over2s}/${sp.samples} over 2 s; ${sp.routeChecksPerMin} route checks/min (${sp.scoredPerMin} routes re-scored, ${sp.unchangedPerMin} skipped as unchanged)${fb}${lq}${rpcNote}, uptime ${((Date.now() - t0) / 60000).toFixed(0)}m`,
+      );
     }
     if (learner && Date.now() - lastLearnSave > 60_000) {
       lastLearnSave = Date.now();
@@ -690,7 +737,15 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     }
   };
 
-  const stop = await chain.subscribeBlocks(onBlock);
+  // Scan-loop watchdog: RPC calls now time out, but if a block handler still hangs, report it and move on.
+  const stop = await chain.subscribeBlocks(onBlock, 250, {
+    maxHandlerMs: s.blockWatchdogMs,
+    onStall: (blk, ms) => {
+      log.error(`watchdog: block ${blk} still processing after ${Math.round(ms / 1000)}s; moving on to the next block (BLOCK_WATCHDOG_MS=${s.blockWatchdogMs})`);
+      timer.stalls++;
+      void alerts?.handlerStalled(blk, ms);
+    },
+  });
   let shuttingDown = false;
   const shutdown = async (why: string) => {
     if (shuttingDown) return;
@@ -722,6 +777,7 @@ async function scanOnce(s: Settings, chain: Chain, registry: PoolRegistry, store
   const ethUsd = registry.ethPrice();
   const gasQuote = await new GasEstimator(chain, s.arbGasLimit, s.priorityFeeGwei).quote(n, blk?.baseFeePerGas ?? null);
   const scanner = new Scanner(chain, registry, s.executorAddress, s.simOverride, routeOptions(s));
+  scanner.sanityMaxProfitUsd = s.sanityMaxProfitUsd;
   const raw = scanner.findRaw();
   const routes = scanner.findRoutes();
   const opps = await scanner.scan(n, gasQuote, ethUsd, -Infinity);
@@ -740,7 +796,7 @@ async function scanOnce(s: Settings, chain: Chain, registry: PoolRegistry, store
 
 async function printSummary(s: Settings, store: Store, registry: PoolRegistry): Promise<void> {
   const paper = await summarize(store);
-  const market = await marketSummary(store, (a) => registry.symbol(a), s.watchBots);
+  const market = await marketSummary(store, (a) => registry.symbol(a), s.watchBots, undefined, s.sanityMaxProfitUsd);
   console.log("\n=== Paper trading ===");
   if (paper.length === 0) console.log("no opportunities recorded yet");
   for (const d of paper) {
@@ -789,6 +845,7 @@ async function main(): Promise<void> {
       ...(s.rpcConcurrency !== undefined ? { concurrency: s.rpcConcurrency } : {}),
       ...(s.rpcMinIntervalMs !== undefined ? { minIntervalMs: s.rpcMinIntervalMs } : {}),
       ...(s.rpcBatchMaxCount !== undefined ? { batchMaxCount: s.rpcBatchMaxCount } : {}),
+      timeoutMs: s.rpcTimeoutMs,
     },
     s.rpcFallbackUrls,
   );
@@ -797,6 +854,7 @@ async function main(): Promise<void> {
   );
   const registry = new PoolRegistry(chain);
   registry.clPools = s.clPools;
+  registry.priceMinDepthWeth = s.priceMinDepthWeth;
   // A copy: tokens blocked on the dashboard join it at run time, TOKEN_BLACKLIST from .env stays as written.
   registry.blacklist = new Set(s.tokenBlacklist);
   if (cmd === "run" && s.telegramBotToken && s.telegramChatId) {

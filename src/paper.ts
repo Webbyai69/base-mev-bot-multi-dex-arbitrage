@@ -71,8 +71,12 @@ export class PaperEngine {
 
   constructor(readonly store: Store, readonly registry: PoolRegistry) {}
 
-  /** Called once per block AFTER reserves are refreshed and the classifier has run. */
-  onBlock(block: number, newOpps: Opportunity[], mevInBlock: DetectedMev[], ethUsd: number): void {
+  /**
+   * Called once per block AFTER reserves are refreshed and the classifier has run.
+   * `stillOpen`: routes the scanner didn't re-report because none of their pools changed, but which
+   * still clear the floor (Scanner.openRouteKeys); a spread sitting open stays one trade.
+   */
+  onBlock(block: number, newOpps: Opportunity[], mevInBlock: DetectedMev[], ethUsd: number, stillOpen?: Set<string>): void {
     // 1. Evaluate pending opportunities against this block's state. Blocks can
     //    be skipped when the RPC is slow, so we count evaluations, not ages.
     for (const [id, p] of this.pending) {
@@ -100,7 +104,7 @@ export class PaperEngine {
 
     // 2. Register new opportunities (one per route at a time; consumed routes
     //    stay muted until the spread has closed once).
-    const routesNow = new Set(newOpps.map(routeKey));
+    const routesNow = new Set([...newOpps.map(routeKey), ...(stillOpen ?? [])]);
     for (const r of [...this.consumed]) if (!routesNow.has(r)) this.consumed.delete(r);
     this.register(newOpps);
   }

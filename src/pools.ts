@@ -18,10 +18,12 @@ import { CL_DEXES, DEXES, TOKENS, WETH, USDC, V4, NATIVE, type ClDexInfo, type D
 import {
   TOPIC_BURN_V3,
   TOPIC_MINT_V3,
+  TOPIC_MODIFY_LIQUIDITY_V4,
   TOPIC_SWAP_AERO,
   TOPIC_SWAP_PANCAKE_V3,
   TOPIC_SWAP_V2,
   TOPIC_SWAP_V3,
+  TOPIC_SWAP_V4,
   TOPIC_SYNC,
   TOPIC_SYNC_AERO,
   aeroFactoryIface,
@@ -38,7 +40,7 @@ import {
   v4PoolId,
 } from "./abi.js";
 import { getAmountOut, type FeeModel } from "./math.js";
-import { compressTick, virtualReserves, wordPosition, wordsNeeded, type ClState } from "./clmath.js";
+import { compressTick, getAmount0Delta, getAmount1Delta, rangeBoundary, virtualReserves, wordPosition, wordsNeeded, type ClState } from "./clmath.js";
 import type { Chain, Call, CallResult } from "./rpc.js";
 import { log } from "./log.js";
 
@@ -109,6 +111,97 @@ export function pairKey(a: string, b: string): string {
   return `${x}-${y}`;
 }
 
+/** Price-relevant state of a pool in one string: two equal signatures mean nothing a route depends on changed. */
+export function poolStateSig(p: Pool): string {
+  return p.cl ? `${p.cl.sqrtPriceX96}:${p.cl.liquidity}:${p.cl.tick}:${p.cl.feePips}:${p.cl.words.size}` : `${p.reserve0}:${p.reserve1}:${p.feePpm}`;
+}
+
+/** A copy whose state can change without touching the original (the Flashblocks overlay). */
+export function clonePool(p: Pool): Pool {
+  return p.cl ? { ...p, cl: { ...p.cl, words: new Map(p.cl.words) } } : { ...p };
+}
+
+const POOL_MANAGER = V4.poolManager.toLowerCase();
+
+/** A log as the RPC returns it, or as the Flashblocks stream carries it (no block number there). */
+export interface StateLog {
+  address: string;
+  topics: readonly string[];
+  data: string;
+  blockNumber?: number;
+}
+
+/**
+ * The watched pool a state-changing log belongs to: the emitting contract for V2/V3-style pools, the
+ * poolId in topic 1 for Uniswap V4 (whose pools all live in the PoolManager).
+ */
+export function poolKeyOfLog(l: StateLog): string | undefined {
+  const a = l.address.toLowerCase();
+  if (a === POOL_MANAGER) {
+    const t0 = l.topics[0];
+    return (t0 === TOPIC_SWAP_V4 || t0 === TOPIC_MODIFY_LIQUIDITY_V4) && l.topics[1] ? l.topics[1].toLowerCase() : undefined;
+  }
+  return a;
+}
+
+/**
+ * Apply one log to a pool's state, with no RPC.
+ *   "set"    the log carried the new state exactly (V2/Aerodrome Sync, V3/PancakeSwap/V4 Swap)
+ *   "fee"    as "set", but Slipstream's fee is dynamic, so fee() must be re-read
+ *   "reread" liquidity or the tick bitmap changed (Mint/Burn/ModifyLiquidity): only a read can tell
+ *   null     the log doesn't change this pool's price state
+ */
+export function applyStateLog(p: Pool, l: StateLog): "set" | "fee" | "reread" | null {
+  const t0 = l.topics[0];
+  if (!p.cl) {
+    if (t0 !== TOPIC_SYNC && t0 !== TOPIC_SYNC_AERO) return null;
+    const [r0, r1] = abi.decode(["uint256", "uint256"], l.data) as unknown as [bigint, bigint];
+    p.reserve0 = r0;
+    p.reserve1 = r1;
+    if (l.blockNumber !== undefined) p.updatedBlock = l.blockNumber;
+    return "set";
+  }
+  let d: ReturnType<typeof abi.decode> | undefined;
+  if (p.v4) {
+    if (t0 === TOPIC_MODIFY_LIQUIDITY_V4) return "reread";
+    if (t0 !== TOPIC_SWAP_V4) return null;
+    // amount0, amount1, sqrtPriceX96, liquidity, tick, fee
+    d = abi.decode(["int128", "int128", "uint160", "uint128", "int24", "uint24"], l.data);
+  } else if (t0 === TOPIC_SWAP_V3 || t0 === TOPIC_SWAP_PANCAKE_V3) {
+    // PancakeSwap V3's Swap carries two extra protocol-fee fields; the first five (amount0, amount1,
+    // sqrtPriceX96, liquidity, tick) match Uniswap V3, so we read those and ignore the rest.
+    d = abi.decode(t0 === TOPIC_SWAP_PANCAKE_V3 ? ["int256", "int256", "uint160", "uint128", "int24", "uint128", "uint128"] : ["int256", "int256", "uint160", "uint128", "int24"], l.data);
+  } else if (t0 === TOPIC_MINT_V3 || t0 === TOPIC_BURN_V3) {
+    return "reread";
+  } else {
+    return null;
+  }
+  const s = p.cl;
+  s.sqrtPriceX96 = d[2] as bigint;
+  s.liquidity = d[3] as bigint;
+  s.tick = Number(d[4]);
+  const v = virtualReserves(s);
+  p.reserve0 = v.reserve0;
+  p.reserve1 = v.reserve1;
+  if (l.blockNumber !== undefined) p.updatedBlock = l.blockNumber;
+  return p.kind === "slipstream" ? "fee" : "set";
+}
+
+/**
+ * Real token amounts a CL pool can trade before its liquidity next changes (between the nearest
+ * initialized ticks we have loaded). Unlike virtual reserves, this can't overstate a narrow position.
+ */
+export function activeRangeAmounts(s: ClState): { amount0: bigint; amount1: bigint } | null {
+  if (s.sqrtPriceX96 === 0n || s.liquidity <= 0n) return null;
+  const lower = rangeBoundary(s, true);
+  const upper = rangeBoundary(s, false);
+  if (lower === null || upper === null) return null;
+  return {
+    amount0: upper > s.sqrtPriceX96 ? getAmount0Delta(s.sqrtPriceX96, upper, s.liquidity, false) : 0n,
+    amount1: lower < s.sqrtPriceX96 ? getAmount1Delta(lower, s.sqrtPriceX96, s.liquidity, false) : 0n,
+  };
+}
+
 export class PoolRegistry {
   readonly pools = new Map<string, Pool>();
   readonly tokens = new Map<string, TokenMeta>();
@@ -122,6 +215,11 @@ export class PoolRegistry {
   syncedBlock = 0;
   /** Pools last read at the pre-confirmed ("pending") state by the Flashblocks loop; re-read at the next block. */
   private pendingDirty = new Set<string>();
+  /** Smallest real depth (WETH-equivalent) of a pool used to price a token in USD (PRICE_MIN_DEPTH_WETH). */
+  priceMinDepthWeth = 1;
+  /** Bumped whenever pool state may have changed; keys the per-token price cache. */
+  private stateEpoch = 0;
+  private priceCache = new Map<string, { epoch: number; ethUsd: number; usdPerUnit: number | null }>();
 
   constructor(readonly chain: Chain) {}
 
@@ -240,11 +338,8 @@ export class PoolRegistry {
     log.info(`${calibrated.length} pools calibrated across ${new Set(calibrated.map((p) => pairKey(p.token0, p.token1))).size} token pairs`);
 
     this.pools.clear();
-    for (const p of calibrated) {
-      delete p.bal0;
-      delete p.bal1;
-      this.pools.set(p.address, p);
-    }
+    // bal0/bal1 stay: they are the pools' real depth (refreshed on every full refresh).
+    for (const p of calibrated) this.pools.set(p.address, p);
     const cl = calibrated.filter((p) => p.cl).length;
     if (cl) log.info(`${cl} of them are concentrated-liquidity pools (Uniswap V3 / Slipstream)`);
   }
@@ -551,7 +646,9 @@ export class PoolRegistry {
   /** `via` lets the Flashblocks loop read pre-confirmed state through its own RPC endpoint. */
   async refreshReserves(pools: Pool[], block: number | "pending", via?: Chain): Promise<void> {
     if (pools.length === 0) return;
-    if (block === "pending") for (const p of pools) this.pendingDirty.add(p.address);
+    // Only the registry's own pool objects need a re-read at the next block; the Flashblocks loop
+    // reads into copies (clonePool), which leave the confirmed state alone.
+    if (block === "pending") for (const p of pools) if (this.pools.get(p.address) === p) this.pendingDirty.add(p.address);
     const v2 = pools.filter((p) => !p.cl);
     // V4 pools have no pool contract to call — they're refreshed separately via StateView (refreshV4).
     const cl = pools.filter((p) => p.cl && !p.v4);
@@ -711,6 +808,7 @@ export class PoolRegistry {
 
   private async refreshV4Set(pools: Pool[], block: number | "pending"): Promise<void> {
     if (!pools.length) return;
+    this.stateEpoch++;
     const fresh = pools.filter((p) => p.cl!.sqrtPriceX96 === 0n);
     if (fresh.length) await this.readV4(fresh, block, false); // learn the tick before choosing bitmap words
     await this.readV4(pools, block, true);
@@ -763,10 +861,23 @@ export class PoolRegistry {
     });
   }
 
+  /**
+   * Re-read every watched pool at `block`: V2/V3-style pools from their contracts, V4 pools from
+   * StateView, and the real token balances of CL pools (their depth; changes slowly, so only here).
+   */
   async refreshAll(block: number): Promise<void> {
-    await this.refreshReserves([...this.pools.values()], block);
+    const all = [...this.pools.values()];
+    await Promise.all([
+      this.refreshReserves(all, block),
+      this.refreshV4Set(
+        all.filter((p) => p.v4),
+        block,
+      ),
+      this.loadClBalances(all, block).catch((e: Error) => log.debug("pool balances:", e.message.slice(0, 100))),
+    ]);
     this.pendingDirty.clear();
     this.syncedBlock = block;
+    this.stateEpoch++;
   }
 
   /**
@@ -788,67 +899,44 @@ export class PoolRegistry {
    * eth_getLogs returns them in). A periodic full refresh (FULL_REFRESH_BLOCKS)
    * corrects anything this misses.
    */
-  async applyLogs(logs: Log[], block: number): Promise<{ fromLogs: number; reread: number }> {
+  async applyLogs(logs: Log[], block: number): Promise<{ fromLogs: number; reread: number; changed: Set<string> }> {
+    this.stateEpoch++;
     const fullRead = new Set<Pool>();
     const v2Read = new Set<Pool>();
     const feeRead = new Set<Pool>();
+    const v4Read = new Set<Pool>();
     const touched = new Set<Pool>();
     let fromLogs = 0;
     for (const l of logs) {
-      const p = this.pools.get(l.address.toLowerCase());
+      const key = poolKeyOfLog(l);
+      const p = key ? this.pools.get(key) : undefined;
       if (!p) continue;
-      const t0 = l.topics[0];
-      if (!p.cl) {
-        if (t0 === TOPIC_SYNC || t0 === TOPIC_SYNC_AERO) {
-          const [r0, r1] = abi.decode(["uint256", "uint256"], l.data) as unknown as [bigint, bigint];
-          p.reserve0 = r0;
-          p.reserve1 = r1;
-          p.updatedBlock = l.blockNumber;
-          fromLogs++;
-        }
-        continue;
-      }
-      if (t0 === TOPIC_SWAP_V3 || t0 === TOPIC_SWAP_PANCAKE_V3) {
-        // PancakeSwap V3's Swap carries two extra protocol-fee fields; the first five (amount0, amount1,
-        // sqrtPriceX96, liquidity, tick) match Uniswap V3, so we read those and ignore the rest.
-        const d = abi.decode(
-          t0 === TOPIC_SWAP_PANCAKE_V3 ? ["int256", "int256", "uint160", "uint128", "int24", "uint128", "uint128"] : ["int256", "int256", "uint160", "uint128", "int24"],
-          l.data,
-        );
-        const s = p.cl;
-        s.sqrtPriceX96 = d[2] as bigint;
-        s.liquidity = d[3] as bigint;
-        s.tick = Number(d[4]);
-        p.updatedBlock = l.blockNumber;
+      const r = applyStateLog(p, l);
+      if (r === "set" || r === "fee") {
         touched.add(p);
-        if (p.kind === "slipstream") feeRead.add(p);
+        if (r === "fee") feeRead.add(p);
         fromLogs++;
-      } else if (t0 === TOPIC_MINT_V3 || t0 === TOPIC_BURN_V3) {
-        fullRead.add(p);
+      } else if (r === "reread") {
+        (p.v4 ? v4Read : fullRead).add(p);
       }
     }
     for (const a of this.pendingDirty) {
       const p = this.pools.get(a);
-      if (p) (p.cl ? fullRead : v2Read).add(p);
+      if (p) (p.v4 ? v4Read : p.cl ? fullRead : v2Read).add(p);
     }
     this.pendingDirty.clear();
-    // CL pools never read, or whose tick moved into bitmap words we don't have.
+    // CL pools never read, or whose tick moved into bitmap words we don't have. V4 pools have no
+    // pool contract: their words come from StateView, so they get a StateView read instead.
     const wordRead = new Map<Pool, number[]>();
     for (const p of this.pools.values()) {
-      if (!p.cl || p.v4 || fullRead.has(p)) continue; // V4 bitmap words come from StateView (refreshV4), not the pool
-      if (p.cl.sqrtPriceX96 === 0n) {
-        fullRead.add(p);
+      if (!p.cl || fullRead.has(p) || v4Read.has(p)) continue;
+      const need = p.cl.sqrtPriceX96 === 0n ? null : wordsNeeded(p.cl.tick, p.cl.tickSpacing).filter((w) => !p.cl!.words.has(w));
+      if (p.v4) {
+        if (need === null || need.length) v4Read.add(p);
         continue;
       }
-      const need = wordsNeeded(p.cl.tick, p.cl.tickSpacing).filter((w) => !p.cl!.words.has(w));
-      if (need.length) wordRead.set(p, need);
-    }
-    for (const p of touched) {
-      if (!fullRead.has(p)) {
-        const v = virtualReserves(p.cl!);
-        p.reserve0 = v.reserve0;
-        p.reserve1 = v.reserve1;
-      }
+      if (need === null) fullRead.add(p);
+      else if (need.length) wordRead.set(p, need);
     }
 
     // One multicall for everything the logs could not settle.
@@ -887,13 +975,18 @@ export class PoolRegistry {
         });
       });
     }
-    const reread = v2Read.size + feeRead.size + wordRead.size + fullRead.size;
+    const reread = v2Read.size + feeRead.size + wordRead.size + fullRead.size + v4Read.size;
     await Promise.all([
       calls.length ? this.chain.multicall(calls, block).then((res) => apply.forEach((f) => f(res))) : undefined,
       fullRead.size ? this.refreshCl([...fullRead], block, this.chain) : undefined,
+      v4Read.size ? this.refreshV4Set([...v4Read], block) : undefined,
     ]);
     this.syncedBlock = block;
-    return { fromLogs, reread };
+    const changed = new Set<string>();
+    for (const set of [touched, v2Read, feeRead, fullRead, v4Read]) for (const p of set) changed.add(p.address);
+    for (const p of wordRead.keys()) changed.add(p.address);
+    this.stateEpoch++;
+    return { fromLogs, reread, changed };
   }
 
   /** Price-relevant state of every watched pool, for the drift check (fee and bitmap words excluded). */
@@ -937,19 +1030,41 @@ export class PoolRegistry {
   // Pricing helpers
   // ------------------------------------------------------------------------
 
+  /**
+   * Real amount of `token` a pool holds, as far as we know it: the token balance for V2-style pools
+   * (their reserves) and for CL pools whose balances were read, otherwise the amount in the active
+   * tick range. Never the virtual reserve, which overstates a narrow concentrated position by orders
+   * of magnitude (a tight WETH/wstETH range showed as 113,967 WETH).
+   */
+  realAmount(p: Pool, token: string): bigint {
+    const zero = p.token0 === token;
+    if (!zero && p.token1 !== token) return 0n;
+    if (!p.cl) return zero ? p.reserve0 : p.reserve1;
+    const bal = zero ? p.bal0 : p.bal1;
+    if (bal !== undefined) return bal;
+    const a = activeRangeAmounts(p.cl);
+    return a ? (zero ? a.amount0 : a.amount1) : 0n;
+  }
+
   /** ETH/USD from the deepest WETH/USDC pool in the list (falls back to 3000 with a warning). */
   ethPriceFrom(pools: Pool[]): number {
     const usdc = TOKENS.USDC!.address.toLowerCase();
     let best: Pool | undefined;
+    let bestDepth = 0n;
     for (const p of pools) {
       const isPair = (p.token0 === WETH && p.token1 === usdc) || (p.token1 === WETH && p.token0 === usdc);
-      if (!isPair) continue;
-      if (!best || this.wethReserve(p) > this.wethReserve(best)) best = p;
+      if (!isPair || p.reserve0 === 0n || p.reserve1 === 0n) continue;
+      const depth = this.realAmount(p, WETH);
+      if (!best || depth > bestDepth) {
+        best = p;
+        bestDepth = depth;
+      }
     }
     if (!best || this.wethReserve(best) === 0n) {
       log.warn("no WETH/USDC pool found for pricing; assuming $3000/ETH");
       return 3000;
     }
+    // The reserve ratio (virtual reserves for CL pools) is the pool's exact spot price.
     const wethRes = Number(this.wethReserve(best)) / 1e18;
     const usdcRes = Number(best.token0 === usdc ? best.reserve0 : best.reserve1) / 1e6;
     return usdcRes / wethRes;
@@ -965,46 +1080,57 @@ export class PoolRegistry {
     return 0n;
   }
 
-  /** Pool depth measured in WETH-equivalent of its base-token side (0 if it has no base token). */
+  /** Pool depth measured in WETH-equivalent of its base-token side (0 if it has no base token), from real amounts. */
   liquidityInWeth(p: Pool, ethUsd: number): number {
-    for (const [tok, res] of [
-      [p.token0, p.bal0 ?? p.reserve0],
-      [p.token1, p.bal1 ?? p.reserve1],
-    ] as Array<[string, bigint]>) {
-      if (tok === WETH) return Number(res) / 1e18;
+    for (const tok of [p.token0, p.token1]) {
+      if (tok === WETH) return Number(this.realAmount(p, tok)) / 1e18;
       const meta = Object.values(TOKENS).find((t) => t.address.toLowerCase() === tok);
-      if (meta?.approxUsd) return (Number(res) / 10 ** meta.decimals) * meta.approxUsd / ethUsd;
-      if (meta?.symbol === "cbETH") return Number(res) / 1e18; // close enough to ETH for a depth filter
+      if (meta?.approxUsd) return ((Number(this.realAmount(p, tok)) / 10 ** meta.decimals) * meta.approxUsd) / ethUsd;
+      if (meta?.symbol === "cbETH") return Number(this.realAmount(p, tok)) / 1e18; // close enough to ETH for a depth filter
     }
     return 0;
   }
 
   /**
-   * USD value of `amount` of `token`, priced through the deepest pool that
-   * pairs it with WETH or a stablecoin. Returns null when no route is known.
+   * USD value of `amount` of `token`. Base tokens are priced directly; anything else through the
+   * deepest pool pairing it with WETH or a stablecoin, by real depth, and only if that pool is at
+   * least PRICE_MIN_DEPTH_WETH deep. A thin pool's price is exactly what produced profit "outliers"
+   * worth thousands of dollars, so a token with no deep pool has no price (null), not a wrong one.
    */
   usdValue(token: string, amount: bigint, ethUsd: number): number | null {
     const t = token.toLowerCase();
-    const meta = this.token(t);
-    const decimals = meta?.decimals ?? 18;
-    const amt = Number(amount) / 10 ** decimals;
-    if (t === WETH) return amt * ethUsd;
+    const decimals = this.token(t)?.decimals ?? 18;
+    const per = this.usdPerUnit(t, ethUsd);
+    return per === null ? null : (Number(amount) / 10 ** decimals) * per;
+  }
+
+  /** USD price of one whole unit of `token`, or null when no deep enough pool prices it. Cached per state change. */
+  usdPerUnit(token: string, ethUsd: number): number | null {
+    const t = token.toLowerCase();
+    if (t === WETH) return ethUsd;
     const known = Object.values(TOKENS).find((x) => x.address.toLowerCase() === t);
-    if (known?.approxUsd) return amt * known.approxUsd;
-    if (known?.symbol === "cbETH") return amt * ethUsd;
-    // Price via the deepest WETH pool containing the token.
-    let best: Pool | undefined;
+    if (known?.approxUsd) return known.approxUsd;
+    if (known?.symbol === "cbETH") return ethUsd;
+    const hit = this.priceCache.get(t);
+    if (hit && hit.epoch === this.stateEpoch && hit.ethUsd === ethUsd) return hit.usdPerUnit;
+    const decimals = this.token(t)?.decimals ?? 18;
+    let best: { depth: number; price: number } | undefined;
     for (const p of this.pools.values()) {
       if (p.token0 !== t && p.token1 !== t) continue;
       const other = p.token0 === t ? p.token1 : p.token0;
-      if (other !== WETH) continue;
-      if (!best || this.wethReserve(p) > this.wethReserve(best)) best = p;
+      const otherUsd = other === WETH ? ethUsd : Object.values(TOKENS).find((x) => x.address.toLowerCase() === other)?.approxUsd;
+      if (!otherUsd) continue;
+      const depth = this.liquidityInWeth(p, ethUsd);
+      if (!(depth >= this.priceMinDepthWeth) || (best && depth <= best.depth)) continue;
+      const tokRes = Number(p.token0 === t ? p.reserve0 : p.reserve1) / 10 ** decimals;
+      const otherDec = other === WETH ? 18 : (this.token(other)?.decimals ?? 18);
+      const otherRes = Number(p.token0 === t ? p.reserve1 : p.reserve0) / 10 ** otherDec;
+      if (!(tokRes > 0) || !(otherRes > 0)) continue;
+      best = { depth, price: (otherRes / tokRes) * otherUsd };
     }
-    if (!best) return null;
-    const tokRes = Number(best.token0 === t ? best.reserve0 : best.reserve1) / 10 ** decimals;
-    const wethRes = Number(this.wethReserve(best)) / 1e18;
-    if (tokRes === 0) return null;
-    return amt * (wethRes / tokRes) * ethUsd;
+    const usdPerUnit = best && Number.isFinite(best.price) ? best.price : null;
+    this.priceCache.set(t, { epoch: this.stateEpoch, ethUsd, usdPerUnit });
+    return usdPerUnit;
   }
 
   // ------------------------------------------------------------------------
@@ -1103,10 +1229,10 @@ export class PoolRegistry {
       discoveredAt: new Date().toISOString(),
       block,
       tokens: [...this.tokens.values()],
-      // V4 pools are keyed by poolId, not an address, and are cheap to rediscover — keep them out of the
-      // address-keyed snapshot and let the V4 lookup re-add them on each start.
+      // V4 pools are saved too (keyed by poolId, with their PoolKey in `v4`). They used to be left out
+      // on the assumption a lookup re-added them on each start, but nothing did: every restart that
+      // loaded this file dropped Uniswap V4 coverage until the next "discover".
       pools: [...this.pools.values()]
-        .filter((p) => !p.v4)
         .map(({ reserve0: _r0, reserve1: _r1, updatedBlock: _b, cl, bal0: _x, bal1: _y, ...rest }) =>
           cl ? { ...rest, cl: { tickSpacing: cl.tickSpacing, feePips: cl.feePips, quoter: cl.quoter } } : rest,
         ),

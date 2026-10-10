@@ -234,6 +234,16 @@ export interface Settings {
   rpcConcurrency: number | undefined;
   rpcMinIntervalMs: number | undefined;
   rpcBatchMaxCount: number | undefined;
+  /** One RPC HTTP request is abandoned (and retried) after this long; a whole call, retries included, after 3x. */
+  rpcTimeoutMs: number;
+  /** Scan-loop watchdog: a block handler running longer than this is reported and the next block goes ahead. */
+  blockWatchdogMs: number;
+  /** Re-score every route (not only those touching changed pools) every N blocks. */
+  fullRescanBlocks: number;
+  /** A trade valued above this (USD) is treated as mispriced: not recorded, not shown, not learned from. */
+  sanityMaxProfitUsd: number;
+  /** A pool must be at least this deep (WETH-equivalent, real tokens) to set a token's USD price. */
+  priceMinDepthWeth: number;
   /** Verify opportunities with the executor bytecode injected via eth_call state override (no deployment). */
   simOverride: boolean;
 
@@ -253,6 +263,8 @@ export interface Settings {
   // --- upgrade 3: Flashblocks ---
   flashblocks: boolean;
   flashblocksRpcUrl: string;
+  /** Base's Flashblocks websocket: every ~200ms Flashblock with its receipts (logs). Empty = poll the RPC instead. */
+  flashblocksWsUrl: string | undefined;
   flashblockPollMs: number;
   flashblockMaxPools: number;
   // --- upgrade 4: liquidations ---
@@ -378,6 +390,11 @@ export function loadSettings(): Settings {
     rpcConcurrency: process.env.RPC_CONCURRENCY ? num("RPC_CONCURRENCY", 6) : undefined,
     rpcMinIntervalMs: process.env.RPC_MIN_INTERVAL_MS ? num("RPC_MIN_INTERVAL_MS", 0) : undefined,
     rpcBatchMaxCount: process.env.RPC_BATCH_MAX_COUNT ? num("RPC_BATCH_MAX_COUNT", 20) : undefined,
+    rpcTimeoutMs: num("RPC_TIMEOUT_MS", 10_000),
+    blockWatchdogMs: num("BLOCK_WATCHDOG_MS", 30_000),
+    fullRescanBlocks: Math.max(1, num("FULL_RESCAN_BLOCKS", 30)),
+    sanityMaxProfitUsd: num("SANITY_MAX_PROFIT_USD", 1000),
+    priceMinDepthWeth: num("PRICE_MIN_DEPTH_WETH", 1),
     simOverride: (str("SIM_OVERRIDE", "true") ?? "true").toLowerCase() !== "false",
     clPools: bool("CL_POOLS", true),
     multiHop: bool("MULTI_HOP", true),
@@ -390,6 +407,8 @@ export function loadSettings(): Settings {
     flashSource: (str("FLASH_SOURCE", "morpho") as Settings["flashSource"]),
     flashblocks: bool("FLASHBLOCKS", false),
     flashblocksRpcUrl: str("FLASHBLOCKS_RPC_URL", "https://mainnet.base.org")!,
+    // "off" (or "none") switches the stream off and falls back to polling the RPC at the pending state.
+    flashblocksWsUrl: ((v) => (v && !/^(off|none|false)$/i.test(v) ? v : undefined))(process.env.FLASHBLOCKS_WS_URL === undefined ? "wss://mainnet.flashblocks.base.org/ws" : process.env.FLASHBLOCKS_WS_URL),
     flashblockPollMs: num("FLASHBLOCK_POLL_MS", 400),
     flashblockMaxPools: num("FLASHBLOCK_MAX_POOLS", 120),
     liquidations: bool("LIQUIDATIONS", true),
@@ -431,7 +450,7 @@ export function loadSettings(): Settings {
     learnPruneDays: num("LEARN_PRUNE_DAYS", 3),
     liveMaxBidShare: num("LIVE_MAX_BID_SHARE", 0.3),
     liveMinEvUsd: num("LIVE_MIN_EV_USD", 0.01),
-    liveActAlways: bool("LIVE_ACT_ALWAYS", true),
+    liveActAlways: bool("LIVE_ACT_ALWAYS", false),
     liveMaxBidGwei: num("LIVE_MAX_BID_GWEI", 25),
   };
   if (settings.cloudUrl) {
@@ -457,6 +476,10 @@ export function loadSettings(): Settings {
   if (!(settings.liveMaxBidShare >= 0 && settings.liveMaxBidShare <= 0.5)) throw new Error("LIVE_MAX_BID_SHARE must be between 0 and 0.5");
   if (!(settings.liveMinEvUsd >= 0 && settings.liveMinEvUsd <= 1)) throw new Error("LIVE_MIN_EV_USD must be between 0 and 1");
   if (!(settings.liveMaxBidGwei >= 0 && settings.liveMaxBidGwei <= 100)) throw new Error("LIVE_MAX_BID_GWEI must be between 0 and 100");
+  if (!(settings.rpcTimeoutMs >= 1000 && settings.rpcTimeoutMs <= 120_000)) throw new Error("RPC_TIMEOUT_MS must be between 1000 and 120000");
+  if (!(settings.blockWatchdogMs >= 5000)) throw new Error("BLOCK_WATCHDOG_MS must be at least 5000");
+  if (!(settings.sanityMaxProfitUsd > 0)) throw new Error("SANITY_MAX_PROFIT_USD must be above 0");
+  if (settings.flashblocksWsUrl && !/^wss?:\/\//.test(settings.flashblocksWsUrl)) throw new Error("FLASHBLOCKS_WS_URL must start with wss:// (or be off)");
   if (settings.mode === "live") {
     if (!settings.executorAddress) throw new Error("MODE=live requires EXECUTOR_ADDRESS (deploy the ArbExecutor from the dashboard, then copy its address into .env)");
     if (!settings.privateKey) throw new Error("MODE=live requires PRIVATE_KEY (run: node dist/main.js new-wallet)");

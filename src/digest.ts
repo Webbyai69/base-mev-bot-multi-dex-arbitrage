@@ -20,6 +20,8 @@ import type { MarketSummary } from "./classifier.js";
 import type { LiqDaySummary } from "./liquidations.js";
 import type { Settings } from "./config.js";
 import type { RpcUsage } from "./rpc.js";
+import type { FlashblockStats } from "./flashblocks.js";
+import type { SpeedSummary } from "./speed.js";
 
 const usd = (n: number): string => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(2);
 const pct = (x: number | null): string => (x === null ? "–" : `${(x * 100).toFixed(0)}%`);
@@ -45,7 +47,11 @@ export interface DigestInput {
   paperDays: DaySummary[];
   market?: MarketSummary;
   liq?: LiqDaySummary;
-  flashblockStats?: { ticks: number; scans: number; skippedUnchanged: number; opps: number; errors: number; maxMs: number };
+  flashblockStats?: FlashblockStats;
+  /** Time per block over the last 30 blocks. */
+  speed?: SpeedSummary;
+  /** Route checks per venue since start. */
+  venues?: Record<string, number>;
   rpc?: RpcUsage;
   refreshStats?: { checks: number; driftedPools: number };
   /** Scanner funnel since start (where candidates drop out) and what the paper engine recorded. */
@@ -64,7 +70,10 @@ export interface DigestInput {
 /** Rejection codes for the funnel stages, so the AI review and helper agents can refer to them. */
 export const FUNNEL_STAGES: Array<{ key: string; code: string; label: string }> = [
   { key: "candidates", code: "CANDIDATE", label: "candidate route checks (positive spread after swap fees; one per route per block)" },
-  { key: "unpriced", code: "NO_USD_PRICE", label: "profit token has no USD price" },
+  { key: "unchanged", code: "UNCHANGED_SKIPPED", label: "routes not re-scored because none of their pools changed since the last scan (repeated work avoided; not counted as candidates)" },
+  { key: "rotations", code: "DUPLICATE_ROTATION", label: "the same cycle reached from another start token, scored once (not counted as candidates)" },
+  { key: "unpriced", code: "NO_USD_PRICE", label: "profit token has no USD price (no pool deep enough to price it)" },
+  { key: "outlier", code: "SANITY_CAP", label: "valued above SANITY_MAX_PROFIT_USD: a pricing error, not an opportunity" },
   { key: "gasAteIt", code: "NET_NEGATIVE_AFTER_GAS", label: "gas cost more than the spread" },
   { key: "belowMin", code: "NET_PROFIT_TOO_LOW", label: "net positive but below MIN_PROFIT_USD" },
   { key: "muted", code: "MUTED_AFTER_REVERT", label: "route reverted on-chain recently (muted 20 min)" },
@@ -96,7 +105,9 @@ export function renderDigest(d: DigestInput): string {
         ["MAX_CYCLES", String(s.maxCycles)],
         ["PRIORITY_FEE_GWEI", String(s.priorityFeeGwei)],
         ["GAS model (base / V2 hop / CL hop)", `${s.gasRouteBase} / ${s.gasHopV2} / ${s.gasHopCl}`],
-        ["FLASHBLOCKS (poll ms / max pools)", `${s.flashblocks} (${s.flashblockPollMs} / ${s.flashblockMaxPools})`],
+        ["FLASHBLOCKS (trigger / poll ms / max pools)", `${s.flashblocks} (${s.flashblocksWsUrl ? "websocket stream" : "poll"} / ${s.flashblockPollMs} / ${s.flashblockMaxPools})`],
+        ["LIVE_ACT_ALWAYS", s.liveActAlways ? "true (act mode: every simulated-profitable find is sent)" : "false (expected-value gating)"],
+        ["FULL_RESCAN_BLOCKS / SANITY_MAX_PROFIT_USD", `${s.fullRescanBlocks} / ${s.sanityMaxProfitUsd}`],
         ["LIQUIDATIONS (check every / swap cost bps)", `${s.liquidations} (${s.liqCheckEvery} / ${s.liqSwapCostBps})`],
         ["TOKEN_BLACKLIST size", String(s.tokenBlacklist.size)],
         ["REFRESH_MODE / FULL_REFRESH_BLOCKS", `${s.refreshMode} / ${s.fullRefreshBlocks}`],
@@ -166,6 +177,23 @@ export function renderDigest(d: DigestInput): string {
       ),
     );
     out.push(md(["method", "calls"], Object.entries(r.byMethod).sort((a, b) => b[1] - a[1]).map(([m, n]) => [m, String(n)])));
+    if (r.callsByPurpose && Object.keys(r.callsByPurpose).length) out.push(md(["eth_call for", "calls"], Object.entries(r.callsByPurpose).sort((a, b) => b[1] - a[1]).map(([m, n]) => [m, String(n)])));
+    if (r.timeouts) out.push(`RPC requests that timed out: ${r.timeouts}.\n`);
+  }
+  if (d.speed && d.speed.samples) {
+    const sp = d.speed;
+    out.push("## Time per block (last " + sp.samples + " blocks)");
+    out.push(
+      md(
+        ["median", "p95", "max", "over 2 s", "over 200 ms (Denim)", "route checks/min", "re-scored/min", "skipped unchanged/min", "watchdog stalls"],
+        [[`${sp.p50Ms} ms`, `${sp.p95Ms} ms`, `${sp.maxMs} ms`, String(sp.over2s), String(sp.over200ms), String(sp.routeChecksPerMin), String(sp.scoredPerMin), String(sp.unchangedPerMin), String(sp.stalls)]],
+      ),
+    );
+    out.push(md(["phase (avg ms)", "fetch", "refresh", "gas", "find", "verify", "classifier wait", "rest"], [["", ...["fetchMs", "refreshMs", "gasMs", "findMs", "verifyMs", "waitMs", "restMs"].map((k) => String(sp.phases[k as keyof typeof sp.phases]))]]));
+  }
+  if (d.venues && Object.keys(d.venues).length) {
+    out.push("Route checks by venue since start (a route counts once per DEX it touches):\n");
+    out.push(md(["venue", "route checks"], Object.entries(d.venues).sort((a, b) => b[1] - a[1]).map(([k, n]) => [k, String(n)])));
   }
   if (d.refreshStats) {
     out.push(`Event-driven refresh self-checks: ${d.refreshStats.checks}, pools that drifted from a full re-read: ${d.refreshStats.driftedPools}.\n`);
@@ -221,7 +249,12 @@ export function renderDigest(d: DigestInput): string {
   if (d.flashblockStats) {
     const f = d.flashblockStats;
     out.push("## Flashblocks loop (since start)");
-    out.push(md(["ticks", "scans", "unchanged (skipped)", "opps", "errors", "slowest tick ms"], [[String(f.ticks), String(f.scans), String(f.skippedUnchanged), String(f.opps), String(f.errors), String(f.maxMs)]]));
+    out.push(
+      md(
+        ["source", "flashblocks received", "per min", "that changed a watched pool", "re-scores", "re-scores/min", "finds", "errors", "avg ms", "slowest ms", "poll reads (no change)"],
+        [[f.streaming ? "stream" : "poll (stream down/off)", String(f.flashblocks), String(f.flashblocksPerMin), String(f.relevant), String(f.scans), String(f.scansPerMin), String(f.opps), String(f.errors), String(f.avgMs), String(f.maxMs), `${f.ticks} (${f.skippedUnchanged})`]],
+      ),
+    );
   }
 
   if (d.liq || d.borrowersWatched !== undefined) {

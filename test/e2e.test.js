@@ -129,7 +129,9 @@ test("state-override simulation verifies routes exactly and weeds out fee-on-tra
   for (let i = 0; i < 3; i++) {
     n = sc.c.nextBlock();
     await r.refreshAll(n);
-    opps = await scanner.scan(n, await gasEst.quote(n, null), r.ethPrice(), 0.01);
+    // The pools don't change between these blocks, so only a full re-check (every FULL_RESCAN_BLOCKS
+    // in the bot) scores the route again; force one each time to count the failures.
+    opps = await scanner.scan(n, await gasEst.quote(n, null), r.ethPrice(), 0.01, { full: true });
     const meme = opps.find((o) => o.pairSymbols.includes("MEME"));
     assert.ok(meme, `MEME route found on attempt ${i + 1}`);
     assert.equal(meme.sim, "executor-revert", meme.simDetail);
@@ -255,9 +257,10 @@ test("paper engine tracks outcomes: taken, persisted, closed", async () => {
   assert.equal(s[0].persisted, 1, "opportunity persisted");
   assert.ok(s[0].realisticNetUsd > 0);
 
-  // A third one that the market closes without a detectable arb tx -> "closed".
+  // A third one that the market closes without a detectable arb tx -> "closed". (A different price
+  // from the spread above, which is still open: an unchanged spread is not reported again.)
   scenario.aeroWethUsdc.reserve0 = 50n * E18;
-  scenario.aeroWethUsdc.reserve1 = 105_000n * E6;
+  scenario.aeroWethUsdc.reserve1 = 106_000n * E6;
   n = scenario.c.nextBlock();
   await registry.refreshAll(n);
   opps = await scanner.scan(n, await gasEst.quote(n, null), ethUsd, 0.01);

@@ -126,18 +126,26 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 @media (max-width: 860px) { .hero { grid-template-columns: minmax(0, 1fr); padding-top: 28px; } }
 
 /* Figures */
-.figures { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-block: 1px solid var(--line-strong); }
+.figures { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-block: 1px solid var(--line-strong); }
 .fig { padding: 14px 18px 16px; border-left: 1px solid var(--line); min-width: 0; }
 .fig:first-child { border-left: 0; padding-left: 0; }
 .fig-label { font-size: 13px; color: var(--ink-2); display: block; }
 .fig-value { display: block; font-size: 32px; line-height: 1.15; font-weight: 600; font-variation-settings: "wdth" 72; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fig-sub { display: flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); margin-top: 2px; min-width: 0; }
 .fig-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1200px) and (min-width: 901px) {
+  .figures { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .fig:nth-child(5) { border-left: 0; padding-left: 0; }
+  .fig:nth-child(n+5) { border-top: 1px solid var(--line); }
+}
+.asof { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+.asof.old { color: var(--warn-ink); font-weight: 600; }
+.fig-asof { margin: 6px 0 0; text-align: right; }
 @media (max-width: 900px) {
   .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fig { border-left: 0; border-top: 1px solid var(--line); padding-left: 0; }
   .fig:nth-child(-n+2) { border-top: 0; }
-  .fig:nth-child(2), .fig:nth-child(4) { padding-left: 18px; border-left: 1px solid var(--line); }
+  .fig:nth-child(even) { padding-left: 18px; border-left: 1px solid var(--line); }
   .fig:last-child { grid-column: 1 / -1; }
 }
 
@@ -365,7 +373,10 @@ details.optional[open] > summary { margin-bottom: 8px; }
       <div class="fig" id="fig-taken"><span class="fig-label">Taken by other bots</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
       <div class="fig" id="fig-win"><span class="fig-label">Win rate</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
       <div class="fig" id="fig-rpc"><span class="fig-label">RPC load</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
+      <div class="fig" id="fig-speed"><span class="fig-label">Time per block</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
+      <div class="fig" id="fig-fb"><span class="fig-label">Flashblocks scans</span><span class="fig-value num">–</span><span class="fig-sub"></span></div>
     </section>
+    <p class="asof fig-asof" data-src="summary,state"></p>
 
     <div class="grid">
       <section class="panel" aria-labelledby="opps-h">
@@ -555,6 +566,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
   const feeText = (ppm) => `${+(ppm / 10000).toPrecision(3)}%`;
   const DEX = { "uniswap-v2": "Uniswap V2", "uniswap-v3": "Uniswap V3", "sushiswap-v2": "SushiSwap", baseswap: "BaseSwap", aerodrome: "Aerodrome", slipstream: "Slipstream", "slipstream-gc": "Slipstream", "slipstream-v3": "Slipstream" };
   const dexName = (id) => DEX[id] || String(id || "?");
+  const PURPOSE = { "block+logs": "Block and logs", refresh: "Updating pools from events", "full-refresh": "Full pool re-read", verify: "On-chain checks of finds", gas: "Gas (L1 fee)", liquidations: "Aave health checks", classifier: "MEV feed", "watch-list": "Adding pools", other: "Other (dashboard, start-up)" };
   const KIND = { "classic V2 two-pool": "Two pools, V2-style", "concentrated-liquidity two-pool": "Two pools, concentrated liquidity", "triangular / multi-hop": "Triangular (three pools)" };
   const hostOf = (u) => {
     try {
@@ -599,6 +611,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     blocks: [], feed: [], open: new Set(), lastBlockSeen: 0, sse: "connecting", stale: false,
     stopConfirm: false, stopError: null, tables: {}, reviewOpen: false,
     mirror: null, stopRequest: null, waiting: false, connLost: false, skew: 0,
+    asOf: {},
   };
   const W = { providers: new Map(), detail: null, provider: null, account: null, chainId: null, error: null, actions: {}, topUp: "0.002", deployed: null, deployedArb: null, deployedLiq: null };
   try {
@@ -635,7 +648,17 @@ details.optional[open] > summary { margin-bottom: 8px; }
     if (TOKEN) headers["x-bot-token"] = TOKEN;
     if (method === "POST") headers["x-dashboard"] = "1";
     if (body !== undefined) headers["content-type"] = "application/json";
-    const res = await fetch(path, { method: method || "GET", headers, cache: "no-store", credentials: "same-origin", ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    // A request that hangs must not freeze the panels: give up after 15 s and let the next refresh retry.
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    let res;
+    try {
+      res = await fetch(path, { method: method || "GET", headers, cache: "no-store", credentials: "same-origin", signal: ctl.signal, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    } catch (e) {
+      throw new Error(e && e.name === "AbortError" ? `${path}: no answer in 15 s` : `${path}: ${e && e.message ? e.message : e}`);
+    } finally {
+      clearTimeout(timer);
+    }
     if (res.status === 401 && TOKEN) {
       markStale();
       throw new Error("session ended");
@@ -659,6 +682,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
       const wasWaiting = S.waiting;
       const first = wasWaiting || !S.state;
       S.waiting = false;
+      markAsOf("state", st);
       applyState(st, full || first);
       if (wasWaiting) {
         // The online copy just got its first data from your PC: load the rest too.
@@ -676,10 +700,45 @@ details.optional[open] > summary { margin-bottom: 8px; }
     renderBanners();
     renderHeader();
   }
-  const loadSummary = () => api("/api/summary").then((x) => { S.summary = x; renderSummaryParts(); }).catch(() => {});
-  const loadRecent = () => api("/api/recent").then((x) => { S.recent = x; S.feed = x.opps || []; renderFeed(); renderRivals(); renderLiq(); }).catch(() => {});
-  const loadContracts = () => api("/api/contracts").then((x) => { S.contracts = x; renderWallet(); }).catch(() => {});
-  const loadReview = () => api("/api/review").then((x) => { S.review = x; renderReview(); }).catch(() => {});
+  /**
+   * When each kind of data was last loaded, shown as "Data as of …" on every panel, so a panel that
+   * stopped updating says so instead of looking current. The online copy uses the PC's last push.
+   */
+  function markAsOf(src) {
+    const pushed = CLOUD && S.mirror && S.mirror.lastPushAt ? Date.parse(S.mirror.lastPushAt) - S.skew : NaN;
+    S.asOf[src] = Number.isFinite(pushed) ? Math.min(Date.now(), pushed) : Date.now();
+    renderAsOf();
+  }
+  function renderAsOf() {
+    const now = Date.now();
+    for (const el of document.querySelectorAll(".asof[data-src]")) {
+      const times = el.dataset.src.split(",").map((k) => S.asOf[k]).filter((t) => t);
+      if (!times.length) {
+        el.textContent = LIVE ? "Loading…" : "";
+        el.classList.remove("old");
+        continue;
+      }
+      const t = Math.min(...times);
+      const age = now - t;
+      const old = age > 60000;
+      el.textContent = `Data as of ${clock(new Date(t).toISOString())}${old ? `, ${dur(age)} old` : ""}`;
+      el.classList.toggle("old", old);
+      el.title = old ? "This panel hasn't refreshed for over a minute. It keeps retrying; if this stays, reload the page." : "";
+    }
+  }
+  /** One request per kind at a time: a slow answer can't pile up behind itself. */
+  const inflight = {};
+  function guarded(name, fn) {
+    return () => {
+      if (inflight[name]) return inflight[name];
+      inflight[name] = fn().finally(() => (inflight[name] = null));
+      return inflight[name];
+    };
+  }
+  const loadSummary = guarded("summary", () => api("/api/summary").then((x) => { S.summary = x; markAsOf("summary"); renderSummaryParts(); }).catch(() => {}));
+  const loadRecent = guarded("recent", () => api("/api/recent").then((x) => { S.recent = x; S.feed = x.opps || []; markAsOf("recent"); renderFeed(); renderRivals(); renderLiq(); }).catch(() => {}));
+  const loadContracts = guarded("contracts", () => api("/api/contracts").then((x) => { S.contracts = x; markAsOf("contracts"); renderWallet(); }).catch(() => {}));
+  const loadReview = guarded("review", () => api("/api/review").then((x) => { S.review = x; markAsOf("review"); renderReview(); }).catch(() => {}));
 
   function connectEvents() {
     const es = new EventSource(`/api/events?t=${encodeURIComponent(TOKEN)}`);
@@ -692,6 +751,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     });
     on("hello", (st) => {
       S.sse = "up";
+      markAsOf("state");
       applyState(st, true);
       loadRecent(); // rebuild the feed after a reconnect so nothing is doubled or missed
     });
@@ -704,7 +764,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     es.onerror = () => {
       S.sse = "down";
       renderHeader();
-      api("/api/state").then((st) => applyState(st, false)).catch(() => {});
+      api("/api/state").then((st) => (markAsOf("state"), applyState(st, false))).catch(() => {});
     };
   }
 
@@ -713,7 +773,9 @@ details.optional[open] > summary { margin-bottom: 8px; }
     let since = 0;
     let fails = 0;
     const loop = async () => {
-      if (!document.hidden && !S.stale) {
+      // Runs in a background tab too (the browser may slow it down, never stop it), so the
+      // numbers are current the moment you look.
+      if (!S.stale) {
         try {
           const r = await api(`/api/live?since=${since}`);
           fails = 0;
@@ -784,6 +846,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
   }
   function onOpp(o) {
     if (S.feed.some((x) => x.id === o.id)) return;
+    S.asOf.recent = Date.now();
     S.feed.unshift(o);
     if (S.feed.length > 40) S.feed.length = 40;
     const box = $("feed");
@@ -980,6 +1043,38 @@ details.optional[open] > summary { margin-bottom: 8px; }
         h("span", { title: host }, limited ? `${int(u.rateLimited)} rate-limited ${plural(u.rateLimited, "answer", "answers")}` : onAlchemy ? `≈${cuDay.toFixed(1)}M CU a day ${over ? "(free plan ≈1M)" : "(inside the free plan)"}` : `≈${cuDay.toFixed(1)}M CU a day if on Alchemy`),
       );
     }
+    renderSpeedFigure();
+    renderFlashblocksFigure();
+  }
+  /** Median time to process a confirmed block over the last 30 (target < 2 s today, < 200 ms at Denim). */
+  function renderSpeedFigure() {
+    const st = S.state;
+    const sp = st?.speed;
+    const el = $("fig-speed");
+    if (!sp || !sp.samples) {
+      fig("fig-speed", "–", h("span", null, st && !st.running ? "bot not running here" : "measured on each block"));
+      el.title = "";
+      return;
+    }
+    const slow = sp.over2s > 0;
+    fig("fig-speed", sp.p50Ms >= 1000 ? `${(sp.p50Ms / 1000).toFixed(2)} s` : `${int(sp.p50Ms)} ms`, icon(slow ? "warn" : sp.p50Ms <= sp.denimTargetMs ? "good" : "good"), h("span", null, `${sp.over2s} of last ${sp.samples} over 2 s, p95 ${int(sp.p95Ms)} ms`));
+    const ph = sp.phases || {};
+    el.title = `Median over the last ${sp.samples} blocks. Target: under 2 s now, under 200 ms before Denim (${sp.over200ms} of ${sp.samples} are over 200 ms).\nAverage per block: fetch ${ph.fetchMs} ms, refresh ${ph.refreshMs} ms, gas ${ph.gasMs} ms, route search ${ph.findMs} ms, on-chain check ${ph.verifyMs} ms, classifier wait ${ph.waitMs} ms, other ${ph.restMs} ms.\n${int(sp.routeChecksPerMin)} route checks a minute; ${int(sp.unchangedPerMin)} routes a minute skipped because none of their pools changed.`;
+  }
+  /** Flashblocks re-scores per minute (one per Flashblock that changes a watched pool; ~300 Flashblocks a minute arrive). */
+  function renderFlashblocksFigure() {
+    const st = S.state;
+    const el = $("fig-fb");
+    if (!st || !st.settings) return fig("fig-fb", "–", h("span", null, ""));
+    if (!st.settings.flashblocks) {
+      el.title = "";
+      return fig("fig-fb", "Off", h("span", null, "FLASHBLOCKS=false in .env"));
+    }
+    const f = st.flashblocks;
+    if (!f) return fig("fig-fb", "–", h("span", null, st.running ? "starting…" : "bot not running here"));
+    const down = !f.streaming;
+    fig("fig-fb", `${int(f.scansPerMin)}/min`, icon(down ? "warn" : "good"), h("span", null, down ? (st.settings.flashblocksStream ? "stream down, polling the RPC" : "polling the RPC (no stream)") : `${int(f.flashblocksPerMin)} Flashblocks/min received`));
+    el.title = `Re-scores in the last minute: one for each Flashblock that changed a watched pool (Flashblocks that change none need no scan).\nSince start: ${int(f.flashblocks)} Flashblocks received, ${int(f.relevant)} changed a watched pool, ${int(f.scans)} re-scores, ${int(f.opps)} finds, ${int(f.errors)} errors. Average re-score ${int(f.avgMs)} ms, slowest ${int(f.maxMs)} ms.${f.lastFlashblockAgoMs >= 0 ? `\nLast Flashblock ${ago(f.lastFlashblockAgoMs)}.` : ""}`;
   }
 
   // ---------------------------------------------------------------- block tape
@@ -1304,7 +1399,8 @@ details.optional[open] > summary { margin-bottom: 8px; }
     }
     const total = f.candidates;
     const since = st.rpc?.since || st.startedAt;
-    box.append(h("p", { class: "lead" }, h("b", { class: "num" }, int(total)), ` route checks in the ${dur(Date.parse(st.now) - Date.parse(since))} since the bot started. Each is one route with a positive spread after swap fees, in one block, so a spread that stays open for 30 blocks counts 30 times.`));
+    box.append(h("p", { class: "lead" }, h("b", { class: "num" }, int(total)), ` route checks in the ${dur(Date.parse(st.now) - Date.parse(since))} since the bot started. Each is one route with a positive spread after swap fees, re-scored because one of its pools changed. A route whose pools didn't change isn't checked again (it would give the same answer), except in a full re-check every ${int(st.settings.fullRescanBlocks || 30)} blocks.`));
+    if (f.unchanged || f.rotations) box.append(h("p", { class: "sub" }, `Work avoided, not counted above: ${int(f.unchanged || 0)} route evaluations skipped because none of their pools had changed, and ${int(f.rotations || 0)} duplicate cycles (the same trade read from another start token) scored once.`));
     const group = (title) => box.append(h("div", { class: "fr-group" }, title));
     const row = (label, n, cls) => box.append(h("div", { class: "fr" },
       h("span", null, label),
@@ -1313,7 +1409,8 @@ details.optional[open] > summary { margin-bottom: 8px; }
     group("Dropped before the on-chain check");
     row("Gas would cost more than the spread", f.gasAteIt || 0, "m-drop");
     row(`Profit after gas below your ${usd(st.settings.minProfitUsd)} minimum`, f.belowMin || 0, "m-drop");
-    row("No USD price for the profit token", f.unpriced || 0, "m-drop");
+    row("No USD price for the profit token (no pool deep enough to price it)", f.unpriced || 0, "m-drop");
+    row(`Valued over ${usd(st.settings.sanityMaxProfitUsd || 1000)}: a pricing error, not an opportunity`, f.outlier || 0, "m-drop");
     row("Muted for 20 minutes after an on-chain revert", f.muted || 0, "m-drop");
     row("Skipped by what it has learned (keeps failing test runs)", f.learnedSkip || 0, "m-drop");
     row("Needed a pool that a better route was already using", f.overlapping || 0, "m-drop");
@@ -1328,6 +1425,17 @@ details.optional[open] > summary { margin-bottom: 8px; }
       row("New paper opportunities", p.recorded || 0, "m-ours");
       row("Skipped: the same route was already being tracked", p.alreadyTracked || 0, "m-drop");
     }
+    const vt = venueTable();
+    if (vt) box.append(vt);
+  }
+
+  /** Route checks per venue since start: where the scanning work goes (a route counts once per DEX it touches). */
+  function venueTable() {
+    const v = S.state?.venues;
+    if (!v || !Object.keys(v).length) return null;
+    const rows = Object.entries(v).sort((a, b) => b[1] - a[1]);
+    const mins = Math.max(1, (Date.parse(S.state.now) - Date.parse(S.state.rpc?.since || S.state.startedAt)) / 60000);
+    return h("div", null, h("h3", null, "Route checks by venue"), table(["Venue", "Route checks", "Per minute"], rows.map(([k, n]) => [dexName(k), int(n), int(n / mins)]), [false, true, true]));
   }
 
   // ---------------------------------------------------------------- rivals
@@ -1347,7 +1455,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
       box.append(empty(S.state?.settings && S.state.settings.mevFeed === false ? "The MEV feed is off (MEV_FEED=false)." : "No arbitrage by other bots recorded today yet."));
     } else {
       const took = new Map((S.summary.today?.takers || []).map((t) => [String(t.bot).toLowerCase(), t.count]));
-      box.append(table(["Bot", "Arbitrages", "Their profit", "Gas paid", "Took yours"], m.bots.slice(0, 8).map((b) => [isOurs(b.bot) ? h("span", null, h("i", { class: "marker m-ours" }), addrLink(b.bot), " (your bot)") : h("span", null, h("i", { class: "marker m-rival" }), addrLink(b.bot)), int(b.arbitrage), usd(b.profitUsd), usdFine(b.costUsd), int(took.get(String(b.bot).toLowerCase()) || 0)]), [false, true, true, true, true]));
+      box.append(table(["Bot", "Arbitrages", "Arbitrage profit", "Gas paid", "Took yours"], m.bots.slice(0, 8).map((b) => [isOurs(b.bot) ? h("span", null, h("i", { class: "marker m-ours" }), addrLink(b.bot), " (your bot)") : h("span", null, h("i", { class: "marker m-rival" }), addrLink(b.bot)), int(b.arbitrage), usd(b.profitUsd), usdFine(b.costUsd), int(took.get(String(b.bot).toLowerCase()) || 0)]), [false, true, true, true, true]));
       box.append(h("p", { class: "sub" }, `${int(m.arbitrageTxs)} arbitrages today worth ${usd(m.arbitrageProfitUsd)} in total${m.sandwichTxs ? `, plus ${int(m.sandwichTxs)} sandwiches` : ""}.`));
     }
     const pr = m?.arbPriority;
@@ -1551,7 +1659,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     }
     if ((L.topPools || []).length) {
       box.append(h("h3", { style: "margin-top:22px" }, "Top pools — where the action is"));
-      box.append(h("p", { class: "sub" }, "The pools worth watching most, by value-score: depth × how often money moves through them (rivals' arbs and our own finds) × the spread seen. Decayed, so it follows the recent market and is what the scan and the hot set prioritise."));
+      box.append(h("p", { class: "sub" }, "The pools worth watching most, by value-score: depth × how often money moves through them (rivals' arbs and our own finds) × the spread seen. Depth is the pool's real tokens (not a concentrated position's virtual reserves); each trade adds at most $50 of edge, and trades valued past the sanity cap add none. Decayed, so it follows the recent market."));
       box.append(h("div", { class: "scroll-x" }, h("table", { class: "t" },
         h("thead", null, h("tr", null, ["Pool", "Pair", "DEX", "Score", "Liq (WETH)", "Rival arbs", "Our finds", "Edge seen"].map((x) => h("th", null, x)))),
         h("tbody", null, L.topPools.map((p) => h("tr", null, [
@@ -1559,10 +1667,10 @@ details.optional[open] > summary { margin-bottom: 8px; }
           h("td", null, p.pair || "–"),
           h("td", { class: "muted" }, p.dex || "–"),
           h("td", { class: "num" }, int(Math.round(p.score || 0))),
-          h("td", { class: "num" }, (p.liqWeth || 0).toFixed(2)),
+          h("td", { class: "num", title: p.liqSuspect ? "Deeper than any pool on Base: a bad read, capped for display" : null }, p.liqSuspect ? `${int(p.liqWeth)}+ ?` : (p.liqWeth || 0).toFixed(2)),
           h("td", { class: "num" }, (p.rivalRate || 0).toFixed(1)),
           h("td", { class: "num" }, (p.foundRate || 0).toFixed(1)),
-          h("td", { class: "num" }, usd(p.edgeUsd || 0)),
+          h("td", { class: "num", title: p.edgeCapped ? "Capped for display; the score uses at most this much" : null }, p.edgeCapped ? `${usd(p.edgeUsd)}+` : usd(p.edgeUsd || 0)),
         ]))))));
     }
   }
@@ -1628,7 +1736,11 @@ details.optional[open] > summary { margin-bottom: 8px; }
         ["Other transient errors", int(Math.max(0, (u.transientErrors ?? 0) - (u.rateLimited ?? 0)))],
         ["Switched endpoint", `${int(u.failovers)} ${plural(u.failovers, "time", "times")}`],
         ["If on Alchemy", `≈${(u.alchemyCuPerDay / 1e6).toFixed(1)}M CU a day`],
+        ["Timed out", int(u.timeouts ?? 0)],
       ]), h("ul", { class: "methods" }, methods.map(([k, n]) => h("li", null, h("span", { class: "mono" }, k), h("span", { class: "num" }, int(n))))),
+      u.callsByPurpose && Object.keys(u.callsByPurpose).length
+        ? [h("h3", { style: "margin-top:14px" }, "What eth_call is used for"), h("ul", { class: "methods" }, Object.entries(u.callsByPurpose).sort((a, b) => b[1] - a[1]).map(([k, n]) => h("li", null, h("span", null, PURPOSE[k] || k), h("span", { class: "num" }, int(n)))))]
+        : null,
       (u.byMethod || {}).ws_newHeads ? h("p", { class: "sub" }, `The websocket block feed (WS_URL) alone is about ${((u.byMethod.ws_newHeads * 60 * 86400000) / Math.max(60000, Date.parse(st.now) - Date.parse(u.since)) / 1e6).toFixed(1)}M Alchemy CU a day. Without WS_URL the bot polls for new blocks instead, at roughly a fifth of that.`) : null));
     }
     const r = st.refresh;
@@ -1639,6 +1751,25 @@ details.optional[open] > summary { margin-bottom: 8px; }
       r ? ["Pools that drifted", r.driftedPools ? chip("warn", `${int(r.driftedPools)} in total (corrected)`) : chip("good", "None")] : null,
     ]), r && r.lastDrift && r.lastDrift.length ? h("ul", { class: "methods" }, r.lastDrift.slice(0, 5).map((d) => h("li", null, h("span", null, dexName(d.dex), " ", addrLink(d.pool)), h("span", { class: "num muted" }, `#${int(d.block)}`)))) : null,
     h("p", { class: "sub" }, "Concentrated-liquidity pools follow each Swap event for price, tick and liquidity. Adding or removing liquidity, or moving into a tick range the bot hasn't loaded, triggers a fresh read. The drift check compares everything against a full re-read.")));
+    const sp = st.speed;
+    if (sp && sp.samples) {
+      const ph = sp.phases || {};
+      cols.append(h("div", null, h("h3", null, "Time per block"), kv([
+        ["Median / p95 / slowest", `${int(sp.p50Ms)} / ${int(sp.p95Ms)} / ${int(sp.maxMs)} ms`],
+        ["Over 2 s (limit now)", sp.over2s ? chip("warn", `${sp.over2s} of the last ${sp.samples}`) : chip("good", `none of the last ${sp.samples}`)],
+        ["Over 200 ms (limit at Denim)", `${sp.over200ms} of the last ${sp.samples}`],
+        ["Fetch block + logs", `${int(ph.fetchMs)} ms`],
+        ["Update pools", `${int(ph.refreshMs)} ms`],
+        ["Gas quote", `${int(ph.gasMs)} ms`],
+        ["Route search", `${int(ph.findMs)} ms`],
+        ["On-chain check", `${int(ph.verifyMs)} ms`],
+        ["Waiting for the MEV feed", `${int(ph.waitMs)} ms`],
+        ["Other", `${int(ph.restMs)} ms`],
+        ["Route checks", `${int(sp.routeChecksPerMin)} a minute (${int(sp.scoredPerMin)} routes re-scored, ${int(sp.unchangedPerMin)} skipped as unchanged)`],
+        ["Pools changed per block", int(sp.changedPoolsPerBlock)],
+        sp.stalls ? ["Watchdog", chip("warn", `gave up on ${sp.stalls} ${plural(sp.stalls, "block", "blocks")}`)] : null,
+      ])));
+    }
     const s = st.settings;
     cols.append(h("div", null, h("h3", null, "Settings in force"), kv([
       ["Minimum profit", `${usd(s.minProfitUsd)} after gas`],
@@ -1646,7 +1777,8 @@ details.optional[open] > summary { margin-bottom: 8px; }
       ["Routes", `${s.clPools ? "CL pools on" : "CL pools off"}, ${s.multiHop ? `up to ${s.maxHops} hops` : "two pools only"}`],
       ["Flash loans", s.flashSource === "morpho" ? "Morpho Blue (free)" : s.flashSource === "balancer" ? "Balancer" : "Own capital"],
       ["Priority fee", `${s.priorityFeeGwei} gwei`],
-      ["Flashblocks", s.flashblocks ? `On${st.flashblocks ? `: ${int(st.flashblocks.scans)} scans, ${int(st.flashblocks.opps)} finds` : ""}` : "Off"],
+      ["Flashblocks", s.flashblocks ? `On, ${s.flashblocksStream ? "every Flashblock from the websocket stream" : "polling the RPC"}${st.flashblocks ? `: ${int(st.flashblocks.scans)} re-scores, ${int(st.flashblocks.opps)} finds` : ""}` : "Off"],
+      ["Live sending", s.liveActAlways ? chip("warn", "LIVE_ACT_ALWAYS=true: every simulated-profitable find") : chip("good", "LIVE_ACT_ALWAYS=false: expected-value gating")],
       ["Backup RPCs", int(s.rpcFallbacks)],
       ["Telegram alerts", st.telegram ? chip("good", "On") : h("span", null, "Off. Set up with ", h("code", null, "node dist/main.js telegram"))],
       ["Online dashboard", CLOUD ? `This is it: last update from your PC ${S.mirror?.lastPushAt ? ago(pushAge()) : "not yet"}` : st.cloud ? (st.cloud.lastError ? chip("warn", `Failing: ${st.cloud.lastError}`) : chip("good", `On, last update sent ${st.cloud.lastOkAt ? ago(Date.parse(st.now) - st.cloud.lastOkAt) : "not yet"}`)) : h("span", null, "Off. See ", h("code", null, "cloud/README.md"))],
@@ -2352,8 +2484,14 @@ details.optional[open] > summary { margin-bottom: 8px; }
       label();
     });
   }
+  /** Which loaded data each panel shows, for its "Data as of" line. */
+  const PANEL_SOURCES = { "opps-h": "recent", "days-h": "summary", "funnel-h": "state", "learn-h": "state", "rivals-h": "summary,recent", "liq-h": "recent,state", "wallet-h": "contracts", "safety-h": "state", "system-h": "state", "review-h": "review" };
   function initStatic() {
     initTheme();
+    for (const [id, src] of Object.entries(PANEL_SOURCES)) {
+      const box = $(id)?.parentElement;
+      if (box) box.append(h("p", { class: "asof", "data-src": src }));
+    }
     const tape = $("tape");
     tape.addEventListener("pointermove", onTapePointer);
     tape.addEventListener("pointerdown", onTapePointer);
@@ -2387,6 +2525,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     window.addEventListener("scroll", hideTip, { passive: true });
     setInterval(() => {
       renderHeader();
+      renderAsOf();
       if (!LIVE || S.state?.running) {
         const fb = $("foot");
         if (fb && S.state) renderFooter();
@@ -2410,11 +2549,21 @@ details.optional[open] > summary { margin-bottom: 8px; }
     else connectEvents();
     initWallets();
     refreshWalletData();
-    const every = (ms, fn) => setInterval(() => !document.hidden && !S.stale && fn(), ms);
-    every(15000, () => loadState(false).catch(() => {}));
+    // These keep running in a background tab (they used to stop while the tab was hidden, which
+    // froze every panel for as long as you looked elsewhere while the header, fed by the event
+    // stream, kept moving). Browsers may slow timers in a hidden tab; coming back refreshes at once.
+    const loadStateNow = guarded("state", () => loadState(false).catch(() => {}));
+    const every = (ms, fn) => setInterval(() => !S.stale && fn(), ms);
+    every(15000, loadStateNow);
     every(20000, loadSummary);
     every(60000, refreshWalletData);
     every(600000, loadReview);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden || S.stale) return;
+      loadStateNow();
+      loadSummary();
+      loadRecent();
+    });
   }
 
   // ---------------------------------------------------------------- example data (preview only)
@@ -2546,9 +2695,12 @@ details.optional[open] > summary { margin-bottom: 8px; }
     const st = {
       version: "0.5.0", running: true, mode: "paper", startedAt, now: new Date(now).toISOString(), chainId: 8453, ethUsd: 2450,
       pools: { total: 396, cl: 305, pairs: 118 }, blocks,
-      rpc: { since: startedAt, requests: 512340, byMethod: { eth_call: 301220, eth_getLogs: 47710, eth_blockNumber: 118200, eth_getBlockByNumber: 45210 }, alchemyCu: 1.31e7, alchemyCuPerDay: 5.9e6, activeEndpoint: "https://mainnet.base.org", onPrimary: true, failovers: 0, transientErrors: 41, rateLimited: 12 },
+      rpc: { since: startedAt, requests: 512340, byMethod: { eth_call: 301220, eth_getLogs: 47710, eth_blockNumber: 118200, eth_getBlockByNumber: 45210 }, alchemyCu: 1.31e7, alchemyCuPerDay: 5.9e6, activeEndpoint: "https://mainnet.base.org", onPrimary: true, failovers: 0, transientErrors: 41, rateLimited: 12, timeouts: 3, callsByPurpose: { verify: 41200, refresh: 52100, "full-refresh": 4100, liquidations: 9800, gas: 2600, classifier: 12000, "watch-list": 900, other: 400 } },
+      speed: { samples: 30, lastBlock: n, lastMs: 610, p50Ms: 640, p95Ms: 1180, maxMs: 1420, over2s: 0, over200ms: 30, phases: { fetchMs: 190, refreshMs: 120, gasMs: 5, findMs: 140, verifyMs: 160, waitMs: 20, restMs: 15 }, routeChecksPerMin: 1240, scoredPerMin: 3900, unchangedPerMin: 41200, changedPoolsPerBlock: 64, stalls: 0, targetMs: 2000, denimTargetMs: 200 },
+      flashblocks: { streaming: 1, flashblocks: 41230, relevant: 30110, stale: 120, scans: 29870, opps: 37, errors: 0, ticks: 0, skippedUnchanged: 0, flashblocksPerMin: 300, scansPerMin: 214, avgMs: 38, maxMs: 410, overlayPools: 22, unsettledPools: 1, reconnects: 1, lastFlashblockAgoMs: 150 },
+      venues: { "uniswap-v3": 402110, slipstream: 351020, aerodrome: 280400, "uniswap-v4": 190220, "pancakeswap-v3": 121300, "uniswap-v2": 90120, baseswap: 12010 },
       refresh: { checks: 636, driftedPools: 2, lastCheckBlock: n - 40, lastDrift: [{ pool: addr(), dex: "slipstream", block: n - 4840 }, { pool: addr(), dex: "uniswap-v3", block: n - 9120 }] },
-      flashblocks: null, liquidations: { watched: 1843, stats: { checks: 9120, liquidatable: 3, recorded: 3 } },
+      liquidations: { watched: 1843, stats: { checks: 9120, liquidatable: 3, recorded: 3 } },
       stop: { present: false, reason: null },
       funnel: { scans: 47510, candidates: 1284310, unpriced: 2210, gasAteIt: 1257402, belowMin: 18890, muted: 412, learnedSkip: 3120, overlapping: 4120, verified: 1095, reverted: 31, quoteMismatch: 58, unverified: 92 },
       paper: { recorded: 142, alreadyTracked: 1104 },
@@ -2596,7 +2748,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
       code: { branch: "upgrade/v3-multihop-flashblocks-liquidations", commit: "c7d8ce8" },
       telegram: false,
       addresses: { bot, executor: null, routeExecutor: null },
-      settings: { minProfitUsd: 0.25, maxPools: 400, minPoolLiquidityWeth: 2, clPools: true, multiHop: true, maxHops: 3, flashSource: "morpho", flashblocks: false, liquidations: true, refreshMode: "events", fullRefreshBlocks: 150, priorityFeeGwei: 0.005, rpcFallbacks: 1, mevFeed: true },
+      settings: { minProfitUsd: 0.25, maxPools: 400, minPoolLiquidityWeth: 2, clPools: true, multiHop: true, maxHops: 3, flashSource: "morpho", flashblocks: true, flashblocksStream: true, liveActAlways: false, fullRescanBlocks: 30, sanityMaxProfitUsd: 1000, liquidations: true, refreshMode: "events", fullRefreshBlocks: 150, priorityFeeGwei: 0.005, rpcFallbacks: 1, mevFeed: true },
     };
     S.contracts = { chainId: 8453, bot, routeExecutor: { address: null, creationBytecode: null, bytes: 6123, compiler: "solc 0.8.26" }, arbExecutor: { address: null }, tokens: {} };
     S.wallet = { accounts: { [bot]: { eth: "4200000000000000", weth: "0", usdc: "0" } }, contracts: {} };
