@@ -15,6 +15,7 @@ three days of paper numbers and Joshua's decision.
 |---|---|---|
 | **Cloud agents** (scheduled tasks) | Code: wrappers, adapters, monitors, tests, one pull request per task | merge, touch `.env`, deploy, sign, start or stop the live bot |
 | **Local agents** (scheduled, on Joshua's PC through the Claude app) | Read the bot's own data on the PC, run CPU-heavy backtests, write reports to `reports/` | edit code, data or `.env`; run git in the bot folder; send anything |
+| **Night watch** (scheduled, on the PC, 23:40 / 02:40 / 05:40 every night) | Measures the bot with `tools/night-watch`, keeps the system's memory in `base-arb-watch\MEMORY.md`, tests one idea per run, proposes changes; messages Joshua only when he's needed | write inside the bot folder (one exception: `data/STOP` if the bot's own brakes have failed); run the bot, npm or git; send anything |
 | **Joshua** | Review and merge PRs; `.env` values; exchange accounts and trade-only API keys (withdrawals off); fund each bot's own wallet; the go-live call per bot; contract and Cloudflare deploys from the browser; the Ashburn server | |
 | **Claude Code + the dev** | Integration: merge CC's local dashboard changes with this branch, wire agent PRs into `src/`, run forge and fork tests on the PC, the node switch and Denim work below | |
 
@@ -61,8 +62,10 @@ The PC must be on, with the Claude desktop app open, for a local task to run.
 | Sun 18 | 18:10 | cloud | **Week wrap-up** and next week's plan | Approve next week |
 
 Every task ends with a phone message that has a `NEEDS YOU:` line. Push
-notifications are on for all of them. The existing daily tasks (08:54 bot
-review, 08:57 airdrop scan) keep running unchanged.
+notifications are on for all of them. Every night the night watch runs at
+23:40, 02:40 and 05:40 and messages only when something needs Joshua; the
+08:54 daily review now reads its memory and turns tuning proposals into Apply
+suggestions on the dashboard. The 08:57 airdrop scan keeps running unchanged.
 
 ## Phases
 
@@ -99,6 +102,15 @@ independent security review, and next week's plan.
 
 ## The flagship track (Claude Code + dev, not scheduled)
 
+0. **Speed, then coverage.** Merge Claude Code's `rpc-cuts` branch first: the
+   same coverage with fewer reads per block (600-call multicalls, no re-read
+   after a pending read, Uniswap V4 pools updated from their own PoolManager
+   events instead of re-read every block). On 11 October the block handler
+   took 1.8 s at p50 and about 5 s at p90 with 2,000 pools, against 2 s
+   blocks. Then Joshua's full-coverage settings (`MAX_POOLS`,
+   `MAX_WATCHED_POOLS`, `MAX_CYCLES`, `FLASHBLOCK_MAX_POOLS`,
+   `LIQ_CHECK_EVERY`) and a fresh `discover`, which puts PancakeSwap V3 and
+   Uniswap V4 pools on the watch list for the first time.
 1. **Node.** Point `RPC_URL`, `WS_URL` and `FLASHBLOCKS_RPC_URL` at the faster
    node (Joshua's `.env`), compare it first on Terminal → Nodes. Then turn the
    400 ms Flashblocks poll into a stream-driven backrun loop (Tier 0.2).
@@ -116,13 +128,15 @@ independent security review, and next week's plan.
 | 9 cloud build tasks | $10–15 | $90–135 |
 | 3 cloud light tasks (checkpoint, review, wrap-up) | $3–8 | $10–25 |
 | 3 local tasks | $3–6 | $10–18 |
-| **Planned** | | **$110–178** |
-| Reserve (re-runs, fixes, your own requests) | | **$32–100** |
+| Night watch, 21 local runs (3 a night, added 11 Oct) | $1–3 | $21–63 |
+| **Planned** | | **$131–241** |
+| Reserve (re-runs, fixes, your own requests) | | **up to $79** |
 
-These are estimates: a run's cost depends on how much it reads and builds.
-Check the real balance on Thursday morning after the checkpoint. If spending is
-ahead of plan, pause the Friday and Saturday build tasks; the Sunday review is
-the one to keep.
+These are estimates: a run's cost depends on how much it reads and builds, and
+the top of the range is over the $210 budget. Check the real balance on
+Thursday morning after the checkpoint. If spending is ahead of plan, first drop
+the night watch to its 05:40 run, then pause the Friday and Saturday build
+tasks; the Sunday review is the one to keep.
 
 ## When a bot may go live
 

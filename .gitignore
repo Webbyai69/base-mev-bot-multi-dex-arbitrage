@@ -19,3 +19,5 @@ data/fleet/
 data/STOP
 # fleet wrapper outputs inside upstream checkouts
 fleet-metrics.json
+# night watch: run history when the tool is run from the repo
+tools/night-watch/history.jsonl

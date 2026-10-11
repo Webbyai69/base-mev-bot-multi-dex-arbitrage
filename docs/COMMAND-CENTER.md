@@ -69,6 +69,18 @@ Each rule raises an issue with a stable id while the condition lasts:
 (30 min without a candidate) and `fleet-<id>` for a stale or failing fleet bot.
 Claims live in `data/issues.json`; they never change the bot.
 
+## The learning loop
+
+The bot learns every block: rival bids, failing routes and tokens
+(`data/learned.json`) and the pools rivals trade on (`data/pools.json`, up to
+`MAX_WATCHED_POOLS`). Overnight the night watch, an AI agent on the PC, measures
+the bot with `tools/night-watch/night_watch.mjs` (the same maths as this
+terminal), keeps the system's memory in `base-arb-watch\MEMORY.md` next to the
+bot folder, and proposes changes. The 08:54 daily review turns its tuning
+proposals into suggestions with an Apply button. Nothing changes without
+Joshua: Apply for tuning, his `.env` for settings, a pull request for code.
+Details in `tools/night-watch/README.md`.
+
 ## Nodes
 
 `GET /api/nodes` shows hosts only: any URL label that looks like a key is
@@ -97,5 +109,6 @@ src/command/telemetry.ts  latency, leaks, racers, scores, simulator, atlas, hour
 src/fleet/registry.ts     the eleven bots
 src/fleet/control.ts      control and heartbeat files
 ui/terminal.html          the terminal page
+tools/night-watch/        the night watch's read-only report and simulator runner
 data/agents.json  data/issues.json  data/nodes.json  data/fleet/   (gitignored)
 ```
