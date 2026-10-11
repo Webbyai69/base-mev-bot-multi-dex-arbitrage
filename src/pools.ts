@@ -996,6 +996,20 @@ export class PoolRegistry {
     return out;
   }
 
+  /**
+   * Watched pools a block's logs touched. A V4 pool's events come from the PoolManager with the poolId
+   * (the pool's key here) in topics[1], so V4 pools are only included when their own Swap or
+   * ModifyLiquidity is in the block, like every other pool.
+   */
+  touchedBy(logs: Log[]): Set<string> {
+    const out = new Set<string>();
+    for (const l of logs) {
+      const key = l.address.toLowerCase() === V4_POOL_MANAGER ? l.topics[1]?.toLowerCase() : l.address.toLowerCase();
+      if (key && this.pools.has(key)) out.add(key);
+    }
+    return out;
+  }
+
   /** Pools sharing a token pair with any of the given pools (the other side of a spread). */
   siblings(addresses: Iterable<string>): Set<string> {
     const want = new Set<string>();

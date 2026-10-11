@@ -234,3 +234,16 @@ test("cut 3: the shared per-block eth_getLogs asks for the V4 PoolManager's even
   assert.ok(f.topics.includes(TOPIC_SWAP_V4) && f.topics.includes(TOPIC_MODIFY_LIQUIDITY_V4));
   await c.destroy();
 });
+
+test("cut 3: the incremental scan re-scores a V4 pool only when its own PoolManager event is in the block", async (t) => {
+  const { sc, r, n } = await synced(t);
+  const a = "0x" + "4d".repeat(32), b = "0x" + "4e".repeat(32);
+  const usdc = sc.USDC.toLowerCase(), weth = sc.WETH.toLowerCase();
+  r.pools.set(a, clPool(a, weth, usdc, { v4: true }));
+  r.pools.set(b, clPool(b, weth, usdc, { v4: true }));
+  const v2 = [...r.pools.values()].find((p) => !p.cl);
+  const swapOf = (id) => ({ address: V4.poolManager, topics: [TOPIC_SWAP_V4, id, pad("0x" + "11".repeat(20))], data: "0x", ...logMeta(n + 1) });
+  assert.deepEqual([...r.touchedBy([])], [], "a quiet block touches no V4 pool");
+  assert.deepEqual([...r.touchedBy([swapOf(a), swapOf("0x" + "99".repeat(32))])], [a], "keyed by poolId; unwatched ids ignored");
+  assert.deepEqual([...r.touchedBy([{ address: v2.address.toUpperCase().replace("0X", "0x"), topics: [], data: "0x", ...logMeta(n + 1) }])], [v2.address]);
+});

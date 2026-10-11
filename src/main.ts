@@ -606,10 +606,7 @@ async function run(s: Settings, chain: Chain, registry: PoolRegistry, store: Sto
     // the still-there/taken/closed outcomes.
     let scanOnly: Set<string> | undefined;
     if (canEvents && !periodic) {
-      const touched = new Set<string>();
-      for (const l of logs) if (registry.pools.has(l.address)) touched.add(l.address);
-      for (const p of registry.pools.values()) if (p.v4) touched.add(p.address); // V4 is read from StateView, not in logs
-      scanOnly = registry.siblings(touched);
+      scanOnly = registry.siblings(registry.touchedBy(logs));
     }
     const opps = await scanner.scan(n, gasQuote, ethUsd, tuning.minProfitUsd, { stage: "block", only: scanOnly });
     // Send first: it needs only the refreshed pools and the gas quote, not the classifier's output.
