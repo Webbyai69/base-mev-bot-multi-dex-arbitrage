@@ -11,7 +11,8 @@
  *   - refuses requests whose Host header isn't localhost / 127.0.0.1, which
  *     blocks DNS-rebinding tricks from websites open in the same browser
  *   - every /api call needs a random token that only the page served by this
- *     process knows (a new one every start)
+ *     process knows (a new one every start), or an AI agent's scoped token
+ *     (src/command/agents.ts: read / tune / pause / deploy, never sign)
  *   - never reads or returns PRIVATE_KEY, .env, or RPC URLs with keys in them,
  *     and cannot change settings or switch modes
  *   - wallet transactions are built in the page and signed in YOUR wallet;
@@ -34,6 +35,8 @@ import type { Call, CallResult, RpcUsage } from "../rpc.js";
 import type { DaySummary } from "../paper.js";
 import type { MarketSummary } from "../classifier.js";
 import type { LiqDaySummary } from "../liquidations.js";
+import { CommandApi } from "../command/api.js";
+import { permits, requiredScope, type Auth } from "../command/agents.js";
 
 /** Data files written by the bot (paper.ts, classifier.ts, liquidations.ts, executor.ts). */
 const FILES = { opps: "opportunities.jsonl", mev: "mev.jsonl", liq: "liquidations.jsonl", live: "live.jsonl" } as const;
@@ -130,11 +133,23 @@ export class UiServer {
   private listeners: Array<(type: string, data: unknown) => void> = [];
   private code = gitInfo(fileURLToPath(new URL("../../", import.meta.url)));
   url = "";
+  /** Command-center routes (src/command/api.ts): agents, fleet, health, telemetry, nodes. */
+  readonly command: CommandApi;
 
   constructor(
     readonly src: UiSources,
-    readonly opts: { port: number; host?: string; htmlPath?: string } = { port: 8787 },
-  ) {}
+    readonly opts: { port: number; host?: string; htmlPath?: string; terminalPath?: string } = { port: 8787 },
+  ) {
+    this.command = new CommandApi({
+      src,
+      startedAt: this.startedAt,
+      blocks: () => this.blocks,
+      stopState: () => this.stopState(),
+      writeStop: (reason) => this.writeStop(reason),
+      onEvent: (fn) => this.onEvent(fn),
+      publish: (type, data) => this.publish(type, data),
+    });
+  }
 
   /**
    * Follow the bot's records (opportunities, outcomes, MEV, liquidations) without
@@ -198,6 +213,7 @@ export class UiServer {
   async close(): Promise<void> {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.command.close();
     if (this.pingTimer) clearInterval(this.pingTimer);
     for (const c of this.clients) c.res.end();
     this.clients.clear();
@@ -349,6 +365,7 @@ export class UiServer {
     const method = req.method ?? "GET";
 
     if (method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) return this.page(res);
+    if (method === "GET" && (url.pathname === "/terminal" || url.pathname === "/terminal.html")) return this.page(res, "terminal");
     if (method === "GET" && url.pathname === "/favicon.ico") {
       res.writeHead(204).end();
       return;
@@ -357,12 +374,29 @@ export class UiServer {
       res.writeHead(404, { "Content-Type": "text/plain" }).end("not found");
       return;
     }
-    // Every API call carries the page's token: a header for fetch, ?t= for the event stream.
-    const given = (req.headers["x-bot-token"] as string | undefined) ?? url.searchParams.get("t");
-    if (!this.tokenOk(given)) return this.json(res, 401, { error: "reload the dashboard page" });
+    // Every API call carries a token: the page's (a header for fetch, ?t= for the event stream),
+    // or an AI agent's scoped token (src/command/agents.ts), also accepted as "Authorization: Bearer".
+    const bearer = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization ?? ""))?.[1];
+    const given = (req.headers["x-bot-token"] as string | undefined) ?? bearer ?? url.searchParams.get("t");
+    let auth: Auth | undefined;
+    if (this.tokenOk(given)) auth = { who: "owner" };
+    else {
+      const agent = this.command.agents.verify(given);
+      if (agent) auth = { who: "agent", agent };
+    }
+    if (!auth) return this.json(res, 401, { error: "reload the dashboard page" });
     if (method === "POST") {
       const origin = req.headers.origin;
       if (origin && !this.allowedHosts.has(origin.replace(/^https?:\/\//, "").toLowerCase())) return this.json(res, 403, { error: "bad origin" });
+    }
+    if (auth.who === "agent") {
+      if (!this.command.agents.allow(auth.agent)) return this.json(res, 429, { error: "rate limited: 120 requests a minute per agent" });
+      this.command.agents.touch(auth.agent, `${method} ${url.pathname}`);
+    }
+    const need = requiredScope(method, url.pathname);
+    if (!permits(auth, need)) {
+      const why = need === "owner" ? "owner only (the dashboard page)" : auth.who === "agent" && auth.agent.paused ? "this agent is paused" : `needs the ${need} scope`;
+      return this.json(res, 403, { error: why });
     }
 
     switch (`${method} ${url.pathname}`) {
@@ -381,7 +415,7 @@ export class UiServer {
       case "GET /api/review":
         return this.json(res, 200, this.review());
       case "POST /api/stop":
-        return this.json(res, 200, this.writeStop("stopped from the dashboard"));
+        return this.json(res, 200, this.writeStop(auth.who === "owner" ? "stopped from the dashboard" : `stopped by agent ${auth.agent.name}`));
       case "POST /api/tuning": {
         // Only this PC's dashboard can change settings: the online copy has no route for it.
         if (!this.src.tune) return this.json(res, 404, { error: "only while the bot runs" });
@@ -398,6 +432,7 @@ export class UiServer {
         return this.json(res, 200, { ...r, tuning: this.src.tuning?.() ?? null });
       }
       default:
+        if (await this.command.handle(req, res, url, method, auth)) return;
         return this.json(res, 404, { error: "not found" });
     }
   }
@@ -414,8 +449,11 @@ export class UiServer {
     res.end(JSON.stringify(body, bigintReplacer));
   }
 
-  private page(res: ServerResponse): void {
-    const file = this.opts.htmlPath ?? fileURLToPath(new URL("../../ui/dashboard.html", import.meta.url));
+  private page(res: ServerResponse, which: "dashboard" | "terminal" = "dashboard"): void {
+    const file =
+      which === "terminal"
+        ? (this.opts.terminalPath ?? fileURLToPath(new URL("../../ui/terminal.html", import.meta.url)))
+        : (this.opts.htmlPath ?? fileURLToPath(new URL("../../ui/dashboard.html", import.meta.url)));
     if (!existsSync(file)) {
       res.writeHead(500, { "Content-Type": "text/plain" }).end(`dashboard page not found at ${file}`);
       return;

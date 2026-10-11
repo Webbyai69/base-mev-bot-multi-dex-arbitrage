@@ -1,0 +1,24 @@
+{
+  "id": "morpho-liquidator",
+  "upstream": "morpho-org/morpho-bots@08d0a41",
+  "cwd": "bots/upstream/morpho-bots",
+  "commands": {
+    "detect": [],
+    "paper": [],
+    "live": []
+  },
+  "env": {
+    "detect": { "ALLOW_DETECTION_ONLY": "true" },
+    "paper": {},
+    "live": {}
+  },
+  "metricsFile": "fleet-metrics.json",
+  "logFile": "data/fleet/morpho-liquidator.log",
+  "_notes": [
+    "Copy to bots/wrapper/configs/<id>.json in the phase that integrates the bot (docs/FLEET-PLAN.md).",
+    "commands: the exact argv for each mode, run from cwd (relative to the repo root). A mode with an empty list is refused.",
+    "env: extra variables per mode. Never put keys here: keys go in bots/wrapper/.env, which is gitignored and edited by the owner only.",
+    "metricsFile: optional JSON the bot (or a small adapter) writes: {pnlUsd, sends, gasUsd, detail, routes, metrics}. See bots/CONTRACT.md.",
+    "live: only used when the owner runs the wrapper with --live and FLEET_LIVE_<ID>=1 is set in bots/wrapper/.env."
+  ]
+}

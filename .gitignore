@@ -14,3 +14,8 @@ vendor/
 build/
 reports/*.md
 .wrangler/
+# command center: fleet control/heartbeat files, agent token hashes, node timings
+data/fleet/
+data/STOP
+# fleet wrapper outputs inside upstream checkouts
+fleet-metrics.json
