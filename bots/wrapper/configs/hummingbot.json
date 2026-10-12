@@ -1,0 +1,27 @@
+{
+  "id": "hummingbot",
+  "upstream": "hummingbot/hummingbot@9af100d (image built from the submodule)",
+  "cwd": "bots/compose",
+  "commands": {
+    "detect": [],
+    "paper": ["{python}", "../adapters/compose_paper.py", "--service", "hummingbot"],
+    "live": []
+  },
+  "stop": {
+    "paper": ["docker", "compose", "-f", "docker-compose.yml", "stop", "hummingbot"]
+  },
+  "env": {
+    "detect": {},
+    "paper": {},
+    "live": {}
+  },
+  "metricsFile": "state/hummingbot/fleet-metrics.json",
+  "logFile": "data/fleet/hummingbot.log",
+  "_notes": [
+    "Paper only: simple_pmm on binance_paper_trade (conf_simple_pmm.yml). compose_paper.py refuses any connector that is not *_paper_trade.",
+    "hummingbot_bridge.py reads the container's trades DB and log from bots/compose/hummingbot/ (never conf/connectors).",
+    "Needs HUMMINGBOT_PASSWORD in bots/wrapper/.env (owner only). No exchange keys for paper.",
+    "The first start builds the image from bots/upstream/hummingbot (10-20 minutes once).",
+    "Stop by hand: from bots/compose, docker compose --env-file ../wrapper/.env down"
+  ]
+}

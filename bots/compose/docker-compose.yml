@@ -1,0 +1,83 @@
+# Fleet bots that run in containers: Hummingbot and Freqtrade, PAPER / DRY-RUN ONLY.
+#
+# Run from this folder (bots/compose). All variables come from bots/wrapper/.env,
+# which only Joshua edits (names are listed in bots/compose/.env.example):
+#
+#   docker compose --env-file ../wrapper/.env up freqtrade      # foreground, Ctrl-C stops it
+#   docker compose --env-file ../wrapper/.env up hummingbot
+#   docker compose --env-file ../wrapper/.env down              # stop and remove both
+#
+# Normally the fleet wrapper starts these through bots/adapters/compose_paper.py
+# (see docs/fleet/hummingbot-freqtrade.md). There is no live mode in this file:
+#   * freqtrade always gets --dry-run on its command line (the CLI beats config and env)
+#     and FREQTRADE__DRY_RUN=true, and no exchange key variables are passed in;
+#   * hummingbot runs simple_pmm on a *_paper_trade connector, and the launcher refuses
+#     any other connector. No Gateway (DEX) container is defined here.
+#
+# Upstream licences (bots/README.md): Freqtrade is GPL-3.0 and runs only as its own
+# published image; we talk to it over its REST API. Hummingbot is Apache-2.0 and is
+# built unmodified from the pinned submodule bots/upstream/hummingbot (NOTICE kept there).
+name: fleet-paper
+
+services:
+  freqtrade:
+    image: ${FREQTRADE_IMAGE:-freqtradeorg/freqtrade:2026.9}  # = the pinned stable commit 1f394ea
+    container_name: fleet-freqtrade
+    restart: "no"               # the wrapper decides when it runs; never auto-restart
+    volumes:
+      - ./freqtrade/config.json:/freqtrade/config/config.json:ro   # copy of config.example.json (gitignored)
+      - ./freqtrade/user_data:/freqtrade/user_data                 # strategies, data, logs, dry-run DB (gitignored)
+    ports:
+      - "127.0.0.1:${FREQTRADE_API_PORT:-8080}:8080"   # REST API on this PC only
+    environment:
+      FREQTRADE__DRY_RUN: "true"
+      FREQTRADE__API_SERVER__ENABLED: "true"
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_API_USERNAME:-}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_API_PASSWORD:-}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_JWT_SECRET:-}
+    # create-userdir copies freqtrade's own SampleStrategy into user_data/strategies inside
+    # the container (it never enters git), then the bot trades in dry-run.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        freqtrade create-userdir --userdir /freqtrade/user_data &&
+        exec freqtrade trade --dry-run
+        --config /freqtrade/config/config.json
+        --userdir /freqtrade/user_data
+        --strategy ${FREQTRADE_STRATEGY:-SampleStrategy}
+        --db-url sqlite:////freqtrade/user_data/tradesv3.dryrun.sqlite
+        --logfile /freqtrade/user_data/logs/freqtrade.log
+
+  # One-off freqtrade commands (download-data, backtesting). Never trades.
+  #   docker compose --env-file ../wrapper/.env run --rm freqtrade-cli backtesting ...
+  freqtrade-cli:
+    profiles: ["tools"]
+    image: ${FREQTRADE_IMAGE:-freqtradeorg/freqtrade:2026.9}
+    restart: "no"
+    volumes:
+      - ./freqtrade/config.json:/freqtrade/config/config.json:ro
+      - ./freqtrade/user_data:/freqtrade/user_data
+    environment:
+      FREQTRADE__DRY_RUN: "true"
+    entrypoint: ["freqtrade"]
+    command: ["--help"]
+
+  hummingbot:
+    image: fleet/hummingbot:9af100d   # local tag: built from the pinned submodule on first `up`
+    build:
+      context: ../upstream/hummingbot
+      dockerfile: Dockerfile
+    container_name: fleet-hummingbot
+    restart: "no"
+    init: true
+    volumes:
+      - ./hummingbot/conf:/home/hummingbot/conf    # conf/scripts/conf_simple_pmm.yml (gitignored copy of the example)
+      - ./hummingbot/data:/home/hummingbot/data    # trades DB + data/bot/*.json, read by the bridge
+      - ./hummingbot/logs:/home/hummingbot/logs    # logs_conf_simple_pmm.log, read by the bridge
+    environment:
+      HBOT_PASSWORD: ${HUMMINGBOT_PASSWORD:-}      # keystore password; paper trading needs no exchange keys
+    # The bot is the container's main process, so `docker compose stop` cancels its paper orders cleanly.
+    command: ["hbot", "start", "conf_simple_pmm.yml", "--foreground"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

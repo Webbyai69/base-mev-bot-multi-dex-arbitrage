@@ -1,0 +1,8 @@
+# Real configs, bot data and bridge output never go into git.
+.env
+freqtrade/config.json
+freqtrade/user_data/
+hummingbot/conf/
+hummingbot/data/
+hummingbot/logs/
+state/

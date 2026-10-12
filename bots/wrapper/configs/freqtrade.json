@@ -1,0 +1,27 @@
+{
+  "id": "freqtrade",
+  "upstream": "freqtrade/freqtrade@1f394ea (stable, image freqtradeorg/freqtrade:2026.9)",
+  "cwd": "bots/compose",
+  "commands": {
+    "detect": [],
+    "paper": ["{python}", "../adapters/compose_paper.py", "--service", "freqtrade"],
+    "live": []
+  },
+  "stop": {
+    "paper": ["docker", "compose", "-f", "docker-compose.yml", "stop", "freqtrade"]
+  },
+  "env": {
+    "detect": {},
+    "paper": {},
+    "live": {}
+  },
+  "metricsFile": "state/freqtrade/fleet-metrics.json",
+  "logFile": "data/fleet/freqtrade.log",
+  "_notes": [
+    "Paper (dry-run) only. compose_paper.py runs `docker compose up freqtrade` in the foreground and freqtrade_bridge.py polls its REST API.",
+    "Freqtrade is GPL-3.0: it runs as its own container and we only talk HTTP to it (bots/README.md).",
+    "Needs FREQTRADE_API_USERNAME, FREQTRADE_API_PASSWORD, FREQTRADE_JWT_SECRET in bots/wrapper/.env (owner only). No exchange keys for paper.",
+    "live stays empty: going live needs 3+ days of paper numbers, a reviewed PR and Joshua's own decision (docs/FLEET-PLAN.md).",
+    "Stop by hand: from bots/compose, docker compose --env-file ../wrapper/.env down"
+  ]
+}
