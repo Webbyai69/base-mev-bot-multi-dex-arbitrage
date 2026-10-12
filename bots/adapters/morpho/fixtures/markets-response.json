@@ -1,0 +1,5 @@
+{"data":{"markets":{"items":[
+ {"uniqueKey":"0xAAAA000000000000000000000000000000000000000000000000000000000001","lltv":"860000000000000000","loanAsset":{"symbol":"USDC"},"collateralAsset":{"symbol":"cbBTC","decimals":8,"priceUsd":60000}},
+ {"uniqueKey":"0xbbbb000000000000000000000000000000000000000000000000000000000002","lltv":"945000000000000000","loanAsset":{"symbol":"WETH"},"collateralAsset":{"symbol":"wstETH","decimals":18,"priceUsd":3000}},
+ {"uniqueKey":"bad","lltv":null,"loanAsset":null,"collateralAsset":null}
+]}}}
