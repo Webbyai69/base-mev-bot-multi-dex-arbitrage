@@ -15,7 +15,7 @@ import { MorphoDetectState, bonusUsd, lifFromLltv, parseLine, parseMarketsRespon
 import { detectEnv, VENUE_VARS } from "../bots/adapters/morpho/run.ts";
 
 const DIR = fileURLToPath(new URL("../bots/adapters/morpho/", import.meta.url));
-const SAMPLE = readFileSync(join(DIR, "fixtures/detect-sample.log"), "utf8").split("\n");
+const SAMPLE = readFileSync(join(DIR, "fixtures/detect-sample.jsonl"), "utf8").split("\n");
 const MARKETS = JSON.parse(readFileSync(join(DIR, "fixtures/markets-response.json"), "utf8"));
 const T0 = Date.parse("2026-10-12T07:41:00Z");
 
