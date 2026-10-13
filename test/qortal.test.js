@@ -21,7 +21,7 @@ import { main as nodesMain, probeNode, rank } from "../qortal/nodes/nodes.mjs";
 import { checkToken, createBridge, loadConfig, READ_ROUTES } from "../qortal/bridge/bridge.mjs";
 import { crc32, makeZip } from "../scripts/lib/zip.mjs";
 import { splitTerminal, qappFiles } from "../qortal/qapp/build-qapp.mjs";
-import { buildRelease, scanText } from "../scripts/release-qortal.mjs";
+import { buildRelease, EXCLUDE, scanText } from "../scripts/release-qortal.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const tmp = () => mkdtempSync(join(tmpdir(), "qortal-test-"));
@@ -381,6 +381,9 @@ test("release: secret checks catch keys, tokens and private text; placeholders p
   assert.equal(scanText("test/alerts.test.js", 'const TOKEN = "123456789:AAEexampleexampleexampleexampleexample";').length, 0);
   assert.equal(scanText("src/c.ts", "agt_0123456789abcdefghijklmnop").length, 1);
   assert.equal(scanText("docs/d.md", "Hello Alice", ["alice"]).length, 1);
+  const excluded = (p) => EXCLUDE.some((re) => re.test(p));
+  assert.ok(excluded("release.private.json") && excluded("release.private.local.json") && excluded("docs/FLEET-PLAN.md"));
+  assert.ok(!excluded("release.private.example.json") && !excluded("docs/RELEASE-NOTES.md"));
 });
 
 test("release: built from what git tracks, private text replaced, Qortal app included, under the size limit", { skip: spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: ROOT }).status !== 0 && "needs a git checkout" }, () => {
@@ -393,7 +396,8 @@ test("release: built from what git tracks, private text replaced, Qortal app inc
   const names = [...files.keys()];
   assert.ok(names.every((n) => n.startsWith("test-release/")));
   for (const must of ["RELEASE.md", "package.json", "bots/upstream/PINS.json", "qortal/README.md", "qortal/qapp/app/index.html", "qortal/qapp/app/terminal.js", "qortal/qapp/arb-terminal-qapp.zip"]) assert.ok(files.has(`test-release/${must}`), must);
-  for (const never of ["docs/FLEET-PLAN.md", "docs/AGENT_TASKS.md", ".env", "data/learned.json", "node_modules"]) assert.ok(!names.some((n) => n === `test-release/${never}` || n.startsWith(`test-release/${never}/`)), never);
+  for (const never of ["docs/FLEET-PLAN.md", "docs/AGENT_TASKS.md", ".env", "data/learned.json", "node_modules", "release.private.json"]) assert.ok(!names.some((n) => n === `test-release/${never}` || n.startsWith(`test-release/${never}/`)), never);
+  assert.ok(files.has("test-release/release.private.example.json"), "the example rules file ships");
   assert.ok(!names.some((n) => n.includes("bots/upstream/") && !n.endsWith("PINS.json")), "upstream code is not shipped");
   const readme = files.get("test-release/tools/night-watch/README.md");
   if (readme) assert.match(readme.toString(), /Night-watch/);

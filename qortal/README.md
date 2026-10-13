@@ -104,7 +104,8 @@ pairs, hosts or keys. Readers keep only those fields.
 `npm run release:qortal` builds the release from what git tracks, so ignored
 files (`.env`, `data/`, `reports/`) can't get in. It fails if anything looks
 like a key, token or keyed RPC URL, or if any text from your own
-`release.private.json` (name, local paths, addresses) remains.
+`release.private.json` (name, local paths, addresses) remains. Copy
+`release.private.example.json` to start yours; git ignores the copy.
 
 ## Building further
 
