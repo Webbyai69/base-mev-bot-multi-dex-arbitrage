@@ -99,6 +99,10 @@ class Wrapper:
         self.cwd = (REPO / cfg.get("cwd", ".")).resolve()
         self.commands: dict[str, list[str]] = cfg.get("commands", {})
         self.mode_env: dict[str, dict[str, str]] = cfg.get("env", {})
+        # Optional per-mode clean-up argv run after the child is stopped or has exited, e.g.
+        # ["docker", "compose", "stop", "freqtrade"] for a bot that lives in a container
+        # (a Windows terminate() is a hard kill, so the child can't clean up after itself).
+        self.stop_commands: dict[str, list[str]] = cfg.get("stop", {})
         self.metrics_file = (self.cwd / cfg["metricsFile"]) if cfg.get("metricsFile") else None
         self.log_path = (REPO / cfg.get("logFile", f"data/fleet/{self.id}.log")).resolve()
         self.started_at = time.time()
@@ -135,7 +139,7 @@ class Wrapper:
     # -- child process ------------------------------------------------------------------
 
     def start(self, mode: str, gas: float | None) -> None:
-        cmd = self.commands.get(mode)
+        cmd = self.argv(self.commands.get(mode))
         if not cmd:
             self.last_error = f"no {mode} command configured in the wrapper config"
             return
@@ -156,9 +160,29 @@ class Wrapper:
         self.child_mode = mode
         self.last_error = None if not self.last_error or "--live" not in self.last_error else self.last_error
 
+    @staticmethod
+    def argv(cmd: list[str] | None) -> list[str]:
+        """The configured argv, with "{python}" as the first item meaning this Python (python3 / py on Windows)."""
+        if not cmd:
+            return []
+        return [sys.executable if i == 0 and a == "{python}" else a for i, a in enumerate(cmd)]
+
+    def cleanup(self, mode: str | None) -> None:
+        cmd = self.argv(self.stop_commands.get(mode or ""))
+        if not cmd:
+            return
+        with open(self.log_path, "ab") as log:
+            log.write(f"--- {now_iso()} stop command for {mode} mode ---\n".encode())
+            log.flush()
+            try:
+                subprocess.run(cmd, cwd=self.cwd, stdout=log, stderr=subprocess.STDOUT, timeout=120, check=False)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                self.last_error = f"stop command failed: {type(e).__name__}"
+
     def stop(self) -> None:
         if not self.child:
             return
+        mode = self.child_mode
         if self.child.poll() is None:
             self.child.terminate()
             try:
@@ -168,6 +192,7 @@ class Wrapper:
                 self.child.wait(timeout=5)
         self.child = None
         self.child_mode = None
+        self.cleanup(mode)
 
     def step(self) -> None:
         desired, mode, gas = self.wanted()
@@ -175,8 +200,10 @@ class Wrapper:
         if self.child is not None and not alive:
             code = self.child.returncode
             self.last_error = f"bot exited with code {code}"
+            mode = self.child_mode
             self.child = None
             self.child_mode = None
+            self.cleanup(mode)
         if desired == "stopped":
             self.stop()
         elif not alive or self.child_mode != mode:
