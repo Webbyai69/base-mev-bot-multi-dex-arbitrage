@@ -383,7 +383,7 @@ test("release: secret checks catch keys, tokens and private text; placeholders p
   assert.equal(scanText("docs/d.md", "Hello Alice", ["alice"]).length, 1);
 });
 
-test("release: built from what git tracks, private text replaced, Qortal app included, under the size limit", { skip: spawnSync("git", ["--version"]).status !== 0 }, () => {
+test("release: built from what git tracks, private text replaced, Qortal app included, under the size limit", { skip: spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: ROOT }).status !== 0 && "needs a git checkout" }, () => {
   const dir = tmp();
   const priv = join(dir, "private.json");
   writeFileSync(priv, JSON.stringify({ replaceRegex: [["Night watch", "g", "Night-watch"]], replace: [["COMMAND-CENTER", "COMMAND_CENTER"]], mustNotContain: [] }));
