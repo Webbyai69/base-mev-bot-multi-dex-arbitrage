@@ -6,13 +6,18 @@
  * It listens on this machine only (127.0.0.1), holds one agent token with the
  * read scope, and forwards a fixed list of read routes to the bot's local
  * server. Writes (pausing, tuning, fleet control, issuing tokens, node tests)
- * are refused: those stay in the terminal on the bot's own machine. Only the
- * Qortal origins you list may read its answers.
+ * are refused: those stay in the terminal on the bot's own machine.
+ *
+ * It also serves the Qortal app itself. Qortal Hub lets a published app talk
+ * only to Qortal, so your bot shows up inside Qortal Hub through Dev Mode:
+ * Add custom framework → 127.0.0.1, port 8790. Qortal then proxies this
+ * bridge, the app and its data share one origin, and qortalRequest still works.
  *
  *   1. In the bot's terminal: AI agents → Issue token, scope "read" only.
  *   2. Copy qortal/bridge/bridge.env.example to qortal/bridge/bridge.env and
  *      put the token there (the file is gitignored).
  *   3. node qortal/bridge/bridge.mjs   (or: npm run qortal:bridge)
+ *   4. Qortal Hub: Dev Mode → Add custom framework → 127.0.0.1 : 8790
  *
  * Settings (bridge.env or the environment): BOT_API_URL (http://127.0.0.1:8787),
  * BOT_AGENT_TOKEN (agt_…, read scope only), BRIDGE_PORT (8790),
@@ -23,8 +28,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { publicStatus } from "../lib/status.mjs";
+import { qappFiles } from "../qapp/build-qapp.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const TREE = resolve(HERE, "..", "..");
 
 export const DEFAULT_ORIGINS = ["http://127.0.0.1:12391", "http://localhost:12391", "http://127.0.0.1:12388", "http://localhost:12388"];
 
@@ -33,6 +40,20 @@ export const READ_ROUTES = new Set([
   "/api/brief", "/api/health", "/api/latency", "/api/leaks", "/api/racers", "/api/routes/scores", "/api/targets",
   "/api/market", "/api/fleet", "/api/nodes", "/api/analytics", "/api/help", "/api/state", "/api/recent", "/api/summary",
 ]);
+
+/** Host names the bridge answers to. Anything else (a site that points its own name at 127.0.0.1) is refused. */
+export function loopbackHost(hostHeader) {
+  const h = String(hostHeader || "").toLowerCase().replace(/:\d+$/, "");
+  return h === "127.0.0.1" || h === "localhost" || h === "[::1]";
+}
+
+/** The Qortal app's files, built from this tree on first use. */
+export function appFiles(root = TREE) {
+  const files = new Map();
+  for (const f of qappFiles((rel) => readFileSync(join(root, rel), "utf8"))) files.set("/" + f.name, f.data);
+  files.set("/", files.get("/index.html"));
+  return files;
+}
 
 /** Read KEY=value lines (no shell expansion). */
 export function readEnvFile(path) {
@@ -116,11 +137,25 @@ export async function checkToken(cfg) {
   return scopes;
 }
 
-export function createBridge(cfg, { log = console.log } = {}) {
+export function createBridge(cfg, { log = console.log, streamMaxMs = 25_000, app = null } = {}) {
   const warned = new Set();
+  let files = app;
+  const appFile = (path) => {
+    if (!files) {
+      try {
+        files = appFiles();
+      } catch (e) {
+        log(`can't build the Qortal app from this folder: ${String(e.message || e).slice(0, 120)}`);
+        files = new Map();
+      }
+    }
+    return files.get(path);
+  };
+  const own = [`http://127.0.0.1:${cfg.port}`, `http://localhost:${cfg.port}`];
   const cors = (req, res) => {
     const origin = req.headers.origin;
-    if (!origin) return true; // local tools such as curl
+    if (!origin) return true; // same-origin pages and local tools such as curl
+    if (own.includes(origin.replace(/\/+$/, ""))) return true; // the app this bridge serves
     if (!cfg.origins.includes(origin.replace(/\/+$/, ""))) {
       if (!warned.has(origin)) {
         warned.add(origin);
@@ -139,6 +174,7 @@ export function createBridge(cfg, { log = console.log } = {}) {
 
   return createServer(async (req, res) => {
     try {
+      if (!loopbackHost(req.headers.host)) return send(res, 403, { error: "this bridge only answers 127.0.0.1 and localhost" });
       if (!cors(req, res)) return send(res, 403, { error: "origin not allowed" });
       const url = new URL(req.url || "/", "http://bridge");
       if (req.method === "OPTIONS") {
@@ -159,7 +195,7 @@ export function createBridge(cfg, { log = console.log } = {}) {
         } catch {
           /* bot down */
         }
-        return send(res, 200, { ok: true, bridge: "base-arb-qortal-bridge", readOnly: true, bot });
+        return send(res, 200, { ok: true, bridge: "base-arb-qortal-bridge", readOnly: true, port: cfg.port, bot });
       }
       if (req.method === "GET" && url.pathname === "/bridge/snapshot") {
         const b = await upstreamJson(cfg, "/api/brief");
@@ -167,11 +203,32 @@ export function createBridge(cfg, { log = console.log } = {}) {
         return send(res, 200, publicStatus(b.json));
       }
       if (req.method === "GET" && url.pathname === "/api/stream") {
+        // Each stream ends after streamMaxMs and the browser reconnects, so a
+        // proxy that holds responses until they finish never holds one for long.
         const up = await upstream(cfg, "GET", "/api/stream", undefined, { stream: true });
         res.writeHead(up.statusCode || 502, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+        res.write("retry: 2000\n\n");
         up.pipe(res);
-        req.on("close", () => up.destroy());
+        const stop = setTimeout(() => {
+          up.destroy();
+          res.end();
+        }, streamMaxMs);
+        stop.unref?.();
+        const done = () => {
+          clearTimeout(stop);
+          up.destroy();
+        };
+        req.on("close", done);
+        res.on("close", done);
         return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/wallet") {
+        // Gas balances of up to three addresses (the bot's own wallet, for the terminal). Nothing else is passed on.
+        const a = url.searchParams.get("addresses") || "";
+        if (!/^0x[0-9a-fA-F]{40}(,0x[0-9a-fA-F]{40}){0,2}$/.test(a)) return send(res, 400, { error: "addresses: up to three 0x addresses" });
+        const up = await upstream(cfg, "GET", "/api/wallet?addresses=" + a);
+        res.writeHead(up.statusCode || 502, { "content-type": up.headers["content-type"] || "application/json", "cache-control": "no-store" });
+        return up.pipe(res);
       }
       if (req.method === "GET" && READ_ROUTES.has(url.pathname)) {
         const up = await upstream(cfg, "GET", url.pathname + url.search);
@@ -183,6 +240,14 @@ export function createBridge(cfg, { log = console.log } = {}) {
         const up = await upstream(cfg, "POST", "/api/simulate", body);
         res.writeHead(up.statusCode || 502, { "content-type": "application/json", "cache-control": "no-store" });
         return up.pipe(res);
+      }
+      if (req.method === "GET") {
+        const body = appFile(url.pathname);
+        if (body !== undefined) {
+          const html = url.pathname === "/" || url.pathname.endsWith(".html");
+          res.writeHead(200, { "content-type": html ? "text/html; charset=utf-8" : "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+          return res.end(body);
+        }
       }
       return send(res, 403, { error: "read-only on Qortal: do this in the terminal on the bot's own machine" });
     } catch (e) {
@@ -198,8 +263,9 @@ export async function main({ env = process.env, log = console.log } = {}) {
   const scopes = await checkToken(cfg);
   const server = createBridge(cfg, { log });
   await new Promise((ok, fail) => server.once("error", fail).listen(cfg.port, cfg.host, ok));
-  log(`Qortal bridge on http://${cfg.host}:${cfg.port}, read-only (token scopes: ${scopes.join(", ") || "read"}), for ${cfg.origins.join(", ")}`);
-  log("In the Qortal app, open Network → Connect and use this address.");
+  log(`Qortal bridge on http://${cfg.host}:${cfg.port}, read-only (token scopes: ${scopes.join(", ") || "read"}).`);
+  log(`Qortal Hub: turn on Dev Mode, then Dev Mode apps → Add custom framework → domain 127.0.0.1, port ${cfg.port}.`);
+  log(`Or open http://127.0.0.1:${cfg.port}/ in a browser on this machine. Leave this window open.`);
   return server;
 }
 

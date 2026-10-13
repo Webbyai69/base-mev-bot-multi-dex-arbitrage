@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, get as httpGet } from "node:http";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,9 +18,9 @@ import { buildRegistry, checkNodeUrl, checkRegistry, isPrivateHost, isPrivateIp,
 import { checkStatus, publicStatus, STATUS_SCHEMA } from "../qortal/lib/status.mjs";
 import { QortalCore } from "../qortal/lib/qdn.mjs";
 import { main as nodesMain, probeNode, rank } from "../qortal/nodes/nodes.mjs";
-import { checkToken, createBridge, loadConfig, READ_ROUTES } from "../qortal/bridge/bridge.mjs";
+import { checkToken, createBridge, loadConfig, loopbackHost, READ_ROUTES } from "../qortal/bridge/bridge.mjs";
 import { crc32, makeZip } from "../scripts/lib/zip.mjs";
-import { splitTerminal, qappFiles } from "../qortal/qapp/build-qapp.mjs";
+import { splitTerminal, qappFiles, qortalSafeHtml, QORTAL_BAD_BYTES } from "../qortal/qapp/build-qapp.mjs";
 import { buildRelease, EXCLUDE, scanText } from "../scripts/release-qortal.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -247,7 +247,7 @@ test("node ranking: times Base nodes, refuses private DNS answers, skips wss, ra
 
 // ---------------------------------------------------------------- bridge
 
-async function fakeBot(scopes = ["read"]) {
+async function fakeBot(scopes = ["read"], { endlessStream = false } = {}) {
   const calls = [];
   const bot = createServer((req, res) => {
     calls.push({ url: req.url, method: req.method, token: req.headers["x-bot-token"] });
@@ -262,6 +262,7 @@ async function fakeBot(scopes = ["read"]) {
     if (req.url === "/api/stream") {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write("event: block\ndata: {\"n\":1}\n\n");
+      if (endlessStream) return; // like the real bot: the stream never ends on its own
       return setTimeout(() => res.end(), 50);
     }
     res.statusCode = 404;
@@ -297,11 +298,21 @@ test("bridge: read routes only, its own token upstream, CORS for Qortal origins,
     assert.equal(pf.headers.get("access-control-allow-private-network"), "true");
     // writes refused, and never forwarded
     const before = calls.length;
-    for (const [method, path] of [["POST", "/api/sending"], ["POST", "/api/stop"], ["POST", "/api/tuning"], ["POST", "/api/agents"], ["POST", "/api/fleet/morpho-liquidator/control"], ["POST", "/api/nodes/test"], ["GET", "/api/agents"], ["GET", "/api/wallet"], ["GET", "/"]]) {
+    for (const [method, path] of [["POST", "/api/sending"], ["POST", "/api/stop"], ["POST", "/api/tuning"], ["POST", "/api/agents"], ["POST", "/api/fleet/morpho-liquidator/control"], ["POST", "/api/nodes/test"], ["GET", "/api/agents"], ["GET", "/.env"], ["GET", "/qortal/bridge/bridge.env"], ["GET", "/../package.json"], ["POST", "/"]]) {
       const w = await fetch(b + path, { method, headers: { ...QO, "content-type": "application/json" }, body: method === "POST" ? "{}" : undefined });
       assert.equal(w.status, 403, `${method} ${path}`);
     }
     assert.equal(calls.length, before, "refused requests never reach the bot");
+    // the bot wallet's gas balance: plain addresses only, nothing else passed on
+    assert.equal((await fetch(b + "/api/wallet?addresses=0x" + "1".repeat(40), { headers: QO })).status, 404, "forwarded (the fake bot has no such route)");
+    assert.equal(calls.at(-1).url, "/api/wallet?addresses=0x" + "1".repeat(40));
+    await fetch(b + "/api/wallet?addresses=0x" + "1".repeat(40) + "&fresh=1&route=0x" + "2".repeat(40), { headers: QO });
+    assert.equal(calls.at(-1).url, "/api/wallet?addresses=0x" + "1".repeat(40), "other parameters are dropped");
+    for (const q of ["", "?addresses=nope", "?addresses=" + Array(4).fill("0x" + "1".repeat(40)).join(",")]) {
+      const n = calls.length;
+      assert.equal((await fetch(b + "/api/wallet" + q, { headers: QO })).status, 400, q);
+      assert.equal(calls.length, n, "a refused wallet request never reaches the bot");
+    }
     // the simulator is a read
     assert.equal((await fetch(b + "/api/simulate", { method: "POST", headers: { ...QO, "content-type": "application/json" }, body: '{"gasX":1}' })).status, 200);
     // other origins are refused, and logged once
@@ -318,7 +329,43 @@ test("bridge: read routes only, its own token upstream, CORS for Qortal origins,
     // no response ever echoes the token
     for (const c of calls) assert.ok(c.url.indexOf("agt_") < 0);
     assert.ok([...READ_ROUTES].every((p) => p.startsWith("/api/")));
+    // it serves the Qortal app itself (Qortal Hub's Dev Mode proxies it), from a fixed list of files
+    const page = await fetch(b + "/");
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type"), /text\/html/);
+    assert.match(await page.text(), /<script src="boot\.js"><\/script>/);
+    for (const f of ["/index.html", "/terminal.js", "/boot.js", "/network.html", "/network.js", "/lib/registry.mjs", "/lib/status.mjs"]) {
+      const r2 = await fetch(b + f);
+      assert.equal(r2.status, 200, f);
+      if (f.endsWith("js")) assert.match(r2.headers.get("content-type"), /javascript/, f);
+    }
+    // the health answer says which port the bridge is on, so the app can tell when it's proxied
+    assert.equal(h.port, cfg.port);
+    // a page that points its own name at 127.0.0.1 (DNS rebinding) is refused
+    const rebind = await new Promise((ok) => {
+      const u = new URL(b + "/api/brief");
+      httpGet({ hostname: "127.0.0.1", port: u.port, path: u.pathname, headers: { host: `evil.example:${u.port}` } }, (res) => ok(res.statusCode)).on("error", () => ok(0));
+    });
+    assert.equal(rebind, 403);
   } finally {
+    await close(bridge);
+    await close(bot);
+  }
+});
+
+test("bridge: an event stream ends on its own, so a proxy that buffers answers never holds one for long", async () => {
+  const { bot, url: botUrl } = await fakeBot(["read"], { endlessStream: true });
+  const bridge = createBridge({ botUrl, token: "agt_bridgetoken_0123456789abcdef", host: "127.0.0.1", port: 0, origins: [] }, { log: () => {}, streamMaxMs: 200 });
+  const b = await listen(bridge);
+  try {
+    const t0 = Date.now();
+    const text = await (await fetch(b + "/api/stream")).text();
+    assert.ok(Date.now() - t0 < 3000, "ended by the bridge");
+    assert.match(text, /^retry: 2000/);
+    assert.match(text, /event: block/);
+  } finally {
+    bridge.closeAllConnections?.();
+    bot.closeAllConnections?.();
     await close(bridge);
     await close(bot);
   }
@@ -369,6 +416,47 @@ test("Qortal app: the terminal is split into a page and a script started by boot
   const net = files.find((f) => f.name === "network.js").data;
   assert.doesNotMatch(net, /innerHTML/, "network.js renders untrusted data with textContent only");
   assert.match(net, /from "\.\/lib\/registry\.mjs"/);
+});
+
+/** What Qortal Core on Windows does to an HTML page: windows-1252 in, its HTML parser, windows-1252 out. */
+const CP1252_HIGH = [0x20ac, null, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, null, 0x017d, null, null, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, null, 0x017e, 0x0178];
+function throughQortalOnWindows(html) {
+  const decoded = [...Buffer.from(html, "utf8")].map((b) => (b < 0x80 || b >= 0xa0 ? String.fromCharCode(b) : CP1252_HIGH[b - 0x80] == null ? "\ufffd" : String.fromCharCode(CP1252_HIGH[b - 0x80]))).join("");
+  const parsed = decoded.replace(/\u00a0/g, "&nbsp;"); // the parser writes U+00A0 back as an entity
+  const bytes = [...parsed].map((ch) => {
+    const c = ch.charCodeAt(0);
+    if (c < 0x80 || (c >= 0xa0 && c <= 0xff)) return c;
+    const i = CP1252_HIGH.indexOf(c);
+    return i >= 0 ? 0x80 + i : 0x3f; // unmappable: "?"
+  });
+  return Buffer.from(bytes).toString("utf8");
+}
+
+test("Qortal app: pages survive Qortal Core on Windows, where '●' used to show as '�?'", () => {
+  assert.equal(throughQortalOnWindows("● ENGINE ARMED — sending"), "\ufffd? ENGINE ARMED — sending", "the bug, reproduced");
+  for (const f of qappFiles((rel) => readFileSync(join(ROOT, rel), "utf8")).filter((x) => x.name.endsWith(".html"))) {
+    assert.equal(throughQortalOnWindows(f.data), f.data, `${f.name} comes through unchanged`);
+    assert.ok(![...f.data].some((ch) => ch.codePointAt(0) > 0x7f && [...Buffer.from(ch)].some((b) => QORTAL_BAD_BYTES.has(b))), f.name);
+  }
+  assert.equal(qortalSafeHtml("<b>● on</b> &middot; &amp; &nbsp;x<style>a:after{content:\"→\"}</style><script>var s=\"◐\";</script>"),
+    '<b>• on</b> · &amp; &nbsp;x<style>a:after{content:"\\002192"}</style><script>var s="\\u25d0";</script>');
+  assert.throws(() => qortalSafeHtml("<p>■</p>", "x.html"), /U\+25A0/);
+  assert.throws(() => qortalSafeHtml("<p>&spades;</p>", "x.html"), /&spades;/);
+});
+
+test("Qortal app: neutral demo labels, demo wallet says it's pretend, read-only view can't write", () => {
+  const html = readFileSync(join(ROOT, "ui", "terminal.html"), "utf8");
+  assert.match(html, /data-ms="520">Home<\/button>/, "the home node is just Home (personal names are checked by the release's private rules)");
+  assert.match(html, /Demo wallet · 0x7a3f…c41b · not real/);
+  assert.doesNotMatch(html, /toast\(nm\+" connected/);
+  assert.match(html, /if\(o\.body!==undefined&&!\(path==="\/api\/simulate"&&!PROXY\)\)return Promise\.reject/, "writes stop in the page in read-only mode");
+  assert.match(html, /if\(!NOSTREAM\)openStream\(\)/);
+  assert.equal(loopbackHost("127.0.0.1:8790"), true);
+  assert.equal(loopbackHost("localhost"), true);
+  assert.equal(loopbackHost("[::1]:8790"), true);
+  assert.equal(loopbackHost("evil.example:8790"), false);
+  assert.equal(loopbackHost("127.0.0.1.evil.example"), false);
+  assert.equal(loopbackHost(""), false);
 });
 
 test("release: secret checks catch keys, tokens and private text; placeholders pass", () => {

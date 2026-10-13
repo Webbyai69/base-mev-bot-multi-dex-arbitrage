@@ -34,21 +34,37 @@ You need a registered Qortal name (Qortal Hub → Names) to publish anything.
 
 ## Watch your bot from the app
 
-The app reads your bot through a bridge: a small read-only proxy on the bot's
-machine that holds a read-scoped token, so the app never holds one.
+Qortal Hub lets a published app talk only to Qortal itself: its content
+security policy blocks requests to any other address, including programs on
+your own computer. So your bot shows up inside Qortal Hub through Dev Mode,
+served by a small read-only bridge on the bot's machine.
 
-1. In the bot's terminal (`http://localhost:8787/terminal`): AI agents → Issue
-   token, with the read scope only.
+1. Start the bot. In its terminal (`http://127.0.0.1:8787/terminal`): AI
+   agents → Issue token, with the read scope only.
 2. Copy `qortal/bridge/bridge.env.example` to `qortal/bridge/bridge.env` and
    paste the token in.
-3. Run `npm run qortal:bridge` on the bot's machine.
-4. In the app: Network → Connect your bot → Test, then Save.
+3. Run `npm run qortal:bridge` on the bot's machine and leave it running.
+4. In Qortal Hub, turn on Dev Mode (your profile), open Dev Mode apps → Add
+   custom framework, and enter `127.0.0.1` with port `8790`.
 
-The bridge listens on 127.0.0.1 only and refuses writes: pausing, tuning,
-fleet control, tokens and node tests stay in the terminal on the bot's
-machine. It refuses to start with a token that can do more than read. If
-Qortal Hub runs on another computer, publish status snapshots (Network →
-Public status) and watch those instead.
+The terminal opens on your bot's live numbers, and publishing node lists and
+status snapshots still works, because Qortal's Dev Mode proxies the bridge and
+keeps `qortalRequest`. The bridge listens on 127.0.0.1 only, answers only to
+loopback host names, and refuses writes: pausing, tuning, fleet control,
+tokens, wallets and node tests stay in the terminal on the bot's machine. It
+refuses to start with a token that can do more than read. Qortal's proxy
+passes reads only and holds each answer until it ends, so the terminal polls
+every 15 seconds there instead of streaming.
+
+Nothing on Qortal can place a Base trade: Qortal's wallet works with QORT and
+a few other chains (Bitcoin, Litecoin, Dogecoin, Digibyte, Ravencoin, Pirate
+Chain), not Ethereum or Base, and a trade has to reach Base within its
+2-second blocks. The bot sends its own trades, from its own machine, with its
+own key.
+
+The published app, opened normally, runs on demo data and says so on every
+page. If Qortal Hub runs on another computer, publish status snapshots
+(Network → Public status, from Dev Mode) and watch those instead.
 
 ## Pick a faster node
 
@@ -60,7 +76,9 @@ npm run qortal:nodes -- --check nodes.json check your list before publishing it
 ```
 
 It times each node from this machine (chain id, then five `eth_blockNumber`
-round trips), ranks them, and saves `qortal/out/nodes-ranked.json`. It never
+round trips), ranks them, and saves `qortal/out/nodes-ranked.json`. Open that
+file in the app (Base nodes → Open a list file) to see the ranking there:
+Qortal Hub doesn't let the app time nodes itself. It never
 edits `.env`: to use a node, put it in `RPC_URL` (or `WS_URL`,
 `FLASHBLOCKS_RPC_URL`) yourself and restart the bot. Use listed nodes for
 reading and comparing. Send transactions only through a node you run or pay
@@ -93,6 +111,14 @@ nodes per list.
 health and open-issue count, detection latency, finds captured, still there,
 lost or closed over 6 hours, and fleet bot states. Never addresses, routes,
 pairs, hosts or keys. Readers keep only those fields.
+
+## Text on Windows
+
+Qortal Core reads and rewrites an app's HTML pages in the computer's default
+charset (windows-1252 on Windows). Characters whose UTF-8 bytes include
+`81 8D 8F 90 9D A0` come out as "�?", and entities for non-ASCII characters
+are decoded and re-encoded the same way. `npm run qortal:qapp` swaps the few
+the pages use for look-alikes that survive, and fails on any new one.
 
 ## What never goes on Qortal
 
@@ -133,6 +159,6 @@ qortal/lib/registry.mjs    the node-list format and its checks (shared by the ap
 qortal/lib/status.mjs      the status-snapshot format
 qortal/lib/qdn.mjs         read-only client for a local Qortal Core (port 12391)
 qortal/nodes/nodes.mjs     read, check, time and rank published nodes
-qortal/bridge/bridge.mjs   the read-only bridge between the app and your bot
+qortal/bridge/bridge.mjs   the read-only bridge: serves the app with your bot's numbers (Dev Mode)
 qortal/qapp/src/           the app's own pages; build-qapp.mjs assembles the app
 ```

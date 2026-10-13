@@ -1,19 +1,37 @@
 /* Qortal app bootstrap for the terminal.
-   Looks for the local read-only bridge (qortal/bridge) and, when it answers and
-   can reach the bot, starts the terminal on live data through it. Otherwise the
-   terminal runs its labelled demo. The app never holds a bot token: the bridge
-   does, on the bot's machine. */
+   Finds your bot's read-only bridge (qortal/bridge) and starts the terminal on
+   live data through it; otherwise the terminal runs its labelled demo.
+   - Served by the bridge (Qortal Hub's Dev Mode, or a browser at the bridge's
+     own address): the bridge is this page's origin, so it is asked first.
+   - Published or previewed on Qortal: Qortal Hub lets a published app talk only
+     to Qortal itself, so the bridge can't be reached and the demo runs.
+   - Anywhere else: the bridge address saved under Network -> Connect.
+   The app never holds a bot token: the bridge does, on the bot's machine. */
 (function () {
-  var KEY = "baq.bridge", DEF = "http://127.0.0.1:8790", bridge = DEF;
-  try { bridge = localStorage.getItem(KEY) || DEF; } catch (e) { /* storage blocked: use the default */ }
-  bridge = bridge.replace(/\/+$/, "");
-  var started = false, live = false;
+  var KEY = "baq.bridge", DEF = "http://127.0.0.1:8790";
+  var ctx = typeof window._qdnContext === "string" ? window._qdnContext : ""; // "render" when published/previewed, "proxy" in Dev Mode
+  var saved = DEF;
+  try { saved = localStorage.getItem(KEY) || DEF; } catch (e) { /* storage blocked: use the default */ }
+  saved = saved.replace(/\/+$/, "");
+  var started = false, boot = null, bridgeUp = false;
+
+  function health(base) {
+    return fetch(base + "/bridge/health", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (h) { if (!h || h.bridge !== "base-arb-qortal-bridge") throw new Error("not the bridge"); return h; });
+  }
 
   function badge() {
+    var live = !!(boot && boot.token);
+    var label = live ? "Live, read-only, through your bridge"
+      : bridgeUp ? "Bridge is up, your bot isn't answering"
+      : ctx === "render" ? "Demo data, not your bot · see it live"
+      : "Demo data, not your bot · connect it";
     var b = document.createElement("a");
     b.href = "network.html#connect";
     b.className = "qortal-badge" + (live ? " live" : "");
-    b.innerHTML = '<span class="dot"></span><span>' + (live ? "Live through your bridge · read-only" : "Demo data · connect your bot") + '</span><span class="go">Network</span>';
+    b.innerHTML = '<span class="dot"></span><span></span><span class="go">Network</span>';
+    b.children[1].textContent = label;
     var s = document.createElement("style");
     s.textContent =
       ".qortal-badge{position:fixed;left:14px;bottom:14px;z-index:9999;display:flex;align-items:center;gap:9px;padding:8px 12px;" +
@@ -27,28 +45,41 @@
     document.body.appendChild(b);
     if (!live) {
       var fn = document.querySelector(".foot-note");
-      if (fn) fn.textContent = "Demo data. Run the bridge on the bot's machine and connect it under Network to see your bot's live numbers.";
+      if (fn) fn.textContent = bridgeUp
+        ? "The bridge is running but your bot isn't answering it. Start the bot, then reload this page."
+        : ctx === "render"
+          ? "Demo data, not your bot. Qortal Hub keeps published apps away from other programs on your computer, so your bot shows up here through Dev Mode: see Network, Connect your bot."
+          : "Demo data, not your bot. Run the bridge on the bot's machine and connect it under Network to see your bot's live numbers.";
     }
   }
 
   function start() {
     if (started) return;
     started = true;
-    if (live) window.__BOT__ = { token: "bridge", base: bridge, readOnly: true, qortal: true };
+    window.__BOT__ = boot || { token: null, qortal: !!ctx, context: ctx };
     var s = document.createElement("script");
     s.src = "terminal.js";
     s.onload = badge;
     document.body.appendChild(s);
   }
 
-  var timer = setTimeout(start, 1800);
-  try {
-    fetch(bridge + "/bridge/health", { cache: "no-store" })
-      .then(function (r) { return r.json(); })
-      .then(function (h) { live = !!(h && h.ok && h.bot && h.bot.reachable); clearTimeout(timer); start(); })
-      .catch(function () { clearTimeout(timer); start(); });
-  } catch (e) {
-    clearTimeout(timer);
-    start();
-  }
+  var timer = setTimeout(start, 2500);
+  health("")
+    .then(function (h) {
+      // This page came from the bridge itself. Through Qortal's Dev Mode proxy the
+      // port differs: that proxy passes reads only and holds each answer until it
+      // ends, so the terminal polls instead of streaming.
+      bridgeUp = true;
+      var proxied = String(location.port || "80") !== String(h.port || "");
+      if (h.bot && h.bot.reachable) boot = { token: "bridge", base: "", readOnly: true, qortal: !!ctx, context: ctx, viaProxy: proxied, noStream: proxied };
+    })
+    .catch(function () {
+      if (ctx) return; // on Qortal: other addresses are blocked, so don't try
+      return health(saved).then(function (h) {
+        bridgeUp = true;
+        if (h.bot && h.bot.reachable) boot = { token: "bridge", base: saved, readOnly: true, qortal: false, context: "" };
+      });
+    })
+    .catch(function () { /* no bridge: demo */ })
+    .then(function () { clearTimeout(timer); start(); });
 })();
