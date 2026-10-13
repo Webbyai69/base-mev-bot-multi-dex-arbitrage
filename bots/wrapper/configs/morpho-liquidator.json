@@ -1,0 +1,30 @@
+{
+  "id": "morpho-liquidator",
+  "upstream": "morpho-org/morpho-bots@08d0a41 (bots/blue-liquidation)",
+  "cwd": ".",
+  "commands": {
+    "detect": ["node", "bots/adapters/morpho/run.ts", "--mode", "detect"],
+    "paper": [],
+    "live": []
+  },
+  "env": {
+    "detect": {
+      "ALLOW_DETECTION_ONLY": "true",
+      "CHAIN_ID": "8453",
+      "ENABLE_LIFI": "false",
+      "ZEROX_API_KEY": "",
+      "ONEINCH_API_KEY": "",
+      "LIFI_API_KEY": ""
+    },
+    "paper": {},
+    "live": {}
+  },
+  "metricsFile": "data/fleet/morpho-liquidator.fleet-metrics.json",
+  "logFile": "data/fleet/morpho-liquidator.log",
+  "_notes": [
+    "detect: the upstream blue-liquidation bot on Base (8453) with ALLOW_DETECTION_ONLY=true and no swap venue, run inside bots/adapters/morpho/run.ts, which also writes the metrics file. The adapter re-applies these detection settings itself and drops every venue key, whatever the .env holds.",
+    "paper: empty on purpose. The upstream has no dry run that never broadcasts (probe:lens is a one-shot read-only probe, not a paper trader).",
+    "live: empty. Going live is Joshua's decision and a separate PR; see docs/fleet/morpho-liquidator.md.",
+    "Needs in bots/wrapper/.env (names only): BASE_RPC_URL and MORPHO_DETECT_PRIVATE_KEY (a brand-new, never-funded key; the upstream refuses to boot without one). Optional: MORPHO_RPC_URL, MORPHO_RPC_URL_FALLBACK, HEALTH_FACTOR_LTE."
+  ]
+}
