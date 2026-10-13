@@ -411,7 +411,7 @@
           </div>
           <div id="racerList"></div>
           <div class="pipe">
-            <div class="pipe-head"><span>our send path — where our milliseconds go (node: <b id="pipeNode" style="color:var(--ink)">Home · Cork</b>)</span><span class="mono" id="pipeTotal" style="color:var(--ink)">520ms</span></div>
+            <div class="pipe-head"><span>our send path — where our milliseconds go (node: <b id="pipeNode" style="color:var(--ink)">Home</b>)</span><span class="mono" id="pipeTotal" style="color:var(--ink)">520ms</span></div>
             <div class="pipe-bar" id="pipeBar"></div>
           </div>
         </div>
@@ -444,7 +444,7 @@
           <section class="panel span6">
             <div class="ph"><h2>Strategy simulator</h2><span class="tag">replay the window under a new config</span></div>
             <div class="ctl"><div class="ctl-head"><span class="nm">Node location</span><span class="val" id="vNode">Home · 520ms</span></div>
-              <div class="segs" id="nodeSegs"><button class="seg on" data-ms="520">Home · Cork</button><button class="seg" data-ms="290">Ashburn VA</button><button class="seg" data-ms="190">Co-located</button></div>
+              <div class="segs" id="nodeSegs"><button class="seg on" data-ms="520">Home</button><button class="seg" data-ms="290">Ashburn VA</button><button class="seg" data-ms="190">Co-located</button></div>
               <div class="hint">What time-to-inclusion does to the same finds. Ashburn is the planned move.</div></div>
             <div class="ctl"><div class="ctl-head"><span class="nm">Min profit / trade <span class="chip env">.env</span></span><span class="val" id="vMin">$0.10</span></div><input type="range" id="sMin" min="2" max="150" value="10"></div>
             <div class="ctl"><div class="ctl-head"><span class="nm">Priority-fee aggressiveness <span class="chip json">tuning.json</span></span><span class="val" id="vBid">0.40</span></div><input type="range" id="sBid" min="0" max="100" value="40"></div>
@@ -714,7 +714,7 @@
   var BOOT=window.__BOT__||null,LIVE=!!(BOOT&&BOOT.token);
   /* BASE is empty when the bot serves this page (same origin). The Qortal app sets it to the
      local read-only bridge, and readOnly hides what only the bot's own machine may do. */
-  var BASE=(BOOT&&typeof BOOT.base==="string")?BOOT.base.replace(/\/+$/,""):"",RO=!!(BOOT&&BOOT.readOnly);
+  var BASE=(BOOT&&typeof BOOT.base==="string")?BOOT.base.replace(/\/+$/,""):"",RO=!!(BOOT&&BOOT.readOnly),PROXY=!!(BOOT&&BOOT.viaProxy),NOSTREAM=!!(BOOT&&BOOT.noStream);
   function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
   function api(path,opts){opts=opts||{};var h={"x-bot-token":BOOT.token},hasBody=opts.body!==undefined;if(hasBody)h["content-type"]="application/json";
     return fetch(BASE+path,{method:opts.method||(hasBody?"POST":"GET"),headers:h,body:hasBody?JSON.stringify(opts.body):undefined,cache:"no-store"}).then(function(r){return r.json().catch(function(){return {};}).then(function(j){if(!r.ok)throw new Error((j&&j.error)||("HTTP "+r.status));return j;});});}
@@ -760,7 +760,7 @@
     {nm:"0x71d2…0c3e",tag:"rival · likely Artemis",ms:189,trades:22,ph:6.1,route:"r_v4degen",routeLb:"V4 long-tail",us:false},
     {nm:"jito.wtf…sol",tag:"rival · Solana",ms:204,trades:54,ph:14.9,route:"r_sol",routeLb:"SOL/USDC Raydium↔Orca",us:false},
     {nm:"0xaa07…91be",tag:"rival · mid-tier",ms:262,trades:9,ph:1.8,route:"r_cbbtc",routeLb:"cbBTC rotation",us:false},
-    {nm:"base-arb-bot",tag:"YOU · Cork → Base",ms:520,trades:3,ph:0.4,route:"r_ours1",routeLb:"WETH/USDC x-venue",us:true}
+    {nm:"base-arb-bot",tag:"YOU · home → Base",ms:520,trades:3,ph:0.4,route:"r_ours1",routeLb:"WETH/USDC x-venue",us:true}
   ];
   function renderRacers(){var maxMs=560;
     $("#racerList").innerHTML='<div class="racer hdr"><span>Bot</span><span>Time-to-land (median)</span><span style="text-align:right">$ / hour</span><span style="text-align:right">Trades/hr</span><span style="text-align:right" class="hide2">Share</span><span>Favourite route</span></div>'+
@@ -773,7 +773,7 @@
         '<span class="rt-link" data-route="'+r.route+'">'+r.routeLb+' ▸</span></div>';}).join("");
     $$('#racerList .rt-link').forEach(function(el){el.addEventListener("click",function(){var rid=this.getAttribute("data-route");setView("market");setTimeout(function(){highlightRoute(rid);},150);});});}
   function drawPipe(){var ash=live.nodeMs<=290;var stages=ash?[["code",40,"detect"],["code",60,"build"],["code",40,"sign"],["net",110,"submit"]]:[["code",120,"detect"],["code",60,"build"],["code",40,"sign"],["net",300,"submit"]];
-    var total=stages.reduce(function(s,x){return s+x[1]},0);$("#pipeTotal").textContent=total+"ms";$("#pipeNode").textContent=ash?"Ashburn VA":"Home · Cork";
+    var total=stages.reduce(function(s,x){return s+x[1]},0);$("#pipeTotal").textContent=total+"ms";$("#pipeNode").textContent=ash?"Ashburn VA":"Home";
     $("#pipeBar").innerHTML=stages.map(function(st){return '<div class="pipe-seg '+st[0]+'" style="width:'+(st[1]/total*100)+'%">'+(st[1]>=55?st[2]+' '+st[1]:'')+'</div>';}).join("")+'<div class="pipe-rival" style="left:'+Math.min(100,141/total*100)+'%"></div>';}
 
   /* ================= LEAKS + LATENCY ================= */
@@ -1021,11 +1021,11 @@
   /* ================= TRADE ================= */
   var wallet=null,engineArmed=true;
   function renderWallet(){var bar=$("#walletBar");bar.classList.toggle("connected",!!wallet);
-    if(wallet){$("#wTitle").textContent=wallet+" · 0x7a3f…c41b";$("#wSub").textContent="Base · 0.0142 ETH gas · operator wallet (cannot withdraw) — ready to sign";$("#wOpts").hidden=true;$("#wDisc").hidden=false;}
+    if(wallet){$("#wTitle").textContent="Demo wallet · 0x7a3f…c41b · not real";$("#wSub").textContent="Demo only: no wallet is connected and nothing can be signed here. Your own wallet connects in your bot's terminal on your PC.";$("#wOpts").hidden=true;$("#wDisc").hidden=false;}
     else{$("#wTitle").textContent="No wallet connected";$("#wSub").textContent="Connect to arm & fire manual trades. Signing happens in your own wallet extension — this terminal never sees a key.";$("#wOpts").hidden=false;$("#wDisc").hidden=true;}
     updateFireBtn();}
   $$('#wOpts [data-w]').forEach(function(b){b.addEventListener("click",function(){var nm=this.getAttribute("data-w");var self=this;self.textContent="connecting…";
-    setTimeout(function(){wallet=nm;renderWallet();toast(nm+" connected — 0x7a3f…c41b");self.textContent=nm;},800);});});
+    setTimeout(function(){wallet=nm;renderWallet();toast("Demo: a pretend "+nm+" connection. No real wallet is connected.");self.textContent=nm;},800);});});
   $("#wDisc").addEventListener("click",function(){wallet=null;renderWallet();});
   $("#estop").addEventListener("click",function(){engineArmed=!engineArmed;this.classList.toggle("armed",engineArmed);this.textContent=engineArmed?"● ENGINE ARMED — sending":"❚❚ PAUSED — no sends";$("#cMode").className="pill "+(engineArmed?"paper":"off");updateFireBtn();});
   var venState={};VENUES.forEach(function(v){venState[v]=true;});
@@ -1490,7 +1490,8 @@
       var tl=svgEl("text",{x:xx+bw*0.35,y:H-7,"text-anchor":"middle","font-size":8.5,fill:cssv("--muted")});tl.textContent=String(b[0]).slice(0,12);svg.appendChild(tl);});};
   function renderMeta(){var st=S.state;if(!st)return;var a=st.addresses||{},s=st.settings||{};
     setText($("#mBot"),a.bot?short(a.bot):"no bot key");setText($("#mCap"),usd(s.maxDailyGasUsd)+" · .env");setText($("#mRoute"),a.routeExecutor?short(a.routeExecutor):"not set");setText($("#mArb"),a.executor?short(a.executor):"not set");setText($("#mLiq"),a.liqExecutor?short(a.liqExecutor):"not set");
-    if(a.bot)api("/api/wallet?addresses="+encodeURIComponent(a.bot)).then(function(w){var x=w&&w.accounts&&w.accounts[String(a.bot).toLowerCase()];if(x&&x.eth!=null)setText($("#mBal"),(Number(BigInt(x.eth))/1e18).toFixed(5)+" ETH");}).catch(function(){});}
+    if(!a.bot){setText($("#mBal"),"–");return;}if(!S.balSeen)setText($("#mBal"),"…");
+    api("/api/wallet?addresses="+encodeURIComponent(a.bot)).then(function(w){var x=w&&w.accounts&&w.accounts[String(a.bot).toLowerCase()];if(x&&x.eth!=null){S.balSeen=true;setText($("#mBal"),(Number(BigInt(x.eth))/1e18).toFixed(5)+" ETH");}else if(!S.balSeen)setText($("#mBal"),"–");}).catch(function(){if(!S.balSeen)setText($("#mBal"),"–");});}
 
   /* ---- loaders + stream ---- */
   var cfgInit=false;
@@ -1555,8 +1556,14 @@
     var ph=$("#nodeList").closest(".panel").querySelector(".ph");var pb=document.createElement("button");pb.className="btn sm";pb.textContent="Test current nodes";ph.appendChild(pb);
     pb.addEventListener("click",function(){var b=this;b.disabled=true;b.textContent="testing…";api("/api/nodes/probe",{body:{}}).then(loadNodes).catch(err).then(function(){b.disabled=false;b.textContent="Test current nodes";});});
     $(".foot-note").innerHTML='Live · every number comes from this bot\'s own records (data/*.jsonl); modelled numbers say so. <a href="/" style="color:var(--accent-2)">Open the classic dashboard</a>';
-    if(RO){$(".foot-note").innerHTML='Live, read-only, through your local bridge. Changes (pausing, tokens, fleet control, nodes) happen in the terminal on the bot\'s own machine.';
-      ["#estop","#dLaunch","#testRpc","#addNode"].forEach(function(id){var b=$(id);if(b){b.disabled=true;b.title="Read-only here: use the terminal on the bot's own machine";}});}
+    if(RO){$(".foot-note").innerHTML='Live, read-only, through your local bridge'+(PROXY?' and Qortal Hub\'s Dev Mode':'')+'. Changes (pausing, tokens, fleet control, nodes, wallets) happen in the terminal on the bot\'s own machine.';
+      ["#estop","#dLaunch","#testRpc","#addNode"].forEach(function(id){var b=$(id);if(b){b.disabled=true;b.title="Read-only here: use the terminal on the bot's own machine";}});
+      pb.hidden=true;
+      var api0=api;api=function(path,opts){var o=opts||{};if(o.body!==undefined&&!(path==="/api/simulate"&&!PROXY))return Promise.reject(new Error(path==="/api/simulate"?"The strategy simulator needs the bot's own terminal: Qortal's Dev Mode passes reads only":"Read-only here: do this in the terminal on the bot's own machine"));return api0(path,opts);};
+      if(PROXY)runSim=function(){setText($("#simCap"),"–");setText($("#simModel"),"The strategy simulator runs in the terminal on the bot's own machine: Qortal's Dev Mode passes reads only.");};
+      loadAgents=function(){return Promise.resolve();};
+      mountTokenForm=function(){var host=$("#connList");if(!host)return;var p=document.createElement("p");p.className="note";p.textContent="Agents and their tokens are managed in the terminal on the bot's own machine.";host.parentNode.insertBefore(p,host);};
+      renderWallet=function(){$("#walletBar").classList.remove("connected");setText($("#wTitle"),"Wallet: in your bot's own terminal");setText($("#wSub"),"This view is read-only and can't sign. Connect your wallet in the terminal on the bot's machine (http://127.0.0.1:8787/terminal in your browser there).");$("#wOpts").hidden=true;$("#wDisc").hidden=true;updateFireBtn();};}
     /* controls that need the server */
     rebind("#estop",function(){var st=S.state;if(!st)return;if(st.stop&&st.stop.present){toast("Already paused. Resume by deleting data/STOP yourself, after reading why.");return;}
       confirmTwice(this,"Click again: write STOP",function(){api("/api/sending",{body:{paused:true,reason:"engine button"}}).then(function(r){st.stop=r.stop;renderEngine();renderBar();toast("STOP written: live sending halts");}).catch(err);});});
@@ -1580,8 +1587,8 @@
     syncSim();renderFeed();renderIntel();renderSpreads();renderWallet();renderPending();renderActs();mountTokenForm();setCode("js");
     Promise.all([loadState(),loadFleet(),loadRecent()]).then(function(){renderGuards();renderMeta();syncFlash();return Promise.all([loadBrief(),loadRacers(),loadLatency(),loadScores(),loadTargets(),loadMarket(),loadAgents(),loadNodes(),loadAnalytics(),loadSummary(),loadHelp()]);})
       .then(function(){renderSim();fillPairs();simulate();chainChips();},function(e){err(e);});
-    openStream();
-    setInterval(function(){loadBrief().catch(function(){});loadFleet().catch(function(){});loadState().catch(function(){});},15000);
+    if(!NOSTREAM)openStream();
+    setInterval(function(){loadBrief().catch(function(){});loadFleet().catch(function(){});loadState().catch(function(){});if(NOSTREAM)loadRecent().catch(function(){});},15000);
     setInterval(function(){loadRacers().catch(function(){});loadLatency().catch(function(){});},30000);
     setInterval(function(){loadScores().catch(function(){});loadTargets().catch(function(){});loadMarket().catch(function(){});loadAgents().catch(function(){});loadSummary().catch(function(){});loadAnalytics().catch(function(){});},60000);
     setInterval(function(){if(curView==="overview")renderFeed();},5000);}

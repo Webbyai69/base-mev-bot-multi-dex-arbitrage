@@ -118,20 +118,21 @@
   </div>
 
   <section class="panel half" id="connect" aria-labelledby="h-connect">
-    <div class="ph"><h2 id="h-connect">Connect your bot</h2><span class="tag">read-only · this machine</span></div>
-    <p class="note">The terminal reads your bot through a small bridge on the bot's machine. The bridge holds a read-only token, so this app never sees one.</p>
+    <div class="ph"><h2 id="h-connect">Connect your bot</h2><span class="tag">read-only · the bot's machine</span></div>
+    <p class="note">Qortal Hub keeps a published app away from other programs on your computer, so your bot shows up in Qortal Hub through Dev Mode. A small bridge on the bot's machine serves this app with your bot's numbers, read-only. The bridge holds a read-only token; the app never sees one, and nothing here can trade.</p>
     <ol class="steps">
-      <li>In the terminal on the bot's machine: AI agents → Issue token, with the <b>read</b> scope only.</li>
+      <li>Start the bot. In its terminal (<code>http://127.0.0.1:8787/terminal</code>): AI agents → Issue token, with the <b>read</b> scope only.</li>
       <li>Copy <code>qortal/bridge/bridge.env.example</code> to <code>bridge.env</code> and paste the token in.</li>
-      <li>Run <code>npm run qortal:bridge</code>, then test the address below.</li>
+      <li>Run <code>npm run qortal:bridge</code> and leave it running.</li>
+      <li>In Qortal Hub, turn on Dev Mode in your profile, open Dev Mode apps, choose Add custom framework, and enter <code>127.0.0.1</code> with port <code>8790</code>.</li>
     </ol>
-    <div class="row">
+    <div class="row" id="bridgeRow">
       <div class="field"><label for="bridgeUrl">Bridge address</label><input id="bridgeUrl" spellcheck="false" autocomplete="off" value="http://127.0.0.1:8790"></div>
       <button class="btn" id="bridgeTest">Test</button>
       <button class="btn primary" id="bridgeSave">Save and open the terminal</button>
     </div>
     <div class="result" id="bridgeRes" hidden></div>
-    <p class="note" style="margin:12px 0 0">The bridge only answers this machine, so Qortal Hub has to run on the bot's machine for live numbers. From anywhere else, watch a published snapshot instead.</p>
+    <p class="note" style="margin:12px 0 0">The bridge only answers its own machine, so Qortal Hub has to run there for live numbers. From anywhere else, watch a published snapshot instead.</p>
   </section>
 
   <section class="panel half" id="status" aria-labelledby="h-status">
@@ -170,7 +171,7 @@
         <tbody id="nodesBody"><tr><td colspan="8" class="empty">No lists loaded yet. Load them from Qortal, or open a list file.</td></tr></tbody>
       </table>
     </div>
-    <p class="note" style="margin:12px 0 0">Qortal Hub may block timing from this window. On the bot's machine, <code>npm run qortal:nodes</code> times every listed node from there, which is the number that matters, and ranks them.</p>
+    <p class="note" style="margin:12px 0 0" id="timeNote">Timing that matters happens on the bot's machine: <code>npm run qortal:nodes</code> times every listed node from there, ranks them and saves <code>qortal/out/nodes-ranked.json</code>. Open that file here to see the numbers.</p>
   </section>
 
   <section class="panel" id="share" aria-labelledby="h-share">

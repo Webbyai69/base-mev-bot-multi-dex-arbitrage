@@ -26,6 +26,11 @@ const errText = (e) => String((e && (e.message || e.error)) || e).slice(0, 220);
 /* qortalRequest is a bare global in Qortal apps, not a window property. */
 const Q = typeof qortalRequest === "function" ? qortalRequest : null; // eslint-disable-line no-undef
 const onQortal = !!Q;
+/* Where Qortal Core says this page runs: "render" when published or previewed
+   (it may talk only to Qortal), "proxy" in Dev Mode (it talks to the server
+   behind the proxy: here, your bridge). Empty outside Qortal. */
+const CTX = typeof window._qdnContext === "string" ? window._qdnContext : "";
+const BLOCKED_HERE = "Qortal Hub doesn't let a published app reach programs on your computer, so this can't run here. Open the app through Dev Mode (step 4 above).";
 $("#qstate").textContent = onQortal ? "in Qortal" : "outside Qortal: reading and publishing need Qortal Hub";
 if (onQortal) $("#qstate").classList.add("on");
 
@@ -90,31 +95,42 @@ const loopback = (u) => {
   }
 };
 
+/* In Dev Mode the bridge serves this page, so it is reached on this page's own origin. */
+const bridgeBase = () => (CTX === "proxy" ? "" : bridgeUrl());
+
 async function testBridge() {
   const box = $("#bridgeRes");
-  const u = bridgeUrl();
-  if (!loopback(u)) return say(box, "err", "The bridge runs on this machine: use an address on 127.0.0.1 or localhost."), false;
+  if (CTX === "render") return say(box, "warn", BLOCKED_HERE), false;
+  const u = bridgeBase();
+  if (CTX !== "proxy" && !loopback(u)) return say(box, "err", "The bridge runs on this machine: use an address on 127.0.0.1 or localhost."), false;
   try {
     const h = await (await fetch(u + "/bridge/health", { cache: "no-store", signal: AbortSignal.timeout(4000) })).json();
-    if (!h || !h.ok) throw new Error("not a bridge");
-    if (!h.bot || !h.bot.reachable) return say(box, "warn", "The bridge answers, but it can't reach the bot. Is the bot running?"), false;
-    say(box, "ok", `Connected. The bot is ${h.bot.running ? "running" : "not running"} in ${h.bot.mode || "an unknown"} mode${h.bot.version ? ", version " + h.bot.version : ""}. Read-only.`);
+    if (!h || !h.ok || h.bridge !== "base-arb-qortal-bridge") throw new Error("not a bridge");
+    if (!h.bot || !h.bot.reachable) return say(box, "warn", "The bridge answers, but it can't reach the bot. Start the bot, then test again."), false;
+    say(box, "ok", `Connected${CTX === "proxy" ? " through Dev Mode" : ""}. The bot is ${h.bot.running ? "running" : "not running"} in ${h.bot.mode || "an unknown"} mode${h.bot.version ? ", version " + h.bot.version : ""}. Read-only.`);
     return true;
   } catch (e) {
-    say(box, "err", `No bridge at ${u}. Start it on the bot's machine with npm run qortal:bridge. (${errText(e)})`);
+    say(box, "err", CTX === "proxy" ? `This Dev Mode server isn't the arb bridge (${errText(e)}). Add 127.0.0.1 with port 8790 as the custom framework.` : `No bridge at ${u}. Start it on the bot's machine with npm run qortal:bridge. (${errText(e)})`);
     return false;
   }
 }
 $("#bridgeTest").addEventListener("click", testBridge);
 $("#bridgeSave").addEventListener("click", async () => {
   if (!(await testBridge())) return;
-  try {
-    localStorage.setItem(BRIDGE_KEY, bridgeUrl());
-  } catch {
-    /* storage blocked: the default address still works */
+  if (CTX !== "proxy") {
+    try {
+      localStorage.setItem(BRIDGE_KEY, bridgeUrl());
+    } catch {
+      /* storage blocked: the default address still works */
+    }
   }
   location.href = "index.html";
 });
+if (CTX === "proxy") {
+  $("#bridgeUrl").closest(".field").hidden = true;
+  $("#bridgeSave").textContent = "Open the terminal";
+  testBridge();
+}
 
 /* ---------------- node registry ---------------- */
 let rows = []; // merged nodes with timing
@@ -143,11 +159,39 @@ function renderNodes() {
   }
 }
 
+/* Qortal Hub keeps apps from contacting other sites, so timing from this window only works outside it. */
+const canTimeHere = !CTX;
+if (!canTimeHere) {
+  $("#nodesTime").hidden = true;
+  $("#timeNote").textContent = "Qortal Hub doesn't let apps contact other sites, so nodes are timed on the bot's machine: npm run qortal:nodes times every listed node from there, ranks them and saves qortal/out/nodes-ranked.json. Open that file here to see the numbers.";
+}
+
 function useRegistries(results, sourceText) {
   rows = mergeRegistries(results);
   const refused = results.flatMap((r) => (r.ok ? r.rejected.map((x) => `${r.publisher || "file"}: ${x.label || "entry"} (${x.reason})`) : [`${r.publisher || "file"}: ${r.reason}`]));
   say($("#nodesRes"), rows.length ? (refused.length ? "warn" : "ok") : "err", `${rows.length} node(s) from ${sourceText}.${refused.length ? " Refused: " + refused.slice(0, 6).join("; ") + (refused.length > 6 ? "; …" : "") : ""}`);
   $("#nodesTime").disabled = !rows.length;
+  renderNodes();
+}
+
+/* A ranking saved by npm run qortal:nodes: every entry is checked again, and its timings are shown as yours. */
+function useRanking(doc, fileName) {
+  const list = Array.isArray(doc.nodes) ? doc.nodes.slice(0, 50) : [];
+  const ms = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) < 60_000 ? Math.round(Number(v)) : null);
+  rows = [];
+  let refused = 0;
+  for (const n of list) {
+    const c = checkNode({ label: n.label, url: n.url, kind: n.kind, region: n.region });
+    if (!c.ok) {
+      refused++;
+      continue;
+    }
+    const pubs = Array.isArray(n.publishers) ? n.publishers.filter((p) => typeof p === "string" && /^[A-Za-z0-9 ._@-]{1,40}$/.test(p)) : [];
+    const t = n.ok ? (n.chainOk === false ? { error: "not Base" } : { p50: ms(n.p50Ms), p90: ms(n.p90Ms) }) : n.skipped ? { skipped: String(n.skipped).slice(0, 40) } : { error: String(n.error || "unreachable").slice(0, 60) };
+    rows.push({ ...c.node, publishers: pubs, t });
+  }
+  const at = Date.parse(doc.at);
+  say($("#nodesRes"), rows.length ? "ok" : "err", `${rows.length} node(s) timed on the bot's machine${Number.isFinite(at) ? " at " + new Date(at).toLocaleString() : ""}, from ${fileName}.${refused ? ` ${refused} entry(s) refused.` : ""}`);
   renderNodes();
 }
 
@@ -181,9 +225,18 @@ $("#nodesLoad").addEventListener("click", async () => {
 $("#nodesFile").addEventListener("change", async (ev) => {
   const f = ev.target.files && ev.target.files[0];
   if (!f) return;
-  if (f.size > 64 * 1024) return say($("#nodesRes"), "err", "That file is over 64 KB: not a node list.");
-  useRegistries([checkRegistry(await f.text(), null)], f.name);
+  if (f.size > 256 * 1024) return say($("#nodesRes"), "err", "That file is over 256 KB: not a node list.");
+  const text = await f.text();
   ev.target.value = "";
+  let doc = null;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return say($("#nodesRes"), "err", `${f.name} isn't JSON.`);
+  }
+  if (doc && doc.schema === undefined && Array.isArray(doc.nodes) && doc.from && doc.at) return useRanking(doc, f.name);
+  if (text.length > 64 * 1024) return say($("#nodesRes"), "err", "That file is over 64 KB: not a node list.");
+  useRegistries([checkRegistry(doc, null)], f.name);
 });
 
 async function timeNode(url, samples = 3) {
@@ -340,8 +393,9 @@ $("#snapGet").addEventListener("click", async () => {
   const box = $("#snapRes");
   snap = null;
   $("#snapPub").disabled = true;
+  if (CTX === "render") return say(box, "warn", "A snapshot comes from your bot through the bridge. " + BLOCKED_HERE);
   try {
-    const r = await fetch(bridgeUrl() + "/bridge/snapshot", { cache: "no-store", signal: AbortSignal.timeout(6000) });
+    const r = await fetch(bridgeBase() + "/bridge/snapshot", { cache: "no-store", signal: AbortSignal.timeout(6000) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
     const c = checkStatus(j);
