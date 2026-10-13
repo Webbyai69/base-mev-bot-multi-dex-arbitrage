@@ -246,7 +246,7 @@ function addRow(v = {}) {
   );
   const rm = el("button", { cls: "btn sm", type: "button", text: "Remove", "aria-label": "Remove this node" });
   rm.addEventListener("click", () => row.remove());
-  const rmWrap = el("div", { cls: "field" }, [el("label", { text: " " }), rm]);
+  const rmWrap = el("div", { cls: "field rm" }, [rm]);
   row.append(rmWrap, el("div", { cls: "why", hidden: "" }));
   editor.append(row);
 }
