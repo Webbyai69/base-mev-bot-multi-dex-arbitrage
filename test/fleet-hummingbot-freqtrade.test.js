@@ -326,10 +326,19 @@ test("compose, configs and adapters keep paper only, keys out and GPL code out",
     assert.doesNotMatch(src, /["']connectors["']|password_verification/, `${f} never opens key stores`);
   }
 
-  const ignored = execFileSync(
-    "git",
-    ["check-ignore", "bots/compose/freqtrade/config.json", "bots/compose/hummingbot/conf/scripts/x.yml", "bots/compose/state/a.json", "bots/compose/.env"],
-    { cwd: root("."), encoding: "utf8" },
-  );
-  assert.equal(ignored.trim().split("\n").length, 4, "real configs, bot data and .env stay out of git");
+  // Only meaningful in a git checkout (a release zip has no .git).
+  let inGit = false;
+  try {
+    inGit = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root("."), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "true";
+  } catch {
+    /* git missing or not a checkout */
+  }
+  if (inGit) {
+    const ignored = execFileSync(
+      "git",
+      ["check-ignore", "bots/compose/freqtrade/config.json", "bots/compose/hummingbot/conf/scripts/x.yml", "bots/compose/state/a.json", "bots/compose/.env"],
+      { cwd: root("."), encoding: "utf8" },
+    );
+    assert.equal(ignored.trim().split("\n").length, 4, "real configs, bot data and .env stay out of git");
+  }
 });
