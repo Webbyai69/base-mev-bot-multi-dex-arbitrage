@@ -1,0 +1,23 @@
+{
+  "id": "xchain-monitor",
+  "upstream": "none: our own code in bots/xchain-monitor",
+  "cwd": ".",
+  "commands": {
+    "detect": ["node", "bots/xchain-monitor/monitor.ts"],
+    "paper": [],
+    "live": []
+  },
+  "env": {
+    "detect": {},
+    "paper": {},
+    "live": {}
+  },
+  "metricsFile": "data/fleet/xchain-monitor.fleet-metrics.json",
+  "logFile": "data/fleet/xchain-monitor.log",
+  "_notes": [
+    "detect: the passive cross-chain spread monitor. Read-only (eth_chainId, eth_getCode, eth_call); it never signs, trades or bridges. Writes data/fleet/xchain-spreads.jsonl and the metrics file above.",
+    "paper and live: empty on purpose. Cross-chain trading needs inventory on both chains and is Joshua's decision; see docs/fleet/xchain-monitor.md.",
+    "Needs in bots/wrapper/.env (names only): BASE_RPC_URL, ARB_RPC_URL, OP_RPC_URL, ETH_RPC_URL. A chain without a URL is skipped and named in the heartbeat detail. Optional: XCHAIN_INTERVAL_MS, XCHAIN_NOTIONAL_USD, XCHAIN_MIN_NET_BPS, XCHAIN_CONFIG.",
+    "Needs Node >= 22.18 (runs the .ts files directly, no build step)."
+  ]
+}

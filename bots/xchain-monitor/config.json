@@ -1,0 +1,99 @@
+{
+  "_notes": [
+    "Passive cross-chain spread monitor (docs/fleet/xchain-monitor.md). Read-only: eth_chainId, eth_getCode, eth_call.",
+    "RPC URLs are NOT here: they come from the env names below, set by Joshua in bots/wrapper/.env.",
+    "Pools are not hard-coded: at start (and every resolveEveryMin) the monitor asks each factory for every fee tier / tick spacing, verifies each pool (code present, token0/token1 match, decimals match) and keeps the one with the most in-range liquidity. 'expected' is a documentation cross-check only.",
+    "Cost assumptions (bridge bps, fixed USD, swap gas) are estimates, not live quotes. See the doc for where they come from and how to change them."
+  ],
+  "intervalMs": 15000,
+  "resolveEveryMin": 360,
+  "notionalUsd": 10000,
+  "minNetBps": 0,
+  "outDir": "data/fleet",
+  "spreadsFile": "xchain-spreads.jsonl",
+  "metricsFile": "xchain-monitor.fleet-metrics.json",
+  "maxFileMb": 64,
+  "chains": {
+    "base": {
+      "name": "Base",
+      "chainId": 8453,
+      "rpcEnv": "BASE_RPC_URL",
+      "tokens": {
+        "WETH": { "address": "0x4200000000000000000000000000000000000006", "decimals": 18 },
+        "USDC": { "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 },
+        "USDT": { "address": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", "decimals": 6 }
+      },
+      "factories": [
+        { "venue": "uniswap-v3", "kind": "v3-fee", "address": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD", "tiers": [100, 500, 3000] },
+        { "venue": "aerodrome-slipstream", "kind": "v3-tickspacing", "address": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A", "tiers": [1, 50, 100, 200] }
+      ],
+      "expected": { "WETH/USDC": "0xd0b53D9277642d899DF5C87A3966A349A798F224" }
+    },
+    "arb": {
+      "name": "Arbitrum One",
+      "chainId": 42161,
+      "rpcEnv": "ARB_RPC_URL",
+      "tokens": {
+        "WETH": { "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "decimals": 18 },
+        "USDC": { "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6 },
+        "USDT": { "address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "decimals": 6 }
+      },
+      "factories": [
+        { "venue": "uniswap-v3", "kind": "v3-fee", "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984", "tiers": [100, 500, 3000] }
+      ],
+      "expected": { "WETH/USDC": "0xC6962004f452bE9203591991D15f6b388e09E8D0" }
+    },
+    "op": {
+      "name": "OP Mainnet",
+      "chainId": 10,
+      "rpcEnv": "OP_RPC_URL",
+      "tokens": {
+        "WETH": { "address": "0x4200000000000000000000000000000000000006", "decimals": 18 },
+        "USDC": { "address": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", "decimals": 6 },
+        "USDT": { "address": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58", "decimals": 6 }
+      },
+      "factories": [
+        { "venue": "uniswap-v3", "kind": "v3-fee", "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984", "tiers": [100, 500, 3000] },
+        { "venue": "velodrome-slipstream", "kind": "v3-tickspacing", "address": "0xCc0bDDB707055e04e497aB22a59c2aF4391cd12F", "tiers": [1, 50, 100, 200] }
+      ],
+      "expected": {}
+    },
+    "eth": {
+      "name": "Ethereum",
+      "chainId": 1,
+      "rpcEnv": "ETH_RPC_URL",
+      "tokens": {
+        "WETH": { "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "decimals": 18 },
+        "USDC": { "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "decimals": 6 },
+        "USDT": { "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "decimals": 6 }
+      },
+      "factories": [
+        { "venue": "uniswap-v3", "kind": "v3-fee", "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984", "tiers": [100, 500, 3000] }
+      ],
+      "expected": {
+        "WETH/USDC": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+        "USDC/USDT": "0x3416cF6C708Da44DB2624D63ea0AAef7113527C6"
+      }
+    }
+  },
+  "assets": [
+    { "id": "WETH/USDC", "base": "WETH", "quote": "USDC", "bridge": "across-weth" },
+    { "id": "USDC/USDT", "base": "USDC", "quote": "USDT", "bridge": "cctp-usdc" }
+  ],
+  "costs": {
+    "swapGasUsd": { "base": 0.02, "arb": 0.03, "op": 0.02, "eth": 2.5 },
+    "bridges": {
+      "across-weth": {
+        "label": "Across (WETH), relayer + LP fee, estimate",
+        "bps": { "l2": 4, "eth": 6 },
+        "fixedUsd": { "l2": 0.1, "eth": 3 }
+      },
+      "cctp-usdc": {
+        "label": "Circle CCTP V2 Fast Transfer (USDC), estimate",
+        "bps": { "l2": 1, "eth": 1 },
+        "fixedUsd": { "l2": 0.1, "eth": 3 }
+      }
+    },
+    "pairOverrides": {}
+  }
+}
