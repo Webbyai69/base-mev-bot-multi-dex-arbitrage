@@ -34,8 +34,8 @@ import { qappFiles } from "../qortal/qapp/build-qapp.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
 
-/** Internal to the operator's own setup: never part of a public release. */
-export const EXCLUDE = [/^docs\/FLEET-PLAN\.md$/, /^docs\/AGENT_TASKS\.md$/, /^release\.private/, /^qortal\/qapp\/app\//, /^qortal\/out\//, /^release\//];
+/** Internal to the owner's own setup, or private: never part of a public release. The example rules file ships. */
+export const EXCLUDE = [/^docs\/FLEET-PLAN\.md$/, /^docs\/AGENT_TASKS\.md$/, /^release\.private(?!\.example\.json$)/, /^qortal\/qapp\/app\//, /^qortal\/out\//, /^release\//];
 
 /** Well-known, public development keys (Hardhat/Anvil accounts): safe to appear in tests. */
 const PUBLIC_TEST_KEYS = new Set([
