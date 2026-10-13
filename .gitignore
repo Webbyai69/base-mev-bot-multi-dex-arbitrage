@@ -21,3 +21,10 @@ data/STOP
 fleet-metrics.json
 # night watch: run history when the tool is run from the repo
 tools/night-watch/history.jsonl
+
+# Qortal layer: the bridge's token file, generated output and private release rules
+qortal/bridge/bridge.env
+qortal/out/
+release/
+release.private.json
+qortal/qapp/app/

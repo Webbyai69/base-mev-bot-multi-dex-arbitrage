@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Arb Network</title>
+<meta name="description" content="Connect the arb terminal to your bot, share and time Base nodes on Qortal, and publish or watch public status snapshots.">
+<style>
+  :root{
+    --bg:#060912; --bg-2:#0a0f1d; --surface:#0e1524; --surface-2:#121b2e; --surface-3:#172339;
+    --line:#1d2840; --line-2:#293a5c; --ink:#eaf1fc; --ink-2:#a7b4ce; --muted:#6b7a99;
+    --accent:#2e6bff; --accent-2:#38d6ff; --good:#2bd98b; --good-dim:#0f3a2b; --warn:#f5b23d; --warn-dim:#3a2d10;
+    --bad:#ff5d73; --bad-dim:#3a1620;
+    --radius:14px; --radius-xs:7px; --glow:0 14px 48px -20px rgba(46,107,255,.6);
+    --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+    --disp:"Space Grotesk",system-ui,sans-serif; --body:"Inter",system-ui,sans-serif;
+    color-scheme:dark;
+  }
+  @media (prefers-color-scheme:light){ :root:not([data-theme="dark"]){
+    --bg:#eef2fb; --bg-2:#e6edf9; --surface:#ffffff; --surface-2:#f5f8fe; --surface-3:#eaf1fc;
+    --line:#dbe4f3; --line-2:#c4d1e8; --ink:#0e1a30; --ink-2:#44526d; --muted:#76849d;
+    --accent:#1f56e6; --accent-2:#0a8fc0; --good:#0f9d63; --good-dim:#d7f3e7; --warn:#b5790b; --warn-dim:#f7ecd2;
+    --bad:#d6304a; --bad-dim:#fadfe4; --glow:0 14px 40px -22px rgba(31,86,230,.42); color-scheme:light;
+  }}
+  :root[data-theme="light"]{
+    --bg:#eef2fb; --bg-2:#e6edf9; --surface:#ffffff; --surface-2:#f5f8fe; --surface-3:#eaf1fc;
+    --line:#dbe4f3; --line-2:#c4d1e8; --ink:#0e1a30; --ink-2:#44526d; --muted:#76849d;
+    --accent:#1f56e6; --accent-2:#0a8fc0; --good:#0f9d63; --good-dim:#d7f3e7; --warn:#b5790b; --warn-dim:#f7ecd2;
+    --bad:#d6304a; --bad-dim:#fadfe4; --glow:0 14px 40px -22px rgba(31,86,230,.42); color-scheme:light;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--bg);color:var(--ink);font:14px/1.55 var(--body);-webkit-font-smoothing:antialiased}
+  h1,h2,h3{font-family:var(--disp);margin:0;letter-spacing:-.01em;text-wrap:balance}
+  a{color:var(--accent-2)} code,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  code{font-size:.92em;background:var(--bg-2);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
+
+  .top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+    padding:12px max(16px,4vw);background:color-mix(in srgb,var(--surface) 82%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:10px}
+  .logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(140deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:#fff;font:700 16px var(--disp)}
+  .brand b{display:block;font:600 14px var(--disp)} .brand span{display:block;font-size:11px;color:var(--muted)}
+  .top nav{display:flex;gap:4px}
+  .top nav a{padding:7px 12px;border-radius:var(--radius-xs);color:var(--ink-2);text-decoration:none;font-weight:500}
+  .top nav a:hover{background:var(--surface-2);color:var(--ink)}
+  .top nav a[aria-current]{background:var(--surface-2);color:var(--accent-2)}
+  .qstate{margin-left:auto;font:500 11.5px var(--mono);color:var(--muted)}
+  .qstate.on{color:var(--good)}
+
+  .wrap{max-width:1120px;margin:0 auto;padding-block:22px 60px;padding-inline:max(16px,4vw);display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}
+  .lede{grid-column:1/-1;max-width:68ch;color:var(--ink-2);margin:4px 0 6px}
+  .lede h1{font-size:clamp(22px,3vw,30px);color:var(--ink);margin-bottom:6px}
+  .panel{grid-column:1/-1;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px;min-width:0}
+  .half{grid-column:span 6} @media (max-width:860px){.half{grid-column:1/-1}}
+  .ph{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+  .ph h2{font-size:16px;font-weight:600}
+  .ph .tag{font:10.5px var(--mono);color:var(--muted)}
+  .note{color:var(--ink-2);font-size:12.5px;margin:0 0 12px;max-width:72ch}
+  .steps{margin:0 0 14px;padding-left:20px;color:var(--ink-2);font-size:12.5px;max-width:72ch}
+  .steps li{margin:3px 0}
+
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+  .field{display:flex;flex-direction:column;gap:5px;min-width:0;flex:1 1 180px}
+  .field label{font-size:11.5px;color:var(--muted);font-weight:500}
+  input,select{background:var(--bg-2);border:1px solid var(--line-2);color:var(--ink);border-radius:var(--radius-xs);padding:9px 11px;font:12.5px var(--mono);width:100%;min-width:0}
+  input:focus-visible,select:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent-2);outline-offset:2px}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:9px 14px;border-radius:var(--radius-xs);font:600 12.5px var(--body);
+    border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:var(--glow)}
+  .btn.sm{padding:5px 10px;font-size:11.5px}
+  .btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+  .result{margin-top:12px;padding:10px 12px;border-radius:var(--radius-xs);font-size:12.5px;border:1px solid var(--line)}
+  .result.ok{background:var(--good-dim);border-color:color-mix(in srgb,var(--good) 35%,var(--line))}
+  .result.err{background:color-mix(in srgb,var(--bad) 10%,transparent);border-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
+  .result.warn{background:var(--warn-dim);border-color:color-mix(in srgb,var(--warn) 35%,var(--line))}
+
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius-xs);margin-top:12px}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:760px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font:500 11px var(--body);color:var(--muted);background:var(--surface-2);position:sticky;top:0}
+  td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  tr:last-child td{border-bottom:none}
+  td .host{display:block;font:11px var(--mono);color:var(--muted);word-break:break-all}
+  .ok{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)} .muted{color:var(--muted)}
+  .empty{padding:18px;color:var(--muted);font-size:12.5px;text-align:center}
+
+  .editor{display:grid;gap:10px;margin-top:6px}
+  .erow{display:grid;grid-template-columns:1.1fr 2.2fr .9fr .9fr 1.6fr auto;gap:8px;align-items:start}
+  .erow .why{grid-column:1/-1;font-size:11.5px;color:var(--bad);margin-top:-4px}
+  @media (max-width:860px){.erow{grid-template-columns:1fr 1fr}.erow .url,.erow .notes{grid-column:1/-1}}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+  .stat{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-xs);padding:10px 12px}
+  .stat .k{font-size:11px;color:var(--muted)} .stat .v{font:600 18px var(--disp);margin-top:2px;font-variant-numeric:tabular-nums}
+  pre{background:var(--bg-2);border:1px solid var(--line);border-radius:var(--radius-xs);padding:10px 12px;font:11.5px/1.5 var(--mono);overflow:auto;max-height:260px;margin:12px 0 0}
+
+  .rules{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+  .rules h3{font-size:13.5px;margin-bottom:6px}
+  .rules ul{margin:0;padding-left:18px;color:var(--ink-2);font-size:12.5px}
+  @media (max-width:860px){.rules{grid-template-columns:1fr}}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true">A</span><div><b>Arb Terminal</b><span>on Qortal</span></div></div>
+  <nav aria-label="Pages"><a href="index.html">Terminal</a><a href="network.html" aria-current="page">Network</a></nav>
+  <span class="qstate" id="qstate">checking Qortal…</span>
+</header>
+
+<main class="wrap">
+  <div class="lede">
+    <h1>Network</h1>
+    <p>Trades run on your own machine, as close to Base's sequencer as you can get it. Qortal carries everything else: this app, the shared list of Base nodes, and the status snapshots you choose to publish.</p>
+  </div>
+
+  <section class="panel half" id="connect" aria-labelledby="h-connect">
+    <div class="ph"><h2 id="h-connect">Connect your bot</h2><span class="tag">read-only · this machine</span></div>
+    <p class="note">The terminal reads your bot through a small bridge on the bot's machine. The bridge holds a read-only token, so this app never sees one.</p>
+    <ol class="steps">
+      <li>In the terminal on the bot's machine: AI agents → Issue token, with the <b>read</b> scope only.</li>
+      <li>Copy <code>qortal/bridge/bridge.env.example</code> to <code>bridge.env</code> and paste the token in.</li>
+      <li>Run <code>npm run qortal:bridge</code>, then test the address below.</li>
+    </ol>
+    <div class="row">
+      <div class="field"><label for="bridgeUrl">Bridge address</label><input id="bridgeUrl" spellcheck="false" autocomplete="off" value="http://127.0.0.1:8790"></div>
+      <button class="btn" id="bridgeTest">Test</button>
+      <button class="btn primary" id="bridgeSave">Save and open the terminal</button>
+    </div>
+    <div class="result" id="bridgeRes" hidden></div>
+    <p class="note" style="margin:12px 0 0">The bridge only answers this machine, so Qortal Hub has to run on the bot's machine for live numbers. From anywhere else, watch a published snapshot instead.</p>
+  </section>
+
+  <section class="panel half" id="status" aria-labelledby="h-status">
+    <div class="ph"><h2 id="h-status">Public status</h2><span class="tag">QDN · base-arb-status-v1</span></div>
+    <p class="note">A snapshot holds counts and timings only: health, latency, finds kept or lost, fleet states. Never addresses, routes, pairs, hosts or keys.</p>
+    <div class="row">
+      <div class="field"><label for="watchName">Watch a bot by its operator's Qortal name</label><input id="watchName" spellcheck="false" autocomplete="off" placeholder="Qortal name"></div>
+      <button class="btn" id="watchLoad">Load</button>
+    </div>
+    <div class="result" id="watchRes" hidden></div>
+    <div class="stats" id="watchStats" hidden></div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn" id="snapGet">Preview my bot's snapshot</button>
+      <button class="btn primary" id="snapPub" disabled>Publish snapshot</button>
+    </div>
+    <pre id="snapPre" hidden></pre>
+    <div class="result" id="snapRes" hidden></div>
+  </section>
+
+  <section class="panel" id="nodes" aria-labelledby="h-nodes">
+    <div class="ph"><h2 id="h-nodes">Base nodes on Qortal</h2><span class="tag">QDN · base-arb-nodes-v1</span></div>
+    <p class="note">Base RPC nodes that people list on Qortal, timed from here. Use them for reading and to compare latency. Send transactions only through a node you run or pay for: whoever runs a node sees your transaction before the sequencer does.</p>
+    <div class="row">
+      <button class="btn primary" id="nodesLoad">Load lists from Qortal</button>
+      <button class="btn" id="nodesTime" disabled>Time from here</button>
+      <label class="btn" for="nodesFile">Open a list file</label>
+      <input type="file" id="nodesFile" accept="application/json,.json" hidden>
+    </div>
+    <div class="result" id="nodesRes" hidden></div>
+    <div class="tablewrap">
+      <table aria-describedby="h-nodes">
+        <thead><tr><th>Node</th><th>Region</th><th>Kind</th><th>Listed by</th><th class="num">Their p50 ms</th><th class="num">Your p50 ms</th><th class="num">Your p90 ms</th><th>Status</th></tr></thead>
+        <tbody id="nodesBody"><tr><td colspan="8" class="empty">No lists loaded yet. Load them from Qortal, or open a list file.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="note" style="margin:12px 0 0">Qortal Hub may block timing from this window. On the bot's machine, <code>npm run qortal:nodes</code> times every listed node from there, which is the number that matters, and ranks them.</p>
+  </section>
+
+  <section class="panel" id="share" aria-labelledby="h-share">
+    <div class="ph"><h2 id="h-share">Share your nodes</h2><span class="tag" id="shareAs">publishing needs a registered Qortal name</span></div>
+    <p class="note">List only public endpoints you're happy for anyone to use. Addresses with a key in them are refused, and so are private or local hosts. Publishing replaces your previous list.</p>
+    <div class="editor" id="editor"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" id="rowAdd">Add a node</button>
+      <button class="btn" id="shareCheck">Check</button>
+      <button class="btn primary" id="sharePub">Publish to Qortal</button>
+    </div>
+    <div class="result" id="shareRes" hidden></div>
+  </section>
+
+  <section class="panel" aria-labelledby="h-rules">
+    <div class="ph"><h2 id="h-rules">What goes where</h2></div>
+    <div class="rules">
+      <div><h3>On Qortal</h3><ul><li>This app</li><li>Shared lists of public Base nodes</li><li>Status snapshots you choose to publish</li><li>The release itself</li></ul></div>
+      <div><h3>Never on Qortal</h3><ul><li>Keys, seed phrases and <code>.env</code></li><li>Private or paid RPC addresses</li><li>Wallet and contract addresses</li><li>Trading records and learned data</li></ul></div>
+      <div><h3>On your machine</h3><ul><li>The bot and its keys</li><li>The node you send through</li><li>The bridge, bound to this machine only</li></ul></div>
+    </div>
+  </section>
+</main>
+<script type="module" src="network.js"></script>
+</body>
+</html>

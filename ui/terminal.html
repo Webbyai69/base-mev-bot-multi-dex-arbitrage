@@ -712,9 +712,12 @@
     html+='<circle cx="'+x(series.length-1)+'" cy="'+y(series[series.length-1])+'" r="3" fill="'+color+'"/>';
     el.innerHTML=html;}
   var BOOT=window.__BOT__||null,LIVE=!!(BOOT&&BOOT.token);
+  /* BASE is empty when the bot serves this page (same origin). The Qortal app sets it to the
+     local read-only bridge, and readOnly hides what only the bot's own machine may do. */
+  var BASE=(BOOT&&typeof BOOT.base==="string")?BOOT.base.replace(/\/+$/,""):"",RO=!!(BOOT&&BOOT.readOnly);
   function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
   function api(path,opts){opts=opts||{};var h={"x-bot-token":BOOT.token},hasBody=opts.body!==undefined;if(hasBody)h["content-type"]="application/json";
-    return fetch(path,{method:opts.method||(hasBody?"POST":"GET"),headers:h,body:hasBody?JSON.stringify(opts.body):undefined,cache:"no-store"}).then(function(r){return r.json().catch(function(){return {};}).then(function(j){if(!r.ok)throw new Error((j&&j.error)||("HTTP "+r.status));return j;});});}
+    return fetch(BASE+path,{method:opts.method||(hasBody?"POST":"GET"),headers:h,body:hasBody?JSON.stringify(opts.body):undefined,cache:"no-store"}).then(function(r){return r.json().catch(function(){return {};}).then(function(j){if(!r.ok)throw new Error((j&&j.error)||("HTTP "+r.status));return j;});});}
 
   (function(){var t=$("#theme");try{var s=localStorage.getItem("arb-theme");if(s)document.documentElement.setAttribute("data-theme",s);}catch(e){}
     t.addEventListener("click",function(){var cur=document.documentElement.getAttribute("data-theme");var sysDark=window.matchMedia&&window.matchMedia("(prefers-color-scheme:dark)").matches;var next=cur?(cur==="dark"?"light":"dark"):(sysDark?"light":"dark");document.documentElement.setAttribute("data-theme",next);try{localStorage.setItem("arb-theme",next);}catch(e){}if(curView==="analytics")drawAnalytics();if(curView==="overview")drawLatTrend();drawSpark();});})();
@@ -1511,7 +1514,7 @@
   function loadAnalytics(){return api("/api/analytics?hours=24").then(function(a){S.analytics=a;if(curView==="analytics")drawAnalytics();});}
   function loadSummary(){return api("/api/summary").then(function(s){S.summary=s;renderBar();});}
   function loadHelp(){return api("/api/help").then(function(h){S.help=h;renderEndpoints();});}
-  function openStream(){if(!window.EventSource)return;var es=new EventSource("/api/stream?t="+encodeURIComponent(BOOT.token)),lastMev=0;
+  function openStream(){if(!window.EventSource)return;var es=new EventSource(BASE+"/api/stream?t="+encodeURIComponent(BOOT.token)),lastMev=0;
     var on=function(type,fn){es.addEventListener(type,function(e){var d;try{d=JSON.parse(e.data);}catch(x){return;}fn(d);});};
     on("brief",applyBrief);
     on("block",function(b){if(S.state)S.state.blocks=(S.state.blocks||[]).concat([b]).slice(-90);var el=$("#cBlock");el.textContent=Number(b.n).toLocaleString();el.classList.add("tick");setTimeout(function(){el.classList.remove("tick");},350);sparkData.push(b.opps||0);if(sparkData.length>22)sparkData.shift();drawSpark();});
@@ -1552,6 +1555,8 @@
     var ph=$("#nodeList").closest(".panel").querySelector(".ph");var pb=document.createElement("button");pb.className="btn sm";pb.textContent="Test current nodes";ph.appendChild(pb);
     pb.addEventListener("click",function(){var b=this;b.disabled=true;b.textContent="testing…";api("/api/nodes/probe",{body:{}}).then(loadNodes).catch(err).then(function(){b.disabled=false;b.textContent="Test current nodes";});});
     $(".foot-note").innerHTML='Live · every number comes from this bot\'s own records (data/*.jsonl); modelled numbers say so. <a href="/" style="color:var(--accent-2)">Open the classic dashboard</a>';
+    if(RO){$(".foot-note").innerHTML='Live, read-only, through your local bridge. Changes (pausing, tokens, fleet control, nodes) happen in the terminal on the bot\'s own machine.';
+      ["#estop","#dLaunch","#testRpc","#addNode"].forEach(function(id){var b=$(id);if(b){b.disabled=true;b.title="Read-only here: use the terminal on the bot's own machine";}});}
     /* controls that need the server */
     rebind("#estop",function(){var st=S.state;if(!st)return;if(st.stop&&st.stop.present){toast("Already paused. Resume by deleting data/STOP yourself, after reading why.");return;}
       confirmTwice(this,"Click again: write STOP",function(){api("/api/sending",{body:{paused:true,reason:"engine button"}}).then(function(r){st.stop=r.stop;renderEngine();renderBar();toast("STOP written: live sending halts");}).catch(err);});});
