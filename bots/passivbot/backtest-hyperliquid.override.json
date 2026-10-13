@@ -1,0 +1,25 @@
+{
+  "_notes": [
+    "Merged over bots/upstream/passivbot/configs/examples/default_trailing_martingale_long.json by run_backtest.py.",
+    "Hyperliquid's API only serves a few days of 1m candles, so candles come from Binance (long history) while fees, price and qty steps and min sizes come from Hyperliquid (market_settings_sources).",
+    "Long only, BTC and ETH, $1,000 starting balance, six months. Backtest only: there is no api-keys.json and no live section is used."
+  ],
+  "backtest": {
+    "exchanges": ["binance", "hyperliquid"],
+    "coin_sources": { "BTC": "binance", "ETH": "binance" },
+    "market_settings_sources": { "BTC": "hyperliquid", "ETH": "hyperliquid" },
+    "start_date": "2026-04-01",
+    "end_date": "2026-10-01",
+    "starting_balance": 1000,
+    "maker_fee_override": 0.00015,
+    "base_dir": "backtests"
+  },
+  "live": {
+    "approved_coins": { "long": ["BTC", "ETH"], "short": [] },
+    "ignored_coins": { "long": [], "short": [] }
+  },
+  "bot": {
+    "long": { "risk": { "n_positions": 2, "total_wallet_exposure_limit": 1.0 } },
+    "short": { "risk": { "n_positions": 0, "total_wallet_exposure_limit": 0.0 } }
+  }
+}
