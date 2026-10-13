@@ -1,6 +1,6 @@
 /**
  * Public status snapshots on QDN: a bot's health and results as aggregate
- * numbers, published by its operator (opt-in) so it can be watched from any
+ * numbers, published by its owner (opt-in) so it can be watched from any
  * Qortal node without opening the bot to the internet.
  *
  * A snapshot never contains addresses, routes, pairs, rival bots, hostnames,
