@@ -16,6 +16,7 @@
  *   bots\wrapper\.env          fleet wrapper settings, if you have them
  *   qortal\bridge\bridge.env   the Qortal bridge's read-only token, if you have one
  *   deploy\ashburn\.env.ashburn  the server settings, if you made them
+ * A part's settings file is only copied into a copy that has that part's folder.
  *
  * It never prints a key, a token or an RPC URL. It prints the bot wallet's
  * address (public) for the old and the new copy, so you can see they match,
@@ -97,6 +98,13 @@ export function plan(from, to, { force = false, withReports = false } = {}) {
     const src = join(from, item.path);
     if (!existsSync(src)) {
       rows.push({ item, rel: item.path, action: item.required ? "missing" : "absent" });
+      continue;
+    }
+    // A component's settings file only goes where that component is: this copy may be a
+    // branch without it, where git wouldn't ignore the file and could commit its token.
+    const home = dirname(item.path);
+    if (!item.dir && home !== "." && !existsSync(join(to, home))) {
+      rows.push({ item, rel: item.path, action: "unused" });
       continue;
     }
     const files = item.dir ? walk(src).map((f) => join(item.path, f)) : [item.path];
@@ -189,6 +197,10 @@ export async function main(argv = process.argv.slice(2), { log = console.log, de
     if (mine[0].action === "absent") continue;
     if (mine[0].action === "missing") {
       log(`  ${item.path.padEnd(28)} not in the old folder`);
+      continue;
+    }
+    if (mine[0].action === "unused") {
+      log(`  ${item.path.padEnd(28)} left in the old folder: this copy has no ${dirname(item.path)} folder`);
       continue;
     }
     const n = (a) => mine.filter((r) => r.action === a).length;

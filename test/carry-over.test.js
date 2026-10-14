@@ -122,6 +122,20 @@ test("an encrypted key store travels with data/, and a running old bot is flagge
   assert.match(out, /still running/, "keystore.json was just written");
 });
 
+test("a part's settings file stays behind when this copy doesn't have that part", async () => {
+  const from = oldInstall();
+  mkdirSync(join(from, "qortal", "bridge"), { recursive: true });
+  writeFileSync(join(from, "qortal", "bridge", "bridge.env"), "# bridge settings\n");
+  const to = freshClone();
+  const { code, out } = await run(["--from", from, "--to", to]);
+  assert.equal(code, 0);
+  assert.ok(!existsSync(join(to, "qortal", "bridge", "bridge.env")), "not copied into a copy without the bridge");
+  assert.match(out, /qortal\/bridge\/bridge\.env\s+left in the old folder: this copy has no qortal\/bridge folder/);
+  mkdirSync(join(to, "qortal", "bridge"), { recursive: true });
+  await run(["--from", from, "--to", to]);
+  assert.ok(existsSync(join(to, "qortal", "bridge", "bridge.env")), "copied once the bridge is here");
+});
+
 test("plan and readEnv follow the bot's own .env rules", () => {
   const from = oldInstall({ env: `# comment\nPRIVATE_KEY="${DEV_KEY}"\nEMPTY=\n` });
   assert.deepEqual(readEnv(join(from, ".env")), { PRIVATE_KEY: DEV_KEY, EMPTY: "" });

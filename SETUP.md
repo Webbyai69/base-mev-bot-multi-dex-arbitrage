@@ -9,7 +9,8 @@ same memory.
 ## Updating the folder you already run (fastest)
 
 Your bot folder is already a git copy of this repo. Updating it in place
-leaves `.env`, the wallet and `data\` exactly as they are:
+leaves `.env`, the wallet and `data\` exactly as they are. Stop the bot
+first ([how](#stopping-the-bot)), then:
 
 ```powershell
 cd C:\path\to\base-arb-bot
@@ -19,6 +20,11 @@ npm run build
 ```
 
 Then start the bot the way you always do.
+
+If `git pull` stops with "untracked working tree files would be overwritten
+by merge: run-24h.ps1", your folder has its own copy of that script from
+before it was added here. The repo's copy is the same script. Rename yours
+with `ren run-24h.ps1 run-24h.ps1.bak` and run `git pull` again.
 
 ## A new folder, or another computer
 
@@ -51,6 +57,13 @@ If the new folder already has a `.env` or data that differ from the old
 ones, the carry-over leaves them alone and tells you. `--force` replaces
 them and keeps the new folder's copies as `*.bak`.
 
+## Stopping the bot
+
+`run-24h.ps1` runs the bot in the background and writes its process id to
+`reports\run-24h.status.txt`, in the line `bot pid 1234 started …`. Stop it
+with `Stop-Process -Id 1234`, using that number. The script stops it the same
+way at the end of a run.
+
 ## Your bot wallet and its gas money
 
 - The ETH is in the bot wallet on Base, not in a folder. Whatever install has
@@ -79,3 +92,7 @@ the bot asks for the passphrase at start (or reads it from
 with the rest of `data\`. Server setup itself is in
 [deploy/ashburn/README.md](deploy/ashburn/README.md); newer server kits wait
 in their own pull requests until they're merged.
+
+A server that runs in paper mode needs no key at all. Before a server sends
+live with the bot wallet, stop the PC's bot or set `MODE=paper` in the PC's
+`.env`, so only one copy sends from the wallet.
