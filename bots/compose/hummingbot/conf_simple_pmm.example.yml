@@ -1,0 +1,14 @@
+# Hummingbot V2 script config for scripts/simple_pmm.py (shipped inside the image).
+# compose_paper.py copies this to hummingbot/conf/scripts/conf_simple_pmm.yml on first run.
+# Field names follow scripts/simple_pmm.py in Hummingbot (Apache-2.0, Copyright Hummingbot
+# Foundation; see bots/upstream/hummingbot/LICENSE). No Hummingbot code is copied here.
+# PAPER ONLY: the exchange must end in _paper_trade or the launcher refuses to start.
+script_file_name: simple_pmm.py
+controllers_config: []
+exchange: binance_paper_trade
+trading_pair: ETH-USDT
+order_amount: 0.01
+bid_spread: 0.001
+ask_spread: 0.001
+order_refresh_time: 15
+price_type: mid

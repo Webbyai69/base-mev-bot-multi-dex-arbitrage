@@ -68,4 +68,8 @@ bots/
     configs/_template.json
     configs/<id>.json    added by the phase that integrates <id>
     .env                 owner-only, gitignored: FLEET_LIVE_<ID>, keys, caps
+  adapters/              bridges that turn a bot's own status into the wrapper's metrics file
+  compose/               containers for the exchange bots (Hummingbot, Freqtrade), paper only
 ```
+
+Containerised bots (Phase 2): see `docs/fleet/hummingbot-freqtrade.md`.
