@@ -49,13 +49,25 @@ export function spreadSamples(xs: bigint[], ps: bigint[], n = SIZE_CURVE_POINTS)
 
   const lo = xs[uniq[0]!]!;
   const hi = xs[uniq[uniq.length - 1]!]!;
-  const picked = new Set<number>([best]);
+  const picked = new Set<number>();
   let j = 0;
-  for (let k = 0; k < n && picked.size < n; k++) {
+  for (let k = 0; k < n; k++) {
     const target = n === 1 ? lo : lo + ((hi - lo) * BigInt(k)) / BigInt(n - 1);
     // uniq is sorted, so walk forward to the nearest sample.
     while (j + 1 < uniq.length && absDiff(xs[uniq[j + 1]!]!, target) <= absDiff(xs[uniq[j]!]!, target)) j++;
     picked.add(uniq[j]!);
+  }
+  if (!picked.has(best)) {
+    // Swap the best point in for the nearest interior pick (the ends show the range).
+    if (picked.size >= n) {
+      let drop = -1;
+      for (const i of picked) {
+        if (i === uniq[0] || i === uniq[uniq.length - 1]) continue;
+        if (drop < 0 || absDiff(xs[i]!, xs[best]!) < absDiff(xs[drop]!, xs[best]!)) drop = i;
+      }
+      if (drop >= 0) picked.delete(drop);
+    }
+    picked.add(best);
   }
   return [...picked].sort((a, b) => (xs[a]! < xs[b]! ? -1 : xs[a]! > xs[b]! ? 1 : 0)).map((i) => [xs[i]!, ps[i]!]);
 }
