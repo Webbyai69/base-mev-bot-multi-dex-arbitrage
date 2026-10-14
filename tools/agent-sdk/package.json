@@ -1,0 +1,8 @@
+{
+  "name": "base-arb-agent-sdk-runner",
+  "private": true,
+  "type": "module",
+  "description": "Runs AGENT_TASKS.md jobs with the Claude Agent SDK on API credits, each on its own branch.",
+  "scripts": { "task": "node run.mjs" },
+  "dependencies": { "@anthropic-ai/claude-agent-sdk": "latest" }
+}
