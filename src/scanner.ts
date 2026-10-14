@@ -17,6 +17,8 @@ import type { Chain, Call } from "./rpc.js";
 import type { GasQuote } from "./gas.js";
 import { weiToUsd } from "./gas.js";
 import { log } from "./log.js";
+import { attachSizeCurve, sizeCurveMode, type SizeCurve, type SizeCurveMode } from "./sizecurve.js"; // history:
+import type { NearMissCollector } from "./nearmiss.js"; // history:
 
 const abi = AbiCoder.defaultAbiCoder();
 
@@ -51,6 +53,8 @@ export interface Opportunity {
   stage?: "block" | "flashblock";
   /** For flashblock finds: ms since the last confirmed block was seen. */
   msIntoBlock?: number;
+  /** history: up to 12 [amountIn, profitUsd] points around the chosen size (src/sizecurve.ts). */
+  sizeCurve?: SizeCurve;
 }
 
 export interface RouteInfo {
@@ -147,6 +151,11 @@ export class Scanner {
 
   /** Routes found in the last scan before the profit floor (used to pick "hot" pools for Flashblocks). */
   lastCandidatePools = new Set<string>();
+
+  /** history: near-miss log (src/nearmiss.ts); set it to turn the log on (NEAR_MISSES=true). */
+  nearMisses?: NearMissCollector;
+  /** history: attach sizeCurve to opportunities: "probe" (default), "optimizer", or false (SIZE_CURVES). */
+  sizeCurves: SizeCurveMode = sizeCurveMode();
 
   constructor(
     readonly chain: Chain,
@@ -248,6 +257,8 @@ export class Scanner {
       }
       const routeGasUsd = weiToUsd(BigInt(this.routeGasUnits(r.pools)) * gasPrice + gas.l1FeeWei, ethUsd);
       const netUsd = profitUsd - routeGasUsd;
+      // history: near misses (off unless scanner.nearMisses is set)
+      if (this.nearMisses && netUsd < minNetUsd) this.nearMisses.offer(block, netUsd, minNetUsd, () => ({ key: `${r.pools.map((p) => p.address).join(">")}-${tokenIn}`, pairSymbols: routeLabel(r, (a) => this.registry.symbol(a)), dexes: r.pools.map((p) => p.dex), tokenInSymbol: this.registry.symbol(tokenIn), amountIn: r.amounts[0]!, profitUsd, gasUsd: routeGasUsd, hops: r.pools.length, stage: opts.stage }));
       if (priceOut(netUsd)) continue;
       const first = r.pools[0]!;
       const last = r.pools[r.pools.length - 1]!;
@@ -295,6 +306,8 @@ export class Scanner {
         continue;
       }
       const netUsd = profitUsd - gasUsd;
+      // history: near misses (off unless scanner.nearMisses is set)
+      if (this.nearMisses && netUsd < minNetUsd) this.nearMisses.offer(block, netUsd, minNetUsd, () => ({ key: `${q.buyPool.address}-${q.sellPool.address}-${q.tokenIn}`, pairSymbols: `${this.registry.symbol(q.buyPool.token0)}/${this.registry.symbol(q.buyPool.token1)}`, dexes: [(q.buyPool as Pool).dex, (q.sellPool as Pool).dex], tokenInSymbol: this.registry.symbol(q.tokenIn), amountIn: q.amountIn, profitUsd, gasUsd, hops: 2, stage: opts.stage }));
       if (priceOut(netUsd)) continue;
       const buy = q.buyPool as Pool;
       const sell = q.sellPool as Pool;
@@ -358,6 +371,7 @@ export class Scanner {
       for (const p of ps) usedPools.add(p);
       return true;
     });
+    if (this.sizeCurves) for (const o of unique) attachSizeCurve(o, (a) => this.registry.pools.get(a), this.sizeCurves); // history: same reserves, before any await
     const tag = opts.blockTag ?? block;
     const classic = unique.filter((o) => !o.route);
     const multi = unique.filter((o) => o.route);
