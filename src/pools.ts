@@ -38,7 +38,7 @@ import {
   v4PoolId,
 } from "./abi.js";
 import { getAmountOut, type FeeModel } from "./math.js";
-import { compressTick, virtualReserves, wordPosition, wordsNeeded, type ClState } from "./clmath.js";
+import { bandReserves, compressTick, virtualReserves, wordPosition, wordsNeeded, type ClState } from "./clmath.js";
 import type { Chain, Call, CallResult } from "./rpc.js";
 import { log } from "./log.js";
 
@@ -967,9 +967,24 @@ export class PoolRegistry {
 
   /** Pool depth measured in WETH-equivalent of its base-token side (0 if it has no base token). */
   liquidityInWeth(p: Pool, ethUsd: number): number {
+    // Depth must be the REAL near-price liquidity. V2 reserves are real balances; a CL pool's
+    // reserve0/1 hold *virtual* reserves, which overstate a concentrated pool's usable depth by
+    // orders of magnitude (a deep stablecoin CL pool otherwise scores as tens of millions of WETH
+    // and crowds the value-score). During discovery the real balances live in bal0/bal1; once those
+    // are dropped, derive the real ±1% in-range amounts from the active liquidity instead.
+    let r0 = p.reserve0;
+    let r1 = p.reserve1;
+    if (p.bal0 !== undefined && p.bal1 !== undefined) {
+      r0 = p.bal0;
+      r1 = p.bal1;
+    } else if (p.cl) {
+      const b = bandReserves(p.cl);
+      r0 = b.reserve0;
+      r1 = b.reserve1;
+    }
     for (const [tok, res] of [
-      [p.token0, p.bal0 ?? p.reserve0],
-      [p.token1, p.bal1 ?? p.reserve1],
+      [p.token0, r0],
+      [p.token1, r1],
     ] as Array<[string, bigint]>) {
       if (tok === WETH) return Number(res) / 1e18;
       const meta = Object.values(TOKENS).find((t) => t.address.toLowerCase() === tok);
@@ -979,11 +994,36 @@ export class PoolRegistry {
     return 0;
   }
 
+  /** Real WETH-side depth of a pool, in WETH (bal in discovery, the ±1% band for CL, raw reserve for V2). */
+  private realWethDepth(p: Pool): number {
+    let r0 = p.reserve0;
+    let r1 = p.reserve1;
+    if (p.bal0 !== undefined && p.bal1 !== undefined) {
+      r0 = p.bal0;
+      r1 = p.bal1;
+    } else if (p.cl) {
+      const b = bandReserves(p.cl);
+      r0 = b.reserve0;
+      r1 = b.reserve1;
+    }
+    if (p.token0 === WETH) return Number(r0) / 1e18;
+    if (p.token1 === WETH) return Number(r1) / 1e18;
+    return 0;
+  }
+
   /**
    * USD value of `amount` of `token`, priced through the deepest pool that
    * pairs it with WETH or a stablecoin. Returns null when no route is known.
+   *
+   * The reference pool is chosen and vetted by REAL near-price WETH depth, not the
+   * CL virtual reserves (which overstate a concentrated pool), and a token is never
+   * priced through a pool below MIN_PRICE_POOL_WETH — otherwise a thin or stale pool
+   * yields a wild price that inflates both the AI review's rival-profit figures and
+   * the value-score (e.g. a single pool crediting more "profit" than the day's total).
+   * The spot price itself still comes from the pool's reserve ratio (= marginal price).
    */
   usdValue(token: string, amount: bigint, ethUsd: number): number | null {
+    const MIN_PRICE_POOL_WETH = 0.5; // same floor discovery applies; thinner pools aren't trusted to price
     const t = token.toLowerCase();
     const meta = this.token(t);
     const decimals = meta?.decimals ?? 18;
@@ -992,15 +1032,20 @@ export class PoolRegistry {
     const known = Object.values(TOKENS).find((x) => x.address.toLowerCase() === t);
     if (known?.approxUsd) return amt * known.approxUsd;
     if (known?.symbol === "cbETH") return amt * ethUsd;
-    // Price via the deepest WETH pool containing the token.
+    // Price via the deepest WETH pool containing the token, judged by real near-price depth.
     let best: Pool | undefined;
+    let bestDepth = 0;
     for (const p of this.pools.values()) {
       if (p.token0 !== t && p.token1 !== t) continue;
       const other = p.token0 === t ? p.token1 : p.token0;
       if (other !== WETH) continue;
-      if (!best || this.wethReserve(p) > this.wethReserve(best)) best = p;
+      const depth = this.realWethDepth(p);
+      if (depth > bestDepth) {
+        best = p;
+        bestDepth = depth;
+      }
     }
-    if (!best) return null;
+    if (!best || bestDepth < MIN_PRICE_POOL_WETH) return null;
     const tokRes = Number(best.token0 === t ? best.reserve0 : best.reserve1) / 10 ** decimals;
     const wethRes = Number(this.wethReserve(best)) / 1e18;
     if (tokRes === 0) return null;

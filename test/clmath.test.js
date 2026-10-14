@@ -18,6 +18,7 @@ import {
   clSwapExactIn,
   clMaxInput,
   virtualReserves,
+  bandReserves,
 } from "../dist/clmath.js";
 
 test("getSqrtRatioAtTick matches TickMath reference values", () => {
@@ -150,4 +151,25 @@ test("output is monotone in input and fee reduces output", () => {
   const cheap = clSwapExactIn({ ...s, feePips: 100 }, true, 10n ** 18n).amountOut;
   const dear = clSwapExactIn({ ...s, feePips: 10000 }, true, 10n ** 18n).amountOut;
   assert.ok(cheap > dear);
+});
+
+test("bandReserves is bounded near-price depth, far below the full-curve virtual reserves", () => {
+  // The value-score must rank CL pools by real usable depth. virtualReserves describe the whole
+  // constant-product curve and overstate a concentrated pool by orders of magnitude; bandReserves
+  // is the real ±1% in-range depth, so a deep stablecoin pool no longer scores as tens of millions.
+  const s = pool(); // L = 1e22, price ~ 1
+  const v = virtualReserves(s);
+  const b = bandReserves(s); // default ~±1%
+  assert.ok(b.reserve0 > 0n && b.reserve1 > 0n, "a live pool has near-price depth on both sides");
+  assert.ok(b.reserve0 * 20n < v.reserve0, `band0 ${b.reserve0} should be << virtual0 ${v.reserve0}`);
+  assert.ok(b.reserve1 * 20n < v.reserve1, `band1 ${b.reserve1} should be << virtual1 ${v.reserve1}`);
+});
+
+test("bandReserves grows with the band width and zeroes out degenerate pools", () => {
+  const s = pool();
+  const narrow = bandReserves(s, 10);
+  const wide = bandReserves(s, 200);
+  assert.ok(wide.reserve0 > narrow.reserve0 && wide.reserve1 > narrow.reserve1, "a wider band captures more depth");
+  assert.deepEqual(bandReserves({ ...s, liquidity: 0n }), { reserve0: 0n, reserve1: 0n });
+  assert.deepEqual(bandReserves({ ...s, sqrtPriceX96: 0n }), { reserve0: 0n, reserve1: 0n });
 });

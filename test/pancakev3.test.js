@@ -2,7 +2,7 @@
  * PancakeSwap V3 as a quote-only CL venue (src/config.ts CL_DEXES, src/abi.ts topic, src/pools.ts decode):
  *  - its Swap event has a distinct topic (two extra protocol-fee fields) but the first five fields match
  *    Uniswap V3, so the applyLogs decode reads sqrtPriceX96 / liquidity / tick from the same positions;
- *  - it is configured with Pancake's own fee tiers (incl. 2500) and marked executable:false (quote-only).
+ *  - it is configured with Pancake's own fee tiers (incl. 2500) and marked executable:true (the RouteExecutor now has its callback).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,11 +13,11 @@ import { TOPIC_SWAP_PANCAKE_V3, TOPIC_SWAP_V3 } from "../dist/abi.js";
 const abi = AbiCoder.defaultAbiCoder();
 const pcs = () => CL_DEXES.find((d) => d.id === "pancakeswap-v3");
 
-test("PancakeSwap V3 is configured as a quote-only CL venue with Pancake's fee tiers", () => {
+test("PancakeSwap V3 is configured as an executable CL venue with Pancake's fee tiers", () => {
   const d = pcs();
   assert.ok(d, "pancakeswap-v3 is in CL_DEXES");
   assert.equal(d.kind, "pancakev3");
-  assert.equal(d.executable, false, "quote-only until the RouteExecutor is rebuilt");
+  assert.equal(d.executable, true, "executable now the RouteExecutor has the PancakeSwap V3 callback");
   assert.equal(d.factory.toLowerCase(), "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865");
   assert.equal(d.quoter.toLowerCase(), "0xb048bbc1ee6b733fffcfb9e9cef7375518e25997");
   // Pancake's 2500 tier is the one that differs from Uniswap's 3000.

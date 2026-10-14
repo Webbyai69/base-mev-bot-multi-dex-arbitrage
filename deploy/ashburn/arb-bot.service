@@ -1,0 +1,36 @@
+[Unit]
+Description=Base arb-bot (Ashburn)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/home/bot/base-arb-bot
+# Same command as run-24h.ps1 on the home PC. The bot reads .env from this directory itself, so there is
+# no EnvironmentFile= (systemd parses quotes differently and its values would win over the file's).
+# The 256 MB heap cap matches the PC; this box has room to raise it if the logs ever show heap pressure.
+ExecStart=/usr/bin/node --max-old-space-size=256 dist/main.js run
+Restart=always
+RestartSec=5
+# The bot handles SIGTERM: it finishes the block it's on and exits cleanly.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65535
+
+# Hardening (the bot only needs to write its own directory and reach the network outbound).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bot/base-arb-bot
+PrivateTmp=true
+
+# Paper mode needs no wallet key, so the unit loads none. For live with the encrypted keystore, add the
+# drop-in instead of editing this file: sudo systemctl edit arb-bot, then paste
+#   [Service]
+#   LoadCredentialEncrypted=keystore-pass:/etc/arb-bot/keystore-pass.cred
+#   Environment=KEYSTORE_PASSPHRASE_FILE=%d/keystore-pass
+# (LoadCredentialEncrypted= fails the start when the .cred file is missing, which is why it isn't here.)
+
+[Install]
+WantedBy=multi-user.target
