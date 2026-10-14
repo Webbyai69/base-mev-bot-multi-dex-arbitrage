@@ -9,8 +9,8 @@
  * re-reads full records by byte offset only for the page of rows a query
  * returns.
  *
- * New lines are picked up incrementally: on every store.onAppend for the file
- * and at the start of every query (so a dashboard-only process, where nothing
+ * New lines are picked up incrementally: on the tick after a store.onAppend for
+ * the file (coalesced, so the writer never waits) and at the start of every query (so a dashboard-only process, where nothing
  * appends in-process, still sees what the bot writes). A truncated or replaced
  * file triggers a rebuild.
  *
@@ -112,6 +112,7 @@ export class OpportunityIndex {
   private scannedTo = 0;
   private fileIdentity = "";
   private building = false;
+  private scheduled = false;
   private unsubscribe?: () => void;
   /** Resolves when the first full pass is done. */
   ready: Promise<void> = Promise.resolve();
@@ -127,8 +128,19 @@ export class OpportunityIndex {
   /** Stream the file once, then follow appends. Safe to call once; returns `ready`. */
   start(): Promise<void> {
     if (!this.unsubscribe) {
+      // Off the bot's hot path: appends are coalesced and indexed on the next tick
+      // (queries catch up synchronously anyway).
       this.unsubscribe = this.store.onAppend((name) => {
-        if (name === this.file) this.catchUp();
+        if (name !== this.file || this.scheduled) return;
+        this.scheduled = true;
+        setImmediate(() => {
+          this.scheduled = false;
+          try {
+            this.catchUp();
+          } catch {
+            /* never break the writer */
+          }
+        });
       });
     }
     this.ready = this.build();

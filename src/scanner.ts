@@ -17,7 +17,7 @@ import type { Chain, Call } from "./rpc.js";
 import type { GasQuote } from "./gas.js";
 import { weiToUsd } from "./gas.js";
 import { log } from "./log.js";
-import { SizeCurveRecorder, classicSizeCurve, sizeCurvesEnabled, type SizeCurve } from "./sizecurve.js"; // history:
+import { attachSizeCurve, sizeCurveMode, type SizeCurve, type SizeCurveMode } from "./sizecurve.js"; // history:
 import type { NearMissCollector } from "./nearmiss.js"; // history:
 
 const abi = AbiCoder.defaultAbiCoder();
@@ -146,9 +146,8 @@ export class Scanner {
 
   /** history: near-miss log (src/nearmiss.ts); set it to turn the log on (NEAR_MISSES=true). */
   nearMisses?: NearMissCollector;
-  /** history: attach sizeCurve to opportunities (SIZE_CURVES=false turns it off). */
-  sizeCurves = sizeCurvesEnabled();
-  private readonly curves = new SizeCurveRecorder(); // history:
+  /** history: attach sizeCurve to opportunities: "probe" (default), "optimizer", or false (SIZE_CURVES). */
+  sizeCurves: SizeCurveMode = sizeCurveMode();
 
   constructor(
     readonly chain: Chain,
@@ -182,9 +181,7 @@ export class Scanner {
     });
     const out: RouteQuote<Pool>[] = [];
     for (const c of cycles) {
-      if (this.sizeCurves) this.curves.begin(); // history:
-      const q = optimizeRoute(c, undefined, this.sizeCurves ? this.curves.sample : undefined); // history: onSample
-      if (q && this.sizeCurves) this.curves.keep(q); // history:
+      const q = optimizeRoute(c);
       if (q) out.push(q);
     }
     return out;
@@ -282,7 +279,6 @@ export class Scanner {
         hops: r.pools.length,
         stage: opts.stage ?? "block",
         ...(opts.msIntoBlock !== undefined ? { msIntoBlock: opts.msIntoBlock } : {}),
-        ...(this.sizeCurves ? optCurve(this.curves.curve(r, r.profit, profitUsd)) : {}), // history:
         route: {
           tokens: r.tokens,
           pools: r.pools.map((p) => p.address),
@@ -332,7 +328,6 @@ export class Scanner {
         hops: 2,
         stage: opts.stage ?? "block",
         ...(opts.msIntoBlock !== undefined ? { msIntoBlock: opts.msIntoBlock } : {}),
-        ...(this.sizeCurves ? optCurve(classicSizeCurve(buy, sell, q.tokenIn, q.tokenMid, q.amountIn, q.profit, profitUsd)) : {}), // history:
       });
     }
     opps.sort((a, b) => b.netUsd - a.netUsd);
@@ -368,6 +363,7 @@ export class Scanner {
       for (const p of ps) usedPools.add(p);
       return true;
     });
+    if (this.sizeCurves) for (const o of unique) attachSizeCurve(o, (a) => this.registry.pools.get(a), this.sizeCurves); // history: same reserves, before any await
     const tag = opts.blockTag ?? block;
     const classic = unique.filter((o) => !o.route);
     const multi = unique.filter((o) => o.route);
@@ -623,11 +619,6 @@ export class Scanner {
       o.simDetail = (e.message ?? "unknown revert").slice(0, 160);
     }
   }
-}
-
-/** history: spread-in helper so an absent curve adds no key. */
-function optCurve(c: SizeCurve | undefined): { sizeCurve?: SizeCurve } {
-  return c ? { sizeCurve: c } : {};
 }
 
 function quoterCall(pool: Pool, tokenIn: string, amountIn: bigint): Call {

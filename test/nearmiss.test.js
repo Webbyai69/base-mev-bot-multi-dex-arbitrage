@@ -179,3 +179,44 @@ test("classic curve peaks at the closed-form size", async () => {
   assert.ok(Math.abs(best[1] - 5) < 1e-6);
   assert.ok(curve[11][1] < curve[5][1], "2x the size earns less");
 });
+
+test("attachSizeCurve: probe for multi-hop and classic, optimizer mode, never throws", async () => {
+  const { attachSizeCurve, sizeCurveMode } = await import("../dist/sizecurve.js");
+  assert.equal(sizeCurveMode({}), "probe");
+  assert.equal(sizeCurveMode({ SIZE_CURVES: "true" }), "probe");
+  assert.equal(sizeCurveMode({ SIZE_CURVES: "optimizer" }), "optimizer");
+  assert.equal(sizeCurveMode({ SIZE_CURVES: "false" }), false);
+  const byAddr = new Map(tri.pools.map((p) => [p.address, p]));
+  const get = (a) => byAddr.get(a);
+  const q = optimizeRoute(tri);
+  const opp = () => ({ route: { pools: tri.pools.map((p) => p.address), tokens: tri.tokens }, buyPool: "0xab", sellPool: "0xca", tokenIn: A, tokenMid: B, amountIn: q.amounts[0], profit: q.profit, profitUsd: 7 });
+
+  const probe = opp();
+  attachSizeCurve(probe, get, "probe");
+  assert.equal(probe.sizeCurve.length, 12);
+  assert.equal(probe.sizeCurve[5][0], q.amounts[0].toString());
+  assert.ok(Math.abs(probe.sizeCurve[5][1] - 7) < 1e-6);
+  assert.ok(probe.sizeCurve.every(([, usd]) => usd <= 7 + 1e-9), "the chosen size is the peak");
+
+  const opt = opp();
+  attachSizeCurve(opt, get, "optimizer");
+  assert.ok(opt.sizeCurve.length >= 6 && opt.sizeCurve.length <= 12);
+  assert.ok(Math.abs(Math.max(...opt.sizeCurve.map(([, u]) => u)) - 7) < 1e-6);
+
+  const off = opp();
+  attachSizeCurve(off, get, false);
+  assert.equal(off.sizeCurve, undefined);
+  const missing = opp();
+  attachSizeCurve(missing, () => undefined, "probe");
+  assert.equal(missing.sizeCurve, undefined);
+  const broken = opp();
+  attachSizeCurve(broken, () => { throw new Error("boom"); }, "probe");
+  assert.equal(broken.sizeCurve, undefined);
+
+  const buy = v2("0x01", A, B, 1000n * E18, 2000n * E18);
+  const sell = v2("0x02", A, B, 1000n * E18, 2100n * E18);
+  const cq = quoteArb(buy, sell, A) ?? quoteArb(buy, sell, B);
+  const classic = { buyPool: "0x01", sellPool: "0x02", tokenIn: cq.tokenIn, tokenMid: cq.tokenMid, amountIn: cq.amountIn, profit: cq.profit, profitUsd: 3 };
+  attachSizeCurve(classic, (a) => (a === "0x01" ? buy : sell), "probe");
+  assert.equal(classic.sizeCurve.length, 12);
+});

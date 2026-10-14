@@ -1,34 +1,50 @@
 /**
  * Size curves: how profit changes with trade size for a recorded opportunity.
  *
- * Every opportunity the scanner records can carry `sizeCurve`, up to 12
- * `[amountIn, profitUsd]` points spread evenly over the sizes that were
- * looked at. A curve whose peak is not at the recorded `amountIn`, or that is
- * still rising at its right edge, points at a sizing bug (a wrong upper bound,
- * a CL range cap, a token-decimals mix-up).
+ * Every opportunity the scanner keeps can carry `sizeCurve`: up to 12
+ * `[amountIn, profitUsd]` points. A curve whose peak is not at the recorded
+ * `amountIn`, or that is still rising at its right edge, points at a sizing bug
+ * (a wrong upper bound, a CL range cap, a token-decimals mix-up). A curve that
+ * stops early means larger sizes were infeasible (CL tick range crossed).
  *
- *   - Multi-hop / CL routes: the points come from optimizeRoute itself (its
- *     onSample callback sees every feasible size it evaluated), so the curve
- *     shows what the optimiser actually saw.
- *   - Classic two-pool V2 routes are sized in closed form (quoteArb), so there
- *     is nothing to observe; we probe the same two pools at 1/6 .. 12/6 of the
- *     chosen size instead (12 exact evaluations, cheap).
+ * Two modes (SIZE_CURVES):
+ *   - "probe" (default, also "true"): exact profit at 1/6 .. 12/6 of the chosen
+ *     size along the same pools (12 evaluations, ~15-40 us per opportunity).
+ *     Same for classic two-pool and multi-hop routes.
+ *   - "optimizer": multi-hop routes are re-run through optimizeRoute with its
+ *     onSample callback and the curve is 12 points spread over every size the
+ *     optimiser evaluated (shows what the optimiser saw; ~0.3 ms+ per route).
+ *     Classic routes are sized in closed form (quoteArb), so they still probe.
+ *   - "false": off.
+ *
+ * Only opportunities that survive the scanner's filters get a curve, and it is
+ * computed before verification on the same reserve snapshot.
  *
  * profitUsd for each point is scaled from the opportunity's own profitUsd
  * (profit and USD value are proportional for one token at one price), so no
  * extra price lookups are needed.
  *
- * Pure maths, no ethers import. SIZE_CURVES=false turns it off.
+ * Pure maths, no ethers import.
  */
 import { poolAmountOut, type PoolLike } from "./math.js";
+import { evaluateRoute, optimizeRoute, type RoutePool } from "./routes.js";
 
 export type SizeCurve = Array<[amountIn: string, profitUsd: number]>;
 
 export const SIZE_CURVE_POINTS = 12;
 
+export type SizeCurveMode = "probe" | "optimizer" | false;
+
+/** SIZE_CURVES: "probe" (default; "true" too), "optimizer", or "false". */
+export function sizeCurveMode(env: Record<string, string | undefined> = process.env): SizeCurveMode {
+  const v = (env.SIZE_CURVES ?? "probe").toLowerCase();
+  if (v === "false" || v === "off" || v === "0") return false;
+  return v === "optimizer" ? "optimizer" : "probe";
+}
+
 /** On unless SIZE_CURVES=false. */
 export function sizeCurvesEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return (env.SIZE_CURVES ?? "true").toLowerCase() !== "false";
+  return sizeCurveMode(env) !== false;
 }
 
 /**
@@ -139,4 +155,60 @@ export function classicSizeCurve(buy: PoolLike, sell: PoolLike, tokenIn: string,
     samples.push([x, out - x]);
   }
   return toCurve(samples, profit, profitUsd);
+}
+
+/** Any route (classic or multi-hop): exact profit at 1/6 .. 12/6 of the chosen size; infeasible sizes are left out. */
+export function probeRouteCurve<P extends RoutePool>(pools: P[], tokens: string[], amountIn: bigint, profit: bigint, profitUsd: number): SizeCurve | undefined {
+  if (amountIn <= 0n) return undefined;
+  const samples: Array<[bigint, bigint]> = [];
+  for (let k = 1n; k <= BigInt(SIZE_CURVE_POINTS); k++) {
+    const x = (amountIn * k) / 6n;
+    if (x <= 0n) continue;
+    const q = evaluateRoute({ pools, tokens }, x);
+    if (q) samples.push([x, q.profit]);
+  }
+  return toCurve(samples, profit, profitUsd);
+}
+
+/** What attachSizeCurve needs from an Opportunity (src/scanner.ts). */
+export interface CurveTarget {
+  route?: { pools: string[]; tokens: string[] } | undefined;
+  buyPool: string;
+  sellPool: string;
+  tokenIn: string;
+  tokenMid: string;
+  amountIn: bigint;
+  profit: bigint;
+  profitUsd: number;
+  sizeCurve?: SizeCurve;
+}
+
+const recorder = new SizeCurveRecorder();
+
+/** Set o.sizeCurve from the pools' current state. Never throws (a curve is diagnostics only). */
+export function attachSizeCurve<P extends RoutePool>(o: CurveTarget, pool: (address: string) => P | undefined, mode: SizeCurveMode = "probe"): void {
+  if (!mode) return;
+  try {
+    let c: SizeCurve | undefined;
+    if (o.route) {
+      const pools = o.route.pools.map(pool);
+      if (pools.some((p) => !p)) return;
+      if (mode === "optimizer") {
+        recorder.begin();
+        const q = optimizeRoute({ pools: pools as P[], tokens: o.route.tokens }, undefined, recorder.sample);
+        if (q) {
+          recorder.keep(q);
+          c = recorder.curve(q, o.profit, o.profitUsd);
+        }
+      } else c = probeRouteCurve(pools as P[], o.route.tokens, o.amountIn, o.profit, o.profitUsd);
+    } else {
+      const buy = pool(o.buyPool);
+      const sell = pool(o.sellPool);
+      if (!buy || !sell) return;
+      c = classicSizeCurve(buy, sell, o.tokenIn, o.tokenMid, o.amountIn, o.profit, o.profitUsd);
+    }
+    if (c) o.sizeCurve = c;
+  } catch {
+    /* diagnostics only */
+  }
 }
