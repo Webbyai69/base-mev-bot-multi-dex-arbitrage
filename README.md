@@ -5,6 +5,11 @@ tells you the truth about what you would have made, plus an on-chain **MEV
 market feed** (the EigenPhi replacement): arbitrage/sandwich classifier,
 competitor leaderboard, most-arbed pairs and a daily HTML report.
 
+**New folder, new computer or a server?** [SETUP.md](SETUP.md) gets a fresh
+copy from GitHub running where the old one left off: same funded bot wallet,
+same executors, same learned memory (`setup.cmd` plus a carry-over that
+never prints your key).
+
 ```
    every block ──► refresh reserves of every watched pool (one Multicall)
               ──► closed-form optimal trade for every pair on 2+ DEXes
