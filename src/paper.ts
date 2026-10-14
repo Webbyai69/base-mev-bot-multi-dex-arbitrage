@@ -22,6 +22,7 @@ import type { DetectedMev } from "./classifier.js";
 import { Store, dayKey } from "./store.js";
 import { log } from "./log.js";
 import { formatUnits } from "./math.js";
+import { repriceSplit } from "./splitScan.js"; // split:
 
 export const OPPS_FILE = "opportunities.jsonl";
 
@@ -128,7 +129,7 @@ export class PaperEngine {
       const rec: OpportunityRecord = { ...o, kind: "opportunity", mode: "paper" };
       this.store.append(OPPS_FILE, rec);
       this.pending.set(o.id, { opp: o, checks: 0, profitAtN1Usd: null, profitAtN2Usd: null });
-      const via = o.route ? `via ${o.route.dexes.join(">")}` : `buy ${o.buyDex} sell ${o.sellDex}`;
+      const via = o.split ? `buy ${o.split.buys.map((l) => l.dex).join("+")} sell ${o.split.sells.map((l) => l.dex).join("+")}` /* split: */ : o.route ? `via ${o.route.dexes.join(">")}` : `buy ${o.buyDex} sell ${o.sellDex}`;
       log.info(
         `paper${o.stage === "flashblock" ? " [flashblock]" : ""}: ${o.pairSymbols} ${via} in=${formatUnits(o.amountIn, this.registry.token(o.tokenIn)?.decimals ?? 18, 5)} ${o.tokenInSymbol} ` +
           `profit=$${o.profitUsd.toFixed(3)} gas=$${o.gasUsd.toFixed(3)} net=$${o.netUsd.toFixed(3)} sim=${o.sim}`,
@@ -138,6 +139,11 @@ export class PaperEngine {
 
   /** Same route, same input size, current reserves. Null when no longer profitable. */
   private repriceUsd(o: Opportunity, ethUsd: number): number | null {
+    if (o.split) {
+      // split: same legs, same buy sizes, current reserves
+      const profit = repriceSplit(o, (a) => this.registry.pools.get(a));
+      return profit === null || profit <= 0n ? null : this.registry.usdValue(o.tokenIn, profit, ethUsd);
+    }
     if (o.route) {
       const pools = o.route.pools.map((a) => this.registry.pools.get(a));
       if (pools.some((x) => !x)) return null;
@@ -175,7 +181,8 @@ export class PaperEngine {
     this.store.append(OPPS_FILE, rec);
     this.pending.delete(id);
     try {
-      this.onOutcome?.(p.opp, status, p.takenBy);
+      // split: paper-only splits don't teach the learning engine (its stats drive live sends).
+      if (!p.opp.split) this.onOutcome?.(p.opp, status, p.takenBy);
     } catch (err) {
       log.warn("learning from an outcome failed:", (err as Error).message.slice(0, 120));
     }
@@ -222,7 +229,8 @@ export interface OutcomeStats {
   optimisticNetUsd: number;
 }
 
-export function strategyKind(o: Pick<Opportunity, "route" | "hops">): string {
+export function strategyKind(o: Pick<Opportunity, "route" | "hops" | "split">): string {
+  if (o.split) return "split (several buy/sell pools)"; // split:
   if (!o.route) return "classic V2 two-pool";
   return (o.hops ?? o.route.pools.length) >= 3 ? "triangular / multi-hop" : "concentrated-liquidity two-pool";
 }
@@ -300,8 +308,9 @@ export async function summarize(store: Store, days?: string[]): Promise<DaySumma
     pairAgg.set(day, pm);
     bump(getAgg(kindAgg, day), strategyKind(o), o, out, verified);
     bump(getAgg(stageAgg, day), o.stage ?? "block", o, out, verified);
-    if (verified) bump(getAgg(scoreAgg, day), `${o.pairSymbols} [${o.route ? o.route.dexes.join(">") : `${o.buyDex}>${o.sellDex}`}]`, o, out, verified);
-    const route = o.route ? o.route.dexes.join(" -> ") : `${o.buyDex} -> ${o.sellDex}`;
+    const splitDexes = o.split ? `${o.split.buys.map((l) => l.dex).join("+")} -> ${o.split.sells.map((l) => l.dex).join("+")}` : null; // split:
+    if (verified) bump(getAgg(scoreAgg, day), `${o.pairSymbols} [${splitDexes ?? (o.route ? o.route.dexes.join(">") : `${o.buyDex}>${o.sellDex}`)}]`, o, out, verified);
+    const route = splitDexes ?? (o.route ? o.route.dexes.join(" -> ") : `${o.buyDex} -> ${o.sellDex}`);
     const rm = routeAgg.get(day) ?? new Map();
     const re = rm.get(route) ?? { count: 0, netUsd: 0 };
     re.count++;

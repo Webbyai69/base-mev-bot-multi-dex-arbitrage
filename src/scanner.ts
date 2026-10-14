@@ -17,6 +17,8 @@ import type { Chain, Call } from "./rpc.js";
 import type { GasQuote } from "./gas.js";
 import { weiToUsd } from "./gas.js";
 import { log } from "./log.js";
+import { findSplitOpportunities, verifySplits, splitKey, splitPools, type SplitInfo, type SplitSettings } from "./splitScan.js"; // split:
+import { splitSettings } from "./config.js"; // split:
 
 const abi = AbiCoder.defaultAbiCoder();
 
@@ -51,6 +53,8 @@ export interface Opportunity {
   stage?: "block" | "flashblock";
   /** For flashblock finds: ms since the last confirmed block was seen. */
   msIntoBlock?: number;
+  /** split: split trade (several buy pools and/or sell pools, src/splitScan.ts). Paper only: never executor-ok. */
+  split?: SplitInfo;
 }
 
 export interface RouteInfo {
@@ -65,12 +69,14 @@ export interface RouteInfo {
 }
 
 /** Key identifying a route (same pools, same direction, same start token). */
-export function routeKey(o: { route?: RouteInfo; buyPool: string; sellPool: string; tokenIn: string }): string {
+export function routeKey(o: { route?: RouteInfo; split?: SplitInfo; buyPool: string; sellPool: string; tokenIn: string }): string {
+  if (o.split) return splitKey({ tokenIn: o.tokenIn, split: o.split }); // split:
   return o.route ? `${o.route.pools.join(">")}-${o.tokenIn}` : `${o.buyPool}-${o.sellPool}-${o.tokenIn}`;
 }
 
 /** Every pool an opportunity touches. */
-export function poolsOf(o: { route?: RouteInfo; buyPool: string; sellPool: string }): string[] {
+export function poolsOf(o: { route?: RouteInfo; split?: SplitInfo; buyPool: string; sellPool: string }): string[] {
+  if (o.split) return splitPools(o.split); // split:
   return o.route ? o.route.pools : [o.buyPool, o.sellPool];
 }
 
@@ -139,6 +145,8 @@ export class Scanner {
 
   /** Routes found in the last scan before the profit floor (used to pick "hot" pools for Flashblocks). */
   lastCandidatePools = new Set<string>();
+  /** split: SPLIT_* settings, read on first scan (after .env is loaded). */
+  splitCfg?: SplitSettings;
 
   constructor(
     readonly chain: Chain,
@@ -353,7 +361,13 @@ export class Scanner {
     const tag = opts.blockTag ?? block;
     const classic = unique.filter((o) => !o.route);
     const multi = unique.filter((o) => o.route);
-    await Promise.all([classic.length ? this.verify(classic, tag) : undefined, multi.length ? this.verifyRoutes(multi, tag) : undefined]);
+    // split: split trades (paper only), found after the dedupe above so they never displace an executable route.
+    const splits = findSplitOpportunities(this, (this.splitCfg ??= splitSettings()), { block, gasPriceWei: gasPrice, l1FeeWei: gas.l1FeeWei, ethUsd, minNetUsd, startTokens: [WETH, USDC], ...opts });
+    await Promise.all([
+      classic.length ? this.verify(classic, tag) : undefined,
+      multi.length ? this.verifyRoutes(multi, tag) : undefined,
+      splits.length ? verifySplits(splits, tag, { pool: (a) => this.registry.pools.get(a), quoteCall: hopQuoteCall, decode: decodeHopQuote, multicall: (c, t) => this.chain.multicall(c, t), warn: (m) => log.warn(m) }) : undefined, // split:
+    ]);
     for (const o of unique) {
       if (this.learner) {
         this.learner.onFound(o, now);
@@ -365,7 +379,7 @@ export class Scanner {
       else if (o.sim === "quoter-mismatch") F.quoteMismatch++;
       else F.unverified++;
     }
-    return unique;
+    return splits.length ? [...unique, ...splits] : unique; // split: splits skip the learner and the funnel
   }
 
   /**
