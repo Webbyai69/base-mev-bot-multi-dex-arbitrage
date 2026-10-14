@@ -1,0 +1,4 @@
+,index,timestamp,coin,pnl,fee_paid,usd_total_balance,btc_cash_wallet,usd_cash_wallet,btc_price,qty,price,psize,pprice,type,liquidity,wallet_exposure,twe_long,twe_short,twe_net
+0,10,2026-04-01 00:10:00,BTC,0.0,-0.012,999.988,0,999.988,65000,0.0012,65000,0.0012,65000,entry_initial_normal_long,maker,0.08,0.08,0,0.08
+1,500,2026-04-01 08:20:00,BTC,1.10,-0.012,1001.07,0,1001.07,65900,-0.0012,65900,0,0,close_grid_long,maker,0,0,0,0
+2,900,2026-04-01 15:00:00,ETH,-0.40,-0.010,1000.66,0,1000.66,3100,-0.05,3100,0,0,close_unstuck_long,taker,0,0,0,0

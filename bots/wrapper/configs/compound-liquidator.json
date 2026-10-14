@@ -1,0 +1,24 @@
+{
+  "id": "compound-liquidator",
+  "upstream": "compound-finance/comet@f766f51 (interface only; our own clean-room monitor)",
+  "cwd": ".",
+  "commands": {
+    "detect": ["node", "bots/compound-liquidator/monitor/monitor.ts", "--mode", "detect"],
+    "paper": [],
+    "live": []
+  },
+  "env": {
+    "detect": { "COMPOUND_CHAINS": "base" },
+    "paper": {},
+    "live": {}
+  },
+  "metricsFile": "data/fleet/compound-liquidator.fleet-metrics.json",
+  "logFile": "data/fleet/compound-liquidator.log",
+  "_notes": [
+    "detect: our own monitor (bots/compound-liquidator/monitor). It reads Comet over JSON-RPC, never holds a key and refuses every non-read RPC method. Needs Node >= 22.18 (runs .ts directly).",
+    "To add Ethereum and Arbitrum: set COMPOUND_CHAINS=base,ethereum,arbitrum here and ETHEREUM_RPC_URL / ARBITRUM_RPC_URL in bots/wrapper/.env.",
+    "paper: empty on purpose. Paper fills need the CompoundLiquidator contract's simulate() via eth_call with a state override; that is a later PR after the forge fork tests pass.",
+    "live: empty. Going live is Joshua's decision and a separate PR (contract review, deploy from his own wallet, FLEET_LIVE_COMPOUND_LIQUIDATOR=1).",
+    "Needs in bots/wrapper/.env (names only): BASE_RPC_URL. Optional: ETHEREUM_RPC_URL, ARBITRUM_RPC_URL, ETH_USD (fallback price), COMPOUND_SWAP_COST_BPS (default 30)."
+  ]
+}

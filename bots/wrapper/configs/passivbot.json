@@ -1,0 +1,23 @@
+{
+  "id": "passivbot",
+  "upstream": "enarjord/passivbot@b9d6692 (Unlicense)",
+  "cwd": ".",
+  "commands": {
+    "detect": ["python", "bots/passivbot/run_backtest.py", "--report"],
+    "paper": [],
+    "live": []
+  },
+  "env": {
+    "detect": {},
+    "paper": {},
+    "live": {}
+  },
+  "metricsFile": "data/fleet/passivbot.fleet-metrics.json",
+  "logFile": "data/fleet/passivbot.log",
+  "_notes": [
+    "detect: does not trade and does not touch an exchange. It republishes the last backtest summary (bots/passivbot/out/summary.json) to the fleet card every 20 s. The backtest itself is run by hand or by the Thursday local task: see docs/fleet/passivbot.md.",
+    "paper: empty. Passivbot has no paper mode against a live exchange; its fake_live mode is a later PR.",
+    "live: empty. Going live needs a Hyperliquid account and API wallet, Joshua's decision and a separate PR.",
+    "Needs nothing in bots/wrapper/.env."
+  ]
+}
