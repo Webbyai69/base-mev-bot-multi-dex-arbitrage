@@ -478,3 +478,23 @@ export function loadSettings(): Settings {
   }
   return settings;
 }
+
+// ---------------------------------------------------------------------------
+// split: split trades (src/split.ts, src/splitScan.ts). Paper only.
+// ---------------------------------------------------------------------------
+
+/**
+ * SPLIT_TRADES=true finds trades that buy from several cheap pools and sell
+ * into one or more dear pools of the same pair, and records them in paper
+ * mode next to the normal routes (label e.g. "WETH/AERO split 2>1"). They are
+ * verified against each DEX's quoter but never executed (no contract yet).
+ * Off by default. Read lazily (after loadSettings() has loaded .env).
+ */
+export function splitSettings(): import("./splitScan.js").SplitSettings {
+  return {
+    enabled: bool("SPLIT_TRADES", false),
+    onFlashblocks: bool("SPLIT_ON_FLASHBLOCKS", false),
+    maxPoolsPerPair: Math.max(3, Math.min(16, num("SPLIT_MAX_POOLS_PER_PAIR", 8))),
+    maxMs: Math.max(1, Math.min(200, num("SPLIT_MAX_MS", 15))),
+  };
+}

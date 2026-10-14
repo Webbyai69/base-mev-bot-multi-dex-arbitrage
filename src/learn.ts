@@ -893,6 +893,7 @@ function round<T extends number | null>(x: T, dp: number): T {
 /** An opportunity record from opportunities.jsonl back into the shape the learner reads. */
 function reviveOpp(r: Record<string, unknown>): (Opportunity & { foundAt: string }) | null {
   if (typeof r.id !== "string" || typeof r.buyPool !== "string" || typeof r.sellPool !== "string" || typeof r.tokenIn !== "string") return null;
+  if (r.split) return null; // split: paper-only split trades are not learned from (they'd be misread as classic routes)
   const big = (x: unknown) => {
     try {
       return BigInt(String(x ?? 0));
