@@ -28,7 +28,15 @@ branch; you review and merge on GitHub.
    cd ..\..
    ```
 
-## Run a job
+## Run all three promo-credit jobs at once
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\agent-sdk\run-all.ps1
+```
+
+That starts task 8 ($45 cap), task 6 ($35) and task 2 ($15) in three windows.
+
+## Run a single job
 
 ```powershell
 node tools\agent-sdk\run.mjs --task 6 --budget 40
