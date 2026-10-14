@@ -1,0 +1,5 @@
+{
+  "replaceRegex": [["(^|[.!?]\\s+)Alice\\b", "gm", "$1The owner"]],
+  "replace": [["Alice", "the owner"], ["C:\\Users\\alice\\source", "C:\\path\\to"], ["0xYOUR_WALLET_ADDRESS", "0x…"]],
+  "mustNotContain": ["alice", "0xyour_wallet_address"]
+}

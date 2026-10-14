@@ -21,7 +21,12 @@
     "new-wallet": "node dist/main.js new-wallet",
     "carry-over": "node scripts/carry-over.mjs",
     "ui": "node dist/main.js ui",
-    "telegram": "node dist/main.js telegram"
+    "telegram": "node dist/main.js telegram",
+    "qortal:nodes": "node qortal/nodes/nodes.mjs",
+    "qortal:bridge": "node qortal/bridge/bridge.mjs",
+    "qortal:qapp": "node qortal/qapp/build-qapp.mjs",
+    "release:qortal": "node scripts/release-qortal.mjs",
+    "upstreams": "node scripts/fetch-upstreams.mjs"
   },
   "dependencies": {
     "ethers": "^6.11.1",
