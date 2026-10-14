@@ -3,7 +3,8 @@
  * events (low-RPC mode):
  *
  *   the MEV classifier       Swap logs of every DEX on Base
- *   the pool registry        Sync (V2/Aerodrome), Swap/Mint/Burn (V3/Slipstream) of watched pools
+ *   the pool registry        Sync (V2/Aerodrome), Swap/Mint/Burn (V3/Slipstream), and the V4
+ *                            PoolManager's Swap/ModifyLiquidity of watched pools
  *   the liquidation monitor  Aave V3 Borrow and LiquidationCall
  *
  * Filtering is by topic only (no address list), so the request stays the
@@ -21,10 +22,12 @@ import {
   TOPIC_AAVE_LIQUIDATION,
   TOPIC_BURN_V3,
   TOPIC_MINT_V3,
+  TOPIC_MODIFY_LIQUIDITY_V4,
   TOPIC_SWAP_AERO,
   TOPIC_SWAP_PANCAKE_V3,
   TOPIC_SWAP_V2,
   TOPIC_SWAP_V3,
+  TOPIC_SWAP_V4,
   TOPIC_SYNC,
   TOPIC_SYNC_AERO,
 } from "./abi.js";
@@ -36,7 +39,7 @@ export class BlockLogFetcher {
   readonly topics: string[];
 
   constructor(readonly chain: Chain, opts: { liquidations: boolean }) {
-    this.topics = [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3, TOPIC_SWAP_PANCAKE_V3, TOPIC_SYNC, TOPIC_SYNC_AERO, TOPIC_MINT_V3, TOPIC_BURN_V3];
+    this.topics = [TOPIC_SWAP_V2, TOPIC_SWAP_AERO, TOPIC_SWAP_V3, TOPIC_SWAP_PANCAKE_V3, TOPIC_SYNC, TOPIC_SYNC_AERO, TOPIC_MINT_V3, TOPIC_BURN_V3, TOPIC_SWAP_V4, TOPIC_MODIFY_LIQUIDITY_V4];
     if (opts.liquidations) this.topics.push(TOPIC_AAVE_BORROW, TOPIC_AAVE_LIQUIDATION);
   }
 

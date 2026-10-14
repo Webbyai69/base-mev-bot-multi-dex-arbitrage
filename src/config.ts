@@ -234,6 +234,8 @@ export interface Settings {
   rpcConcurrency: number | undefined;
   rpcMinIntervalMs: number | undefined;
   rpcBatchMaxCount: number | undefined;
+  /** Sub-calls per Multicall3 aggregate3 (RPC_CHUNK_SIZE); unset = the endpoint's default. */
+  rpcChunkSize: number | undefined;
   /** Verify opportunities with the executor bytecode injected via eth_call state override (no deployment). */
   simOverride: boolean;
 
@@ -378,6 +380,7 @@ export function loadSettings(): Settings {
     rpcConcurrency: process.env.RPC_CONCURRENCY ? num("RPC_CONCURRENCY", 6) : undefined,
     rpcMinIntervalMs: process.env.RPC_MIN_INTERVAL_MS ? num("RPC_MIN_INTERVAL_MS", 0) : undefined,
     rpcBatchMaxCount: process.env.RPC_BATCH_MAX_COUNT ? num("RPC_BATCH_MAX_COUNT", 20) : undefined,
+    rpcChunkSize: process.env.RPC_CHUNK_SIZE ? num("RPC_CHUNK_SIZE", 600) : undefined,
     simOverride: (str("SIM_OVERRIDE", "true") ?? "true").toLowerCase() !== "false",
     clPools: bool("CL_POOLS", true),
     multiHop: bool("MULTI_HOP", true),

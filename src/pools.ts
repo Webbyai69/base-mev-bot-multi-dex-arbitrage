@@ -18,10 +18,12 @@ import { CL_DEXES, DEXES, TOKENS, WETH, USDC, V4, NATIVE, type ClDexInfo, type D
 import {
   TOPIC_BURN_V3,
   TOPIC_MINT_V3,
+  TOPIC_MODIFY_LIQUIDITY_V4,
   TOPIC_SWAP_AERO,
   TOPIC_SWAP_PANCAKE_V3,
   TOPIC_SWAP_V2,
   TOPIC_SWAP_V3,
+  TOPIC_SWAP_V4,
   TOPIC_SYNC,
   TOPIC_SYNC_AERO,
   aeroFactoryIface,
@@ -103,6 +105,15 @@ export interface PoolSnapshot {
 
 const abi = AbiCoder.defaultAbiCoder();
 const BASE_TOKEN_SET = new Set(Object.values(TOKENS).map((t) => t.address.toLowerCase()));
+const V4_POOL_MANAGER = V4.poolManager.toLowerCase();
+
+/** A pool's confirmed state, saved before the Flashblocks loop overwrites it with a pending read. */
+interface SavedState {
+  reserve0: bigint;
+  reserve1: bigint;
+  feePpm: number;
+  cl?: { sqrtPriceX96: bigint; tick: number; liquidity: bigint; feePips: number; words: Map<number, bigint> };
+}
 
 export function pairKey(a: string, b: string): string {
   const [x, y] = [a.toLowerCase(), b.toLowerCase()].sort();
@@ -120,8 +131,13 @@ export class PoolRegistry {
   blacklist = new Set<string>();
   /** Last block whose state every watched pool reflects (0 = never fully read). */
   syncedBlock = 0;
-  /** Pools last read at the pre-confirmed ("pending") state by the Flashblocks loop; re-read at the next block. */
-  private pendingDirty = new Set<string>();
+  /**
+   * Confirmed state of the pools the Flashblocks loop has since read at the pre-confirmed ("pending")
+   * state, saved before the first such read. The next applyLogs / refreshAll puts it back before
+   * applying the confirmed block, so a pending read costs no re-read at the confirmed block (that
+   * re-read was most of the bot's eth_calls). The periodic full re-read's drift check covers it.
+   */
+  private pendingSaved = new Map<string, SavedState>();
 
   constructor(readonly chain: Chain) {}
 
@@ -551,7 +567,7 @@ export class PoolRegistry {
   /** `via` lets the Flashblocks loop read pre-confirmed state through its own RPC endpoint. */
   async refreshReserves(pools: Pool[], block: number | "pending", via?: Chain): Promise<void> {
     if (pools.length === 0) return;
-    if (block === "pending") for (const p of pools) this.pendingDirty.add(p.address);
+    if (block === "pending") for (const p of pools) this.savePending(p);
     const v2 = pools.filter((p) => !p.cl);
     // V4 pools have no pool contract to call — they're refreshed separately via StateView (refreshV4).
     const cl = pools.filter((p) => p.cl && !p.v4);
@@ -763,9 +779,44 @@ export class PoolRegistry {
     });
   }
 
+  /** Keep a pool's confirmed state before its first pending read since the last sync. */
+  private savePending(p: Pool): void {
+    if (this.pendingSaved.has(p.address)) return; // already holding the confirmed state; this one is pending
+    const c = p.cl;
+    this.pendingSaved.set(p.address, {
+      reserve0: p.reserve0,
+      reserve1: p.reserve1,
+      feePpm: p.feePpm,
+      // readCl replaces `words` with a new Map rather than mutating it, so keeping the reference is enough.
+      ...(c ? { cl: { sqrtPriceX96: c.sqrtPriceX96, tick: c.tick, liquidity: c.liquidity, feePips: c.feePips, words: c.words } } : {}),
+    });
+  }
+
+  /** Undo every pending read: pools go back to the state of `syncedBlock`, ready for that block's successors. */
+  private restorePending(): void {
+    for (const [a, s] of this.pendingSaved) {
+      const p = this.pools.get(a);
+      if (!p) continue;
+      p.reserve0 = s.reserve0;
+      p.reserve1 = s.reserve1;
+      p.feePpm = s.feePpm;
+      if (p.cl && s.cl) {
+        p.cl.sqrtPriceX96 = s.cl.sqrtPriceX96;
+        p.cl.tick = s.cl.tick;
+        p.cl.liquidity = s.cl.liquidity;
+        p.cl.feePips = s.cl.feePips;
+        p.cl.words = s.cl.words;
+      }
+    }
+    this.pendingSaved.clear();
+  }
+
   async refreshAll(block: number): Promise<void> {
+    this.restorePending();
     await this.refreshReserves([...this.pools.values()], block);
-    this.pendingDirty.clear();
+    // V4 pools too, so the periodic drift check covers their event-driven state. Wrapped so a V4 error
+    // can never break the block loop (V4 has no pool contract; it's read from StateView).
+    await this.refreshV4(block).catch((e: Error) => log.warn("V4 refresh:", e.message.slice(0, 120)));
     this.syncedBlock = block;
   }
 
@@ -781,23 +832,48 @@ export class PoolRegistry {
    *                   dynamic, so a swapped Slipstream pool re-reads fee(). A
    *                   tick that moved into a bitmap word we have not read
    *                   fetches just that word.
+   *   Uniswap V4      the PoolManager's Swap (topics[1] = poolId) carries the
+   *                   same post-swap state as V3's; ModifyLiquidity re-reads the
+   *                   pool from StateView, as does a tick that moved into a
+   *                   bitmap word we have not read.
    *   Pending reads   pools the Flashblocks loop read at the pre-confirmed
-   *                   state are re-read at the confirmed block.
+   *                   state get their saved confirmed state back first, then
+   *                   this block's logs apply on top. No re-read.
    *
    * `logs` must cover (syncedBlock, block] and be in chain order (the order
    * eth_getLogs returns them in). A periodic full refresh (FULL_REFRESH_BLOCKS)
    * corrects anything this misses.
    */
   async applyLogs(logs: Log[], block: number): Promise<{ fromLogs: number; reread: number }> {
+    this.restorePending();
     const fullRead = new Set<Pool>();
     const v2Read = new Set<Pool>();
     const feeRead = new Set<Pool>();
+    const v4Read = new Set<Pool>();
     const touched = new Set<Pool>();
     let fromLogs = 0;
     for (const l of logs) {
+      const t0 = l.topics[0];
+      if (l.address.toLowerCase() === V4_POOL_MANAGER) {
+        const p = l.topics[1] ? this.pools.get(l.topics[1].toLowerCase()) : undefined;
+        if (!p?.v4 || !p.cl) continue;
+        if (t0 === TOPIC_SWAP_V4) {
+          // (amount0, amount1, sqrtPriceX96, liquidity, tick, fee). The fee is left alone: the watched V4
+          // pools are hookless with a static fee, which readV4 takes from getSlot0.
+          const d = abi.decode(["int128", "int128", "uint160", "uint128", "int24", "uint24"], l.data);
+          p.cl.sqrtPriceX96 = d[2] as bigint;
+          p.cl.liquidity = d[3] as bigint;
+          p.cl.tick = Number(d[4]);
+          p.updatedBlock = l.blockNumber;
+          touched.add(p);
+          fromLogs++;
+        } else if (t0 === TOPIC_MODIFY_LIQUIDITY_V4) {
+          v4Read.add(p);
+        }
+        continue;
+      }
       const p = this.pools.get(l.address.toLowerCase());
       if (!p) continue;
-      const t0 = l.topics[0];
       if (!p.cl) {
         if (t0 === TOPIC_SYNC || t0 === TOPIC_SYNC_AERO) {
           const [r0, r1] = abi.decode(["uint256", "uint256"], l.data) as unknown as [bigint, bigint];
@@ -827,24 +903,21 @@ export class PoolRegistry {
         fullRead.add(p);
       }
     }
-    for (const a of this.pendingDirty) {
-      const p = this.pools.get(a);
-      if (p) (p.cl ? fullRead : v2Read).add(p);
-    }
-    this.pendingDirty.clear();
     // CL pools never read, or whose tick moved into bitmap words we don't have.
     const wordRead = new Map<Pool, number[]>();
     for (const p of this.pools.values()) {
-      if (!p.cl || p.v4 || fullRead.has(p)) continue; // V4 bitmap words come from StateView (refreshV4), not the pool
-      if (p.cl.sqrtPriceX96 === 0n) {
-        fullRead.add(p);
+      if (!p.cl || fullRead.has(p) || v4Read.has(p)) continue;
+      const need = p.cl.sqrtPriceX96 === 0n ? null : wordsNeeded(p.cl.tick, p.cl.tickSpacing).filter((w) => !p.cl!.words.has(w));
+      // V4 has no pool contract to ask for bitmap words: re-read it whole from StateView (a few sub-calls).
+      if (p.v4) {
+        if (!need || need.length) v4Read.add(p);
         continue;
       }
-      const need = wordsNeeded(p.cl.tick, p.cl.tickSpacing).filter((w) => !p.cl!.words.has(w));
-      if (need.length) wordRead.set(p, need);
+      if (!need) fullRead.add(p);
+      else if (need.length) wordRead.set(p, need);
     }
     for (const p of touched) {
-      if (!fullRead.has(p)) {
+      if (!fullRead.has(p) && !v4Read.has(p)) {
         const v = virtualReserves(p.cl!);
         p.reserve0 = v.reserve0;
         p.reserve1 = v.reserve1;
@@ -887,10 +960,12 @@ export class PoolRegistry {
         });
       });
     }
-    const reread = v2Read.size + feeRead.size + wordRead.size + fullRead.size;
+    const reread = v2Read.size + feeRead.size + wordRead.size + fullRead.size + v4Read.size;
     await Promise.all([
       calls.length ? this.chain.multicall(calls, block).then((res) => apply.forEach((f) => f(res))) : undefined,
       fullRead.size ? this.refreshCl([...fullRead], block, this.chain) : undefined,
+      // A V4 read failing must not fail the block (the old per-block refreshV4 was isolated the same way).
+      v4Read.size ? this.refreshV4Set([...v4Read], block).catch((e: Error) => log.warn("V4 refresh:", e.message.slice(0, 120))) : undefined,
     ]);
     this.syncedBlock = block;
     return { fromLogs, reread };
@@ -917,6 +992,20 @@ export class PoolRegistry {
     for (const [a, v] of snapshot) {
       const w = now.get(a);
       if (w !== undefined && w !== v) out.push(a);
+    }
+    return out;
+  }
+
+  /**
+   * Watched pools a block's logs touched. A V4 pool's events come from the PoolManager with the poolId
+   * (the pool's key here) in topics[1], so V4 pools are only included when their own Swap or
+   * ModifyLiquidity is in the block, like every other pool.
+   */
+  touchedBy(logs: Log[]): Set<string> {
+    const out = new Set<string>();
+    for (const l of logs) {
+      const key = l.address.toLowerCase() === V4_POOL_MANAGER ? l.topics[1]?.toLowerCase() : l.address.toLowerCase();
+      if (key && this.pools.has(key)) out.add(key);
     }
     return out;
   }
