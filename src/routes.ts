@@ -51,6 +51,16 @@ export function hopOut(pool: RoutePool, tokenIn: string, amountIn: bigint): bigi
   return out > 0n ? out : null;
 }
 
+// history: optimizeRoute shadows evaluateRoute with a sampling wrapper when it is given onSample.
+const evaluateRouteExact: typeof evaluateRoute = evaluateRoute;
+function sampled(onSample: (amountIn: bigint, profit: bigint) => void) {
+  return <P extends RoutePool>(route: Route<P>, amountIn: bigint): RouteQuote<P> | null => {
+    const q = evaluateRouteExact(route, amountIn);
+    if (q) onSample(amountIn, q.profit);
+    return q;
+  };
+}
+
 /** Run the route at a given input; null if any hop is infeasible. */
 export function evaluateRoute<P extends RoutePool>(route: Route<P>, amountIn: bigint): RouteQuote<P> | null {
   const amounts: bigint[] = [amountIn];
@@ -98,7 +108,12 @@ function initialUpperBound(route: Route): bigint {
  * is concave in the input for a chain of constant-product/in-range CL hops.
  * Returns null when no positive-profit size exists.
  */
-export function optimizeRoute<P extends RoutePool>(route: Route<P>, maxAmountIn?: bigint): RouteQuote<P> | null {
+export function optimizeRoute<P extends RoutePool>(
+  route: Route<P>,
+  maxAmountIn?: bigint,
+  onSample?: (amountIn: bigint, profit: bigint) => void, // history: sees every feasible (size, profit) evaluated (src/sizecurve.ts)
+): RouteQuote<P> | null {
+  const evaluateRoute = onSample ? sampled(onSample) : evaluateRouteExact; // history:
   let hi = initialUpperBound(route);
   if (maxAmountIn !== undefined && maxAmountIn < hi) hi = maxAmountIn;
   if (hi <= 1n) return null;
