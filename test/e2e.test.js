@@ -312,6 +312,38 @@ test("discovery adapts to a provider's eth_getLogs range cap (Alchemy free tier:
   assert.ok(det[0].costUsd > 0, "gas cost attached from the receipt");
 });
 
+test("incremental scan: a touched pool's siblings find the same arb as a full scan", async () => {
+  const scanner = new Scanner(chain, registry);
+  const gasEst = new GasEstimator(chain, 260_000, 0.005);
+  // Open a fresh WETH/USDC spread by moving Aerodrome's price.
+  scenario.aeroWethUsdc.reserve0 = 50n * E18;
+  scenario.aeroWethUsdc.reserve1 = 106_000n * E6;
+  const n = scenario.c.nextBlock();
+  await registry.refreshAll(n);
+  const ethUsd = registry.ethPrice();
+  const gas = await gasEst.quote(n, null);
+
+  const full = await scanner.scan(n, gas, ethUsd, 0.01);
+  assert.ok(full.length >= 1, "a full scan finds the arb");
+  const arb = full[0];
+
+  // The per-block loop now scans only the pools a block touched plus their siblings (same token pair).
+  // siblings([buyPool]) includes the sell pool, so the incremental scan finds the identical route...
+  const only = registry.siblings(new Set([arb.buyPool]));
+  const inc = await scanner.scan(n, gas, ethUsd, 0.01, { only });
+  assert.ok(
+    inc.some((o) => o.buyPool === arb.buyPool && o.sellPool === arb.sellPool),
+    "scanning the touched pool's siblings finds the same arb",
+  );
+
+  // ...while scanning an unrelated pool set does not surface it, so the optimisation really scopes the work.
+  const unrelated = await scanner.scan(n, gas, ethUsd, 0.01, { only: new Set(["0x" + "99".repeat(20)]) });
+  assert.ok(
+    !unrelated.some((o) => o.buyPool === arb.buyPool && o.sellPool === arb.sellPool),
+    "an unrelated-only scan does not find the arb",
+  );
+});
+
 test("event-driven refresh (low-RPC mode) matches a full re-read exactly", async (t) => {
   const sc = baseScenario();
   await sc.c.listen();

@@ -1,0 +1,30 @@
+[Unit]
+Description=Base arb-bot send-path (Ashburn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/home/bot/base-arb-bot
+EnvironmentFile=/home/bot/base-arb-bot/.env
+ExecStart=/usr/bin/node dist/main.js run
+Restart=always
+RestartSec=5
+
+# Keystore passphrase as an ENCRYPTED systemd credential — decrypted only for this process at start,
+# never in clear on disk. Create it once with:
+#   printf '%s' 'YOUR-PASSPHRASE' | sudo systemd-creds encrypt --name=keystore-pass - /etc/arb-bot/keystore-pass.cred
+# The bot reads KEYSTORE_PASSPHRASE_FILE at boot (see src/keystore.ts). %d = the credentials directory.
+LoadCredentialEncrypted=keystore-pass:/etc/arb-bot/keystore-pass.cred
+Environment=KEYSTORE_PASSPHRASE_FILE=%d/keystore-pass
+
+# Hardening (the bot only needs to write its own data/ dir and reach the network outbound).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bot/base-arb-bot
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

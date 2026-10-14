@@ -1,0 +1,45 @@
+[submodule "bots/upstream/morpho-bots"]
+	path = bots/upstream/morpho-bots
+	url = https://github.com/morpho-org/morpho-bots.git
+	branch = main
+	shallow = true
+[submodule "bots/upstream/comet"]
+	path = bots/upstream/comet
+	url = https://github.com/compound-finance/comet.git
+	branch = main
+	shallow = true
+[submodule "bots/upstream/simple-blind-arbitrage"]
+	path = bots/upstream/simple-blind-arbitrage
+	url = https://github.com/flashbots/simple-blind-arbitrage.git
+	branch = main
+	shallow = true
+[submodule "bots/upstream/artemis"]
+	path = bots/upstream/artemis
+	url = https://github.com/paradigmxyz/artemis.git
+	branch = main
+	shallow = true
+[submodule "bots/upstream/uniswapx-artemis"]
+	path = bots/upstream/uniswapx-artemis
+	url = https://github.com/marktoda/uniswapx-artemis.git
+	branch = main
+	shallow = true
+[submodule "bots/upstream/hummingbot"]
+	path = bots/upstream/hummingbot
+	url = https://github.com/hummingbot/hummingbot.git
+	branch = master
+	shallow = true
+[submodule "bots/upstream/freqtrade"]
+	path = bots/upstream/freqtrade
+	url = https://github.com/freqtrade/freqtrade.git
+	branch = stable
+	shallow = true
+[submodule "bots/upstream/passivbot"]
+	path = bots/upstream/passivbot
+	url = https://github.com/enarjord/passivbot.git
+	branch = master
+	shallow = true
+[submodule "bots/upstream/searcher-examples"]
+	path = bots/upstream/searcher-examples
+	url = https://github.com/jito-labs/searcher-examples.git
+	branch = master
+	shallow = true

@@ -104,13 +104,21 @@ export const SIM_OVERRIDE_ADDRESS = "0x00000000000000000000000000000000a4b17e51"
 export const SIM_ROUTE_OVERRIDE_ADDRESS = "0x00000000000000000000000000000000a4b17e52";
 
 /**
- * Pool kinds the deployed RouteExecutor cannot trade yet (no swap callback for them). Their pools are
- * still watched, priced and scanned — so cross-venue spreads surface in paper, on the dashboard and in
- * the value-score — but any route through them is verified by the DEX's own quoter rather than the
- * executor simulation, so it is a real paper find (quoter-ok) and never reaches a live send (which
- * requires executor-ok). Remove a kind here once the RouteExecutor is rebuilt with its callback.
+ * Pool kinds whose routes the deployed RouteExecutor cannot verify by executor simulation yet, so they are
+ * verified by the DEX's own quoter instead (quoter-ok, a real paper find) and never reach a live send
+ * (which requires executor-ok). The new RouteExecutor (0xb6be…) added the PancakeSwap V3 and Uniswap V4
+ * callbacks, so both now go through the executor sim and this set is empty.
  */
-const QUOTE_ONLY_KINDS = new Set<string>(["pancakev3", "univ4"]);
+const QUOTE_ONLY_KINDS = new Set<string>([]);
+
+/**
+ * Kinds that ARE executor-simmed but whose on-chain execution path is still being validated against the
+ * live contracts (Uniswap V4's unlock/settle/take has never run against the real PoolManager). A route
+ * through one of these still only live-sends on an executor-ok sim, but an executor-REVERT is NOT recorded
+ * as a failure: a systematic sim-revert from an unproven encoding must not mute the shared tokens (WETH,
+ * USDC) that the same route uses elsewhere. Remove a kind here once its executor sims come back clean.
+ */
+const UNPROVEN_KINDS = new Set<string>(["univ4"]);
 
 const routeKeyOf = routeKey;
 
@@ -359,7 +367,7 @@ export class Scanner {
         this.learner.onFound(o, now);
         this.learner.onSim(o, now);
       }
-      if (o.sim === "executor-revert") this.recordFailure(o, block);
+      if (o.sim === "executor-revert" && !this.routeUnproven(o)) this.recordFailure(o, block);
       if (o.sim === "executor-ok" || o.sim === "quoter-ok") F.verified++;
       else if (o.sim === "executor-revert") F.reverted++;
       else if (o.sim === "quoter-mismatch") F.quoteMismatch++;
@@ -399,10 +407,10 @@ export class Scanner {
 
   /** Verify multi-hop / CL routes: RouteExecutor.simulate() when available, else each hop against its DEX's quoter. */
   private async verifyRoutes(opps: Opportunity[], tag: number | "pending"): Promise<void> {
-    // Routes touching a quote-only venue (e.g. PancakeSwap V3) can't be executed by the deployed
-    // RouteExecutor, so verify them against the DEXes' own quoters instead of the executor sim: that marks
-    // them quoter-ok (a genuine paper find) rather than executor-reverted (which would mute them), and the
-    // live path still won't send them because it requires an executor-ok simulation.
+    // A route touching a QUOTE_ONLY_KINDS venue can't be verified by the deployed RouteExecutor, so it is
+    // checked against the DEXes' own quoters (quoter-ok, a paper find) rather than the executor sim, and
+    // never live-sends. That set is currently empty — PancakeSwap V3 and Uniswap V4 now go through the
+    // executor sim — but the split is kept for the next venue added before its callback ships.
     const quoteOnly: Opportunity[] = [];
     const executable: Opportunity[] = [];
     for (const o of opps) (this.routeQuoteOnly(o) ? quoteOnly : executable).push(o);
@@ -412,10 +420,17 @@ export class Scanner {
     ]);
   }
 
-  /** A route the deployed RouteExecutor cannot trade (any hop is on a quote-only venue such as PancakeSwap V3). */
+  /** A route the deployed RouteExecutor cannot trade (any hop is on a QUOTE_ONLY_KINDS venue). */
   private routeQuoteOnly(o: Opportunity): boolean {
     if (!o.route) return false;
     return o.route.pools.some((a) => QUOTE_ONLY_KINDS.has(this.registry.pools.get(a)?.kind ?? ""));
+  }
+
+  /** A route on a still-unproven venue (e.g. Uniswap V4): executor-simmed, but an executor-revert must not
+   *  mute the shared tokens, since its on-chain execution hasn't been proven against the real contracts. */
+  private routeUnproven(o: Opportunity): boolean {
+    if (!o.route) return false;
+    return o.route.pools.some((a) => UNPROVEN_KINDS.has(this.registry.pools.get(a)?.kind ?? ""));
   }
 
   private async verifyRoutesVia(opps: Opportunity[], tag: number | "pending", mode: "executor" | "override" | "quoter"): Promise<void> {

@@ -1937,7 +1937,7 @@ details.optional[open] > summary { margin-bottom: 8px; }
     const params = new URLSearchParams();
     if (fresh) params.set("fresh", "1");
     if (W.account) params.set("addresses", W.account);
-    if (W.deployed && !S.state?.addresses?.routeExecutor) params.set("route", W.deployed);
+    if (routeDeployedNotInEnv() && (!S.state?.addresses?.routeExecutor || routeEnvOutdated())) params.set("route", W.deployed);
     if (W.deployedArb && !S.state?.addresses?.executor) params.set("arb", W.deployedArb);
     if (W.deployedLiq && !S.state?.addresses?.liqExecutor) params.set("liq", W.deployedLiq);
     api(`/api/wallet?${params}`).then((x) => {
@@ -2124,10 +2124,25 @@ details.optional[open] > summary { margin-bottom: 8px; }
     if (info.eth && BigInt(info.eth) > 0n) out.push(action(`${prefix}-wd-ETH`, { label: "Withdraw all ETH", confirm: () => `Withdraw ${fmtUnits(info.eth, 18)} ETH from the contract to your wallet ${shortAddr(W.account)}?`, run: txRun(addr, SEL.withdrawETH, "Withdrawn") }));
     return out;
   }
+  // True when the bot's own check found that ROUTE_EXECUTOR_ADDRESS holds an older build's RouteExecutor (or nothing),
+  // so the page offers a fresh deploy instead of treating the .env address as done.
+  function routeEnvOutdated() {
+    const envAddr = S.state?.addresses?.routeExecutor;
+    const rc = S.state?.safety?.live?.routeCheck;
+    return !!(envAddr && rc && rc.executor?.toLowerCase() === envAddr.toLowerCase() && !rc.codeMatches && !rc.problems?.some((p) => p.startsWith("Couldn't check")));
+  }
+  // The RouteExecutor deployed from this browser, when .env doesn't point at it yet.
+  function routeDeployedNotInEnv() {
+    const envAddr = S.state?.addresses?.routeExecutor;
+    return W.deployed && (!envAddr || W.deployed.toLowerCase() !== envAddr.toLowerCase()) ? W.deployed : null;
+  }
   function routeBlock() {
     const b = h("div", { class: "vblock" }, h("h3", null, "RouteExecutor"), h("p", { class: "sub" }, "For concentrated-liquidity and multi-hop routes. Deploy it, authorise the bot and add its address to .env to trade those live too (two-pool trades go through the ArbExecutor above). You own it; the bot's key can trade through it but never withdraw."));
     const envAddr = S.state?.addresses?.routeExecutor;
-    const addr = envAddr || W.deployed;
+    const outdated = routeEnvOutdated();
+    const pending = routeDeployedNotInEnv();
+    const addr = outdated ? pending : envAddr || W.deployed;
+    if (outdated) b.append(statusLine("warn", `ROUTE_EXECUTOR_ADDRESS in .env (${shortAddr(envAddr)}) isn't this version's RouteExecutor, so the bot won't send routes through it.${pending ? "" : " Deploy a new one below."}`));
     if (!addr) {
       const cb = S.contracts?.routeExecutor;
       b.append(action("deploy", {
@@ -2150,9 +2165,9 @@ details.optional[open] > summary { margin-bottom: 8px; }
     const info = S.wallet?.contracts?.routeExecutor;
     const isOwner = !!(W.account && info?.owner && info.owner.toLowerCase() === W.account.toLowerCase());
     b.append(contractRows(addr, info, true, isOwner));
-    if (W.deployed && !envAddr) {
-      const line = `ROUTE_EXECUTOR_ADDRESS=${W.deployed}`;
-      b.append(h("p", { class: "sub" }, "Authorise the bot wallet below, then add this line to .env and restart the bot to send CL and multi-hop routes live. The dashboard can't edit .env."), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
+    if (pending && (!envAddr || outdated)) {
+      const line = `ROUTE_EXECUTOR_ADDRESS=${pending}`;
+      b.append(h("p", { class: "sub" }, `Authorise the bot wallet below, then ${envAddr ? "replace the ROUTE_EXECUTOR_ADDRESS line in .env with this one" : "add this line to .env"} and restart the bot to send CL and multi-hop routes live. The dashboard can't edit .env.`), h("div", { class: "envline" }, h("span", null, line), copyBtn(line)));
     }
     if (info?.deployed && W.account && !isOwner) b.append(h("p", { class: "sub" }, "Only the owner can change it or withdraw. Connect the wallet that deployed it."));
     if (isOwner) {
